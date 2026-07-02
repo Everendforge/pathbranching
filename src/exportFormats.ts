@@ -38,6 +38,14 @@ export type SinpoGameDataExport = {
     branchRef?: string | null;
     inkKnot: string;
     canonRefs: string[];
+    canonRefDetails: Array<{
+      id: string;
+      kind?: string;
+      label?: string;
+      canonSourcePath?: string;
+      missingIdentity?: boolean;
+      identityWarning?: string;
+    }>;
     script?: EventNode["script"];
     decisions: Decision[];
     transitions: Transition[];
@@ -45,6 +53,7 @@ export type SinpoGameDataExport = {
     consequences?: Consequence[];
   }>;
   dataObjects: BranchingProject["projectDataObjects"];
+  canonEditSuggestions: BranchingProject["canonEditSuggestions"];
   variables: BranchingProject["variables"];
   canonRefs: BranchingProject["canonRefs"];
   pathBranching: {
@@ -138,6 +147,19 @@ export function exportInkProject(project: BranchingProject): InkProjectExport {
 }
 
 export function exportSinpoGameData(project: BranchingProject): SinpoGameDataExport {
+  const canonRefDetails = (ids: string[] | undefined) =>
+    (ids ?? [])
+      .map((id) => project.canonRefs.find((ref) => ref.id === id))
+      .filter(Boolean)
+      .map((ref) => ({
+        id: ref!.id,
+        kind: ref!.kind,
+        label: ref!.label,
+        canonSourcePath: ref!.canonSourcePath,
+        missingIdentity: ref!.missingIdentity,
+        identityWarning: ref!.identityWarning,
+      }));
+
   return {
     format: "sinpo-game-data",
     specVersion: "0.1",
@@ -165,6 +187,7 @@ export function exportSinpoGameData(project: BranchingProject): SinpoGameDataExp
       branchRef: event.branchRef,
       inkKnot: inkSafeId(event.id),
       canonRefs: event.canonRefs ?? [],
+      canonRefDetails: canonRefDetails(event.canonRefs),
       script: event.script,
       decisions: event.decisions ?? [],
       transitions: event.transitions ?? [],
@@ -172,6 +195,7 @@ export function exportSinpoGameData(project: BranchingProject): SinpoGameDataExp
       consequences: event.unlocks,
     })),
     dataObjects: project.projectDataObjects ?? [],
+    canonEditSuggestions: project.canonEditSuggestions ?? [],
     variables: project.variables,
     canonRefs: project.canonRefs,
     pathBranching: {

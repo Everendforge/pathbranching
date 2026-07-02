@@ -474,6 +474,26 @@ export function validateProject(project: BranchingProject): ValidationFinding[] 
     validateRuleSets(findings, projectRefs, canonIds, dataObject.id, `Data object "${dataObject.id}"`, dataObject.ruleSets);
   });
 
+  (project.canonEditSuggestions ?? []).forEach((suggestion) => {
+    validateCanonRef(findings, canonIds, suggestion.id, suggestion.canonRefId, `Canon edit suggestion "${suggestion.id}"`);
+    if (!suggestion.proposedContent && suggestion.status !== "dismissed") {
+      findings.push(
+        finding("missing_required_field", "warning", `Canon edit suggestion "${suggestion.id}" has no proposed content.`, {
+          id: suggestion.id,
+          ref: suggestion.canonRefId,
+        }),
+      );
+    }
+    if (suggestion.safety !== "worldnotion-review-required") {
+      findings.push(
+        finding("invalid_projection", "warning", `Canon edit suggestion "${suggestion.id}" must remain review-gated by WorldNotion.`, {
+          id: suggestion.id,
+          ref: suggestion.canonRefId,
+        }),
+      );
+    }
+  });
+
   (project.projectionRules ?? []).forEach((rule) => {
     if (rule.from.classId && !dataClassIds.has(rule.from.classId)) {
       findings.push(

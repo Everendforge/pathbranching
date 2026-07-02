@@ -3,8 +3,9 @@ import type { BranchingProject, RuntimePackage } from "./domain.js";
 import {
   loadPathBranchingWorkspace,
   pathBranchingMetadataPaths,
+  serializeModularStoryFiles,
   serializePathBranchingManifest,
-  serializePathBranchingStory,
+  storyPath,
   workingCopyPathForCanonRef,
   type PathBranchingWorkspace,
   type UniverseFile,
@@ -98,6 +99,34 @@ export async function openUniversePath(path: string): Promise<{
   };
 }
 
+export async function openUniverseStory(path: string, storyId: string): Promise<{
+  workspace: PathBranchingWorkspace;
+  path: string;
+  files: UniverseReadResult["files"];
+}> {
+  assertDesktopRuntime("Opening a universe story");
+  const payload = await invoke<UniverseReadResult>("read_universe_folder", { path });
+  const files = payload.files.map((file) => {
+    if (file.relativePath !== pathBranchingMetadataPaths.manifest) {
+      return file;
+    }
+    try {
+      const manifest = JSON.parse(file.content) as { activeStoryId?: string; stories?: unknown[] };
+      return {
+        ...file,
+        content: `${JSON.stringify({ ...manifest, activeStoryId: storyId }, null, 2)}\n`,
+      };
+    } catch {
+      return file;
+    }
+  });
+  return {
+    workspace: loadPathBranchingWorkspace(files),
+    path: payload.rootPath,
+    files,
+  };
+}
+
 export async function openProjectPath(path: string): Promise<{ project: BranchingProject; path: string; modifiedMs?: number }> {
   assertDesktopRuntime("Opening a recent local project");
   const payload = await invoke<ProjectFilePayload>("read_project_file", { path });
@@ -117,7 +146,7 @@ export async function saveProjectFile(path: string, project: BranchingProject, e
   });
 }
 
-async function saveUniverseTextFile(
+export async function saveUniverseTextFile(
   universePath: string,
   relativePath: string,
   content: string,
@@ -142,23 +171,43 @@ export async function saveUniverseStory(
   if (!story) {
     throw new Error("No active PathBranching story is available for this universe.");
   }
-  const storyResult = await saveUniverseTextFile(
-    universePath,
-    story.path,
-    serializePathBranchingStory({
+  const normalizedStory = {
+    ...story,
+    path: storyPath(story.id),
+  };
+  const storyFiles = serializeModularStoryFiles(
+    {
       ...project,
       storyId: story.id,
       universeRootPath: universePath,
-    }),
-    expectedModifiedMs,
+      name: project.name ?? story.name,
+    },
+    normalizedStory,
   );
+  let storyResult: WriteResult | undefined;
+  for (const file of storyFiles) {
+    const result = await saveUniverseTextFile(
+      universePath,
+      file.relativePath,
+      file.content,
+      file.relativePath === normalizedStory.path ? expectedModifiedMs : undefined,
+    );
+    if (!result.ok) return result;
+    if (file.relativePath === normalizedStory.path) {
+      storyResult = result;
+    }
+  }
+  if (!storyResult) {
+    throw new Error("No PathBranching story metadata file was produced for saving.");
+  }
   if (!storyResult.ok) return storyResult;
 
   const manifest = {
     ...workspace.manifest,
-    activeStoryId: story.id,
+    version: "0.2" as const,
+    activeStoryId: normalizedStory.id,
     stories: workspace.manifest.stories.map((item) =>
-      item.id === story.id ? { ...item, updatedAt: new Date().toISOString() } : item,
+      item.id === story.id ? { ...item, path: normalizedStory.path, updatedAt: new Date().toISOString() } : item,
     ),
   };
   const manifestResult = await saveUniverseTextFile(
@@ -169,11 +218,22 @@ export async function saveUniverseStory(
   if (!manifestResult.ok) return manifestResult;
   return {
     ...storyResult,
-    storyPath: story.path,
+    storyPath: normalizedStory.path,
     storyModifiedMs: storyResult.modifiedMs,
     manifest,
     manifestModifiedMs: manifestResult.modifiedMs,
   };
+}
+
+export async function saveUniverseManifest(
+  universePath: string,
+  manifest: PathBranchingWorkspace["manifest"],
+): Promise<WriteResult> {
+  return saveUniverseTextFile(
+    universePath,
+    pathBranchingMetadataPaths.manifest,
+    serializePathBranchingManifest(manifest),
+  );
 }
 
 export async function saveWorkingCopy(

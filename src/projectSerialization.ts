@@ -1,4 +1,4 @@
-import type { BranchingProject, EventCategoryDefinition } from "./domain.js";
+import type { BranchingProject, DataClassDefinition, EventCategoryDefinition } from "./domain.js";
 
 export function projectFileName(path: string | undefined) {
   if (!path) {
@@ -10,6 +10,64 @@ export function projectFileName(path: string | undefined) {
 export const DEFAULT_EVENT_CATEGORIES: EventCategoryDefinition[] = [
   { id: "normal", label: "Event" },
   { id: "final", label: "Final", terminal: true },
+];
+
+export const DEFAULT_DATA_CLASSES: DataClassDefinition[] = [
+  {
+    id: "class:KnowledgeEntry",
+    label: "Knowledge Entry",
+    category: "canonProjection",
+    roles: ["knowledge", "unlockable", "runtime"],
+    fields: [
+      { name: "title", type: "text", label: "Title", required: true },
+      { name: "body", type: "text", label: "Body" },
+      { name: "sourceRef", type: "canonRef", label: "Canon Source" },
+      { name: "unlockedByDefault", type: "boolean", label: "Unlocked By Default", defaultValue: false },
+    ],
+  },
+  {
+    id: "class:Speaker",
+    label: "Speaker",
+    category: "narrative",
+    roles: ["speaker", "presentation"],
+    fields: [
+      { name: "displayName", type: "text", label: "Display Name", required: true },
+      { name: "canonRef", type: "canonRef", label: "Canon Source" },
+      { name: "voice", type: "text", label: "Voice" },
+    ],
+  },
+  {
+    id: "class:RuntimeItem",
+    label: "Runtime Item",
+    category: "runtime",
+    roles: ["condition", "inventory", "runtime"],
+    fields: [
+      { name: "displayName", type: "text", label: "Display Name", required: true },
+      { name: "itemId", type: "text", label: "Runtime Item ID", required: true },
+      { name: "startsOwned", type: "boolean", label: "Starts Owned", defaultValue: false },
+    ],
+  },
+  {
+    id: "class:SceneSetting",
+    label: "Scene Setting",
+    category: "narrative",
+    roles: ["scene", "presentation"],
+    fields: [
+      { name: "title", type: "text", label: "Title", required: true },
+      { name: "canonRef", type: "canonRef", label: "Canon Source" },
+      { name: "description", type: "text", label: "Description" },
+    ],
+  },
+  {
+    id: "class:QuestFlag",
+    label: "Quest Flag",
+    category: "runtime",
+    roles: ["condition", "state", "runtime"],
+    fields: [
+      { name: "flag", type: "text", label: "Flag", required: true },
+      { name: "initialValue", type: "boolean", label: "Initial Value", defaultValue: false },
+    ],
+  },
 ];
 
 function labelFromCategoryId(id: string) {
@@ -39,6 +97,19 @@ function normalizeEventCategories(project: BranchingProject): EventCategoryDefin
   return Array.from(categories.values());
 }
 
+function normalizeDataClasses(project: BranchingProject): DataClassDefinition[] {
+  const classes = new Map<string, DataClassDefinition>();
+  DEFAULT_DATA_CLASSES.forEach((dataClass) => classes.set(dataClass.id, dataClass));
+  (project.dataClasses ?? []).forEach((dataClass) => {
+    if (!dataClass.id) return;
+    classes.set(dataClass.id, {
+      ...dataClass,
+      fields: dataClass.fields ?? [],
+    });
+  });
+  return Array.from(classes.values());
+}
+
 export function normalizeProject(project: BranchingProject): BranchingProject {
   const entrySequenceId = project.entrySequenceId ?? project.sequences[0]?.id;
   const activeSequenceId = project.canvas?.activeSequenceId ?? entrySequenceId ?? project.sequences[0]?.id;
@@ -46,8 +117,9 @@ export function normalizeProject(project: BranchingProject): BranchingProject {
   return {
     ...project,
     specVersion: project.specVersion ?? "0.1",
-    dataClasses: project.dataClasses ?? [],
+    dataClasses: normalizeDataClasses(project),
     projectDataObjects: project.projectDataObjects ?? [],
+    canonEditSuggestions: project.canonEditSuggestions ?? [],
     projectionRules: project.projectionRules ?? [],
     graphModules: project.graphModules ?? [],
     panels: {

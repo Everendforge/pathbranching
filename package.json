@@ -9,6 +9,8 @@
     "build": "npm run typecheck && node scripts/run-vite.mjs build",
     "typecheck": "node scripts/run-tsc.mjs --noEmit",
     "build:core": "node scripts/run-tsc.mjs -p tsconfig.build.json",
+    "verify:core": "npm run build:core && node scripts/verify-core.mjs && node scripts/verify-workspace-persistence.mjs",
+    "verify:persistence": "npm run build:core && node scripts/verify-workspace-persistence.mjs",
     "demo:bridge": "npm run build:core && node scripts/demo-worldnotion-bridge.mjs",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",

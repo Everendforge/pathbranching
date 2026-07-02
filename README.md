@@ -10,12 +10,31 @@ This repository currently contains design documentation, runtime examples, a Typ
 
 The near-term export target is the SINPO-style Unity ecosystem: Ink-centered narrative output plus GameData-compatible runtime structures. Longer term, PathBranching should support additional narrative exports such as Twine and other engine/story formats without making those formats the authoring source of truth.
 
+## V1 Authoring Contract
+
+PathBranching v1 treats `BranchingProject` as the document source of truth. React Flow nodes, panel sizes, focus mode, preview drawers, and workspace sessions are authoring UI state; engine exports must be generated from the document model and must not depend on canvas layout.
+
+The first complete authoring loop is:
+
+1. Open a WorldNotion universe folder.
+2. Preview canon read-only and create PathBranching data objects from selected canon refs when needed.
+3. Reference WorldNotion files dynamically from events through stable canon refs; PathBranching refreshes labels, paths, warnings, and preview metadata from the current universe index.
+4. Create safe WorldNotion edit suggestions from PathBranching when story authoring exposes canon changes. Suggestions are stored in the PathBranching story and remain `worldnotion-review-required`; they do not overwrite source Markdown.
+5. Author a sequence as a branching map with Start, Event, Branch, and Final nodes.
+6. Edit event text, decisions, outcomes, conditions, consequences, rule sets, Ink refs, and project data.
+7. Save the story under `.everend/.pathbranching/stories`.
+8. Export Runtime JSON, Ink, or SINPO GameData from the same `BranchingProject`.
+
+Twine/Twee/Harlowe/SugarCube remain planned format projections. They should not become alternate authoring sources before the SINPO/Ink/GameData pipeline is stable.
+
 ## Development
 
 ~~~bash
 npm install
 npm run typecheck
 npm run build
+npm run verify:core
+npm run verify:persistence
 ~~~
 
 ## Desktop Shell

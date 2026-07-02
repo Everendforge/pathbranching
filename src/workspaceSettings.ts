@@ -1,0 +1,123 @@
+import { normalizeThemeId, type ThemeId } from "./themes.js";
+import type { AppView, CanvasMode, MarkdownEditorTab, Selection } from "./appTypes.js";
+
+export const SETTINGS_KEY = "pathbranching.settings.v1";
+export const DEFAULT_PANEL_WIDTH = 282;
+export const MIN_PANEL_WIDTH = 220;
+export const MAX_PANEL_WIDTH = 420;
+export const COLLAPSED_RAIL_WIDTH = 36;
+export const NEW_SEQUENCE_SELECT_VALUE = "__new_sequence__";
+
+export type PathBranchingWorkspaceSession = {
+  view?: AppView;
+  selection?: Selection;
+  canonOpen?: boolean;
+  filesOpen?: boolean;
+  canonWidth?: number;
+  storiesWidth?: number;
+  exportOpen?: boolean;
+  dataOpen?: boolean;
+  canvasMode?: CanvasMode;
+  focusNodeId?: string;
+  markdownTabs?: MarkdownEditorTab[];
+  activeMarkdownTabId?: string;
+};
+
+export type AppSettings = {
+  theme: ThemeId;
+  recentProjects: string[];
+  lastOpenedProject?: string;
+  lastView?: AppView;
+  workspaceSessions?: Record<string, PathBranchingWorkspaceSession>;
+};
+
+export function loadSettings(): AppSettings {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "{}") as Partial<AppSettings>;
+    const workspaceSessions =
+      parsed.workspaceSessions && typeof parsed.workspaceSessions === "object" ? parsed.workspaceSessions : {};
+    return {
+      theme: normalizeThemeId(parsed.theme),
+      recentProjects: Array.isArray(parsed.recentProjects)
+        ? parsed.recentProjects.filter((item): item is string => typeof item === "string")
+        : [],
+      lastOpenedProject: typeof parsed.lastOpenedProject === "string" ? parsed.lastOpenedProject : undefined,
+      lastView: parsed.lastView === "workspace" || parsed.lastView === "home" ? parsed.lastView : "home",
+      workspaceSessions,
+    };
+  } catch {
+    return { theme: "worldnotion-light", recentProjects: [], lastView: "home", workspaceSessions: {} };
+  }
+}
+
+export function saveSettings(settings: AppSettings) {
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+}
+
+export function clampPanelWidth(value: unknown) {
+  const numericValue = typeof value === "number" && Number.isFinite(value) ? value : DEFAULT_PANEL_WIDTH;
+  return Math.min(MAX_PANEL_WIDTH, Math.max(MIN_PANEL_WIDTH, Math.round(numericValue)));
+}
+
+export function rememberRecentProject(settings: AppSettings, path: string): AppSettings {
+  return {
+    ...settings,
+    lastOpenedProject: path,
+    recentProjects: [path, ...settings.recentProjects.filter((candidate) => candidate !== path)].slice(0, 8),
+    workspaceSessions: settings.workspaceSessions ?? {},
+  };
+}
+
+export function storableMarkdownTabs(tabs: MarkdownEditorTab[]): MarkdownEditorTab[] {
+  return tabs.map((tab) => ({ ...tab, saving: false })).slice(-5);
+}
+
+export function isSelection(value: unknown): value is Selection {
+  if (!value || typeof value !== "object" || !("type" in value) || !("id" in value)) return false;
+  const selection = value as { type?: unknown; id?: unknown };
+  return (
+    typeof selection.id === "string" &&
+    (selection.type === "node" ||
+      selection.type === "edge" ||
+      selection.type === "canon" ||
+      selection.type === "file" ||
+      selection.type === "dataObject" ||
+      selection.type === "canonSuggestion")
+  );
+}
+
+export function sessionMarkdownTabs(value: unknown): MarkdownEditorTab[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((tab): tab is MarkdownEditorTab => {
+      return (
+        tab &&
+        typeof tab === "object" &&
+        typeof tab.id === "string" &&
+        typeof tab.canonRefId === "string" &&
+        typeof tab.title === "string" &&
+        typeof tab.content === "string" &&
+        (tab.format === "markdown" || tab.format === "ink" || tab.format === "gameData" || tab.format === "frontmatter")
+      );
+    })
+    .map((tab) => ({ ...tab, saving: false }))
+    .slice(-5);
+}
+
+export function normalizeWorkspaceSession(session: PathBranchingWorkspaceSession | undefined): PathBranchingWorkspaceSession {
+  if (!session) return {};
+  return {
+    view: session.view === "home" || session.view === "workspace" ? session.view : undefined,
+    selection: isSelection(session.selection) ? session.selection : undefined,
+    canonOpen: typeof session.canonOpen === "boolean" ? session.canonOpen : undefined,
+    filesOpen: typeof session.filesOpen === "boolean" ? session.filesOpen : undefined,
+    canonWidth: session.canonWidth === undefined ? undefined : clampPanelWidth(session.canonWidth),
+    storiesWidth: session.storiesWidth === undefined ? undefined : clampPanelWidth(session.storiesWidth),
+    exportOpen: typeof session.exportOpen === "boolean" ? session.exportOpen : undefined,
+    dataOpen: typeof session.dataOpen === "boolean" ? session.dataOpen : undefined,
+    canvasMode: session.canvasMode === "branching" || session.canvasMode === "focus" ? session.canvasMode : undefined,
+    focusNodeId: typeof session.focusNodeId === "string" ? session.focusNodeId : undefined,
+    markdownTabs: sessionMarkdownTabs(session.markdownTabs),
+    activeMarkdownTabId: typeof session.activeMarkdownTabId === "string" ? session.activeMarkdownTabId : undefined,
+  };
+}

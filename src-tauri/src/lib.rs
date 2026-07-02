@@ -67,12 +67,12 @@ fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         true,
         &[
             &menu_item(app, "pb:file:open", "Open Universe...", Some("CmdOrCtrl+O"))?,
-            &menu_item(app, "pb:file:save", "Save", Some("CmdOrCtrl+S"))?,
+            &menu_item(app, "pb:file:save", "Save", None)?,
             &menu_item(
                 app,
                 "pb:file:save-as",
                 "Save Into Universe...",
-                Some("CmdOrCtrl+Shift+S"),
+                None,
             )?,
             &PredefinedMenuItem::separator(app)?,
             &menu_item(

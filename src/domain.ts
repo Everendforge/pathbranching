@@ -14,6 +14,29 @@ export type CanonRef = {
   workingCopyPath?: string;
 };
 
+export type CanonEditSuggestionStatus =
+  | "draft"
+  | "proposed"
+  | "sent-to-worldnotion"
+  | "applied-in-worldnotion"
+  | "dismissed"
+  | string;
+
+export type CanonEditSuggestion = {
+  id: string;
+  canonRefId: string;
+  targetPath?: string;
+  title: string;
+  summary?: string;
+  proposedContent: string;
+  status: CanonEditSuggestionStatus;
+  sourceEventId?: string;
+  sourceDataObjectId?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  safety: "worldnotion-review-required" | string;
+};
+
 export type ScriptRef = {
   id: string;
   format: "ink" | string;
@@ -376,6 +399,7 @@ export type BranchingProject = {
   };
   dataClasses?: DataClassDefinition[];
   projectDataObjects?: ProjectDataObject[];
+  canonEditSuggestions?: CanonEditSuggestion[];
   projectionRules?: ProjectionRule[];
   graphModules?: GraphModuleDefinition[];
   canvas?: CanvasAuthoringState;

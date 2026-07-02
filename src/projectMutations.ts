@@ -1,8 +1,10 @@
 import type {
   Branch,
   BranchingProject,
+  CanonEditSuggestion,
   ConditionInput,
   Consequence,
+  DataFieldDefinition,
   Decision,
   EventNode,
   EventType,
@@ -16,7 +18,8 @@ import { conditionInputsFromConsequences, walkConditions } from "./logic.js";
 export type MutationSelection =
   | { type: "node"; id: string }
   | { type: "edge"; id: string }
-  | { type: "dataObject"; id: string };
+  | { type: "dataObject"; id: string }
+  | { type: "canonSuggestion"; id: string };
 
 export type MutationResult = {
   project: BranchingProject;
@@ -81,8 +84,9 @@ export function setEntrySequence(project: BranchingProject, id: string): Mutatio
   };
 }
 
-export function createSequence(project: BranchingProject): MutationResult {
-  const sequenceId = uniqueId("sequence:new-route", project.sequences.map((sequence) => sequence.id));
+export function createSequence(project: BranchingProject, name = "New Sequence"): MutationResult {
+  const trimmedName = name.trim() || "New Sequence";
+  const sequenceId = uniqueId(`sequence:${slugify(trimmedName) || "new-route"}`, project.sequences.map((sequence) => sequence.id));
   const eventId = uniqueId(`event:${sequenceId}:entry`, project.events.map((event) => event.id));
   const newEvent: EventNode = {
     id: eventId,
@@ -94,7 +98,7 @@ export function createSequence(project: BranchingProject): MutationResult {
   };
   const newSequence: Sequence = {
     id: sequenceId,
-    name: "New Sequence",
+    name: trimmedName,
     entryEventId: eventId,
     eventIds: [eventId],
     branchIds: [],
@@ -406,7 +410,133 @@ export function deleteDataObject(project: BranchingProject, id: string): Mutatio
   };
 }
 
+export function createCanonEditSuggestion(
+  project: BranchingProject,
+  canonRefId: string,
+  source?: { eventId?: string; dataObjectId?: string },
+): MutationResult {
+  const canonRef = project.canonRefs.find((ref) => ref.id === canonRefId);
+  if (!canonRef) {
+    return { project, message: "Canon ref not found." };
+  }
+
+  const now = new Date().toISOString();
+  const suggestionId = uniqueId(
+    `suggestion:${slugify(canonRef.id)}`,
+    (project.canonEditSuggestions ?? []).map((suggestion) => suggestion.id),
+  );
+  const suggestion: CanonEditSuggestion = {
+    id: suggestionId,
+    canonRefId: canonRef.id,
+    targetPath: canonRef.canonSourcePath,
+    title: `Suggestion for ${canonRef.label ?? canonRef.id}`,
+    summary: source?.eventId ? `Suggested while authoring event ${source.eventId}.` : "Suggested from PathBranching.",
+    proposedContent: canonRef.preview ?? "",
+    status: "draft",
+    sourceEventId: source?.eventId,
+    sourceDataObjectId: source?.dataObjectId,
+    createdAt: now,
+    updatedAt: now,
+    safety: "worldnotion-review-required",
+  };
+
+  return {
+    project: {
+      ...project,
+      canonEditSuggestions: [...(project.canonEditSuggestions ?? []), suggestion],
+    },
+    selection: { type: "canonSuggestion", id: suggestionId },
+    message: "Created a safe WorldNotion edit suggestion in PathBranching.",
+  };
+}
+
+export function updateCanonEditSuggestion(
+  project: BranchingProject,
+  id: string,
+  updates: Partial<CanonEditSuggestion>,
+): MutationResult {
+  return {
+    project: {
+      ...project,
+      canonEditSuggestions: (project.canonEditSuggestions ?? []).map((suggestion) =>
+        suggestion.id === id ? { ...suggestion, ...updates, updatedAt: new Date().toISOString() } : suggestion,
+      ),
+    },
+  };
+}
+
+export function deleteCanonEditSuggestion(project: BranchingProject, id: string): MutationResult {
+  return {
+    project: {
+      ...project,
+      canonEditSuggestions: (project.canonEditSuggestions ?? []).filter((suggestion) => suggestion.id !== id),
+    },
+  };
+}
+
+function defaultFieldValue(field: DataFieldDefinition, canonRefId?: string) {
+  if (field.defaultValue !== undefined) {
+    return field.defaultValue;
+  }
+  if (field.type === "boolean") {
+    return false;
+  }
+  if (field.type === "number") {
+    return 0;
+  }
+  if (field.type === "canonRef") {
+    return canonRefId ?? "";
+  }
+  if (field.type === "canonRefList") {
+    return canonRefId ? [canonRefId] : [];
+  }
+  if (field.type === "multiSelect" || field.type === "dataRefList") {
+    return [];
+  }
+  return "";
+}
+
+export function createDataObject(project: BranchingProject, classId?: string, canonRefId?: string): MutationResult {
+  const dataClass = project.dataClasses?.find((definition) => definition.id === classId) ?? project.dataClasses?.[0];
+  if (!dataClass) {
+    return { project, message: "Create a data class before adding project data." };
+  }
+
+  const canonRef = canonRefId ? project.canonRefs.find((ref) => ref.id === canonRefId) : undefined;
+  const label = canonRef?.label ?? canonRef?.id ?? dataClass.label;
+  const baseId = `data:${slugify(dataClass.label || dataClass.id)}:${slugify(label || "object") || "object"}`;
+  const objectId = uniqueId(baseId, (project.projectDataObjects ?? []).map((object) => object.id));
+  const fields = Object.fromEntries(
+    dataClass.fields.map((field) => [
+      field.name,
+      field.name === "title" || field.name === "displayName" ? label : defaultFieldValue(field, canonRef?.id),
+    ]),
+  );
+
+  const newObject: ProjectDataObject = {
+    id: objectId,
+    classId: dataClass.id,
+    name: label,
+    canonRefs: canonRef ? [canonRef.id] : [],
+    fields,
+    tags: canonRef ? ["canon-derived"] : ["manual"],
+    scope: { global: true },
+  };
+
+  return {
+    project: {
+      ...project,
+      projectDataObjects: [...(project.projectDataObjects ?? []), newObject],
+    },
+    selection: { type: "dataObject", id: objectId },
+  };
+}
+
 export function createKnowledgeObject(project: BranchingProject, canonRefId?: string): MutationResult {
+  if (project.dataClasses?.some((dataClass) => dataClass.id === "class:KnowledgeEntry")) {
+    return createDataObject(project, "class:KnowledgeEntry", canonRefId);
+  }
+
   const selectedCanonRef = canonRefId ? project.canonRefs.find((canonRef) => canonRef.id === canonRefId) : undefined;
   const safeBase = (selectedCanonRef?.id ?? `manual-${(project.projectDataObjects?.length ?? 0) + 1}`)
     .replace(/[^a-zA-Z0-9:_-]/g, "-")

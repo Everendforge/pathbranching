@@ -380,7 +380,7 @@ button:disabled {
 
 .home-actions button,
 .active-project-card,
-.recent-list button {
+.recent-row button {
   border-color: var(--wn-border);
   background: var(--wn-panel);
   color: var(--wn-text);
@@ -396,18 +396,18 @@ button:disabled {
 
 .home-actions button:hover,
 .active-project-card:hover,
-.recent-list button:hover {
+.recent-row button:hover {
   border-color: var(--wn-accent);
   background: var(--wn-accent-soft);
 }
 
-.recent-list button.missing {
+.recent-row.missing button {
   border-color: color-mix(in srgb, var(--wn-warning) 45%, var(--wn-border));
   background: color-mix(in srgb, var(--wn-warning) 8%, var(--wn-panel));
 }
 
-.recent-list button.missing small,
-.recent-list button.missing > span:last-child {
+.recent-row.missing small,
+.recent-row.missing .recent-remove-button {
   color: var(--wn-warning);
 }
 
@@ -430,7 +430,7 @@ button:disabled {
 }
 
 .active-project-card span:nth-child(2),
-.recent-list button > span:nth-child(2) {
+.recent-open-button > span:nth-child(2) {
   display: grid;
   min-width: 0;
 }
@@ -505,16 +505,29 @@ button:disabled {
   gap: 8px;
 }
 
-.recent-list button {
+.recent-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px;
+  gap: 6px;
+  opacity: 0;
+  animation: home-card-in 360ms ease-out both;
+}
+
+.recent-open-button {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 11px;
   min-height: 58px;
   padding: 9px 10px;
-  opacity: 0;
   text-align: left;
-  animation: home-card-in 360ms ease-out both;
+}
+
+.recent-remove-button {
+  display: grid;
+  place-items: center;
+  min-height: 58px;
+  padding: 0;
 }
 
 .recent-icon {
@@ -1091,6 +1104,23 @@ button:disabled {
   padding: 0 8px;
 }
 
+.story-management-toolbar {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.toolbar-button-row {
+  display: flex;
+  gap: 4px;
+}
+
+.toolbar-button-row button {
+  display: grid;
+  width: 28px;
+  min-width: 28px;
+  place-items: center;
+  padding: 0;
+}
+
 .stories-sequence-toolbar p {
   grid-column: 1 / -1;
   margin: 0;
@@ -1445,6 +1475,21 @@ button:disabled {
 .canon-ref-chips button:hover {
   border-color: var(--wn-danger);
   color: var(--wn-danger);
+}
+
+.canon-context-list .stack-list {
+  gap: 8px;
+}
+
+.canon-context-card {
+  gap: 6px;
+}
+
+.canon-context-card p {
+  margin: 0;
+  color: var(--wn-muted);
+  font-size: 0.72rem;
+  line-height: 1.45;
 }
 
 .canvas-shell {
@@ -2607,6 +2652,15 @@ button:disabled {
   color: var(--wn-accent);
   border-color: color-mix(in srgb, var(--wn-accent) 45%, var(--wn-border));
   background: var(--wn-accent-soft);
+}
+
+.persistence-warning {
+  border-bottom: 1px solid color-mix(in srgb, var(--wn-warning) 45%, var(--wn-border));
+  background: color-mix(in srgb, var(--wn-warning) 12%, var(--wn-panel));
+  color: var(--wn-text);
+  font-size: 12px;
+  line-height: 1.35;
+  padding: 7px 12px;
 }
 
 .loading-state,

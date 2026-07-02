@@ -9,14 +9,16 @@ import {
   type Connection,
   type EdgeChange,
   type NodeChange,
-  type NodeProps,
-  type NodeTypes,
   type OnConnect,
   type ReactFlowInstance,
-  Handle,
-  Position,
 } from "@xyflow/react";
 import { listen } from "@tauri-apps/api/event";
+import { canonMarkdownDraft, markdownFormatTemplate } from "./canonWorkingCopy.js";
+import { DataDrawer } from "./components/DataDrawer.js";
+import { MarkdownEditorDock } from "./components/MarkdownEditorDock.js";
+import { nodeTypes } from "./components/StoryNode.js";
+import { Topbar } from "./components/Topbar.js";
+import { UniverseIconFrame } from "./components/UniverseIconFrame.js";
 import {
   ArrowLeft,
   Crown,
@@ -33,6 +35,8 @@ import {
   SearchCheck,
   Settings,
   Sun,
+  Pencil,
+  Trash2,
   X,
 } from "lucide-react";
 import {
@@ -50,6 +54,7 @@ import {
 import type {
   Branch,
   BranchingProject,
+  CanonEditSuggestion,
   CanonRef,
   ConditionInput,
   Consequence,
@@ -65,19 +70,25 @@ import type {
   Transition,
   ValidationFinding,
 } from "./domain.js";
-import { exportRuntimePackage } from "./exportRuntime.js";
-import { exportInkProject, exportSinpoGameData } from "./exportFormats.js";
-import { conditionCount, conditionLabels, consequenceLabel } from "./logic.js";
+import type { AppView, CanvasMode, MarkdownDraftFormat, MarkdownEditorTab, Selection } from "./appTypes.js";
+import {
+  createBranchingStory,
+  deleteBranchingStory,
+  renameBranchingStory,
+  saveBranchingDocument,
+} from "./documentController.js";
+import { buildExportPreview, type ExportPreviewMode } from "./exportPreview.js";
+import { conditionCount, conditionLabels, consequenceLabel, isConditionSet } from "./logic.js";
 import * as mutations from "./projectMutations.js";
 import {
   exportRuntimeDialog,
   normalizeProject,
   openUniverseDialog,
   openUniversePath,
+  openUniverseStory,
   projectFileName,
   exportTextDialog,
   saveWorkingCopy,
-  saveUniverseStory,
   type ProjectFileState,
 } from "./projectPersistence.js";
 import { workingCopyPathForCanonRef, type PathBranchingWorkspace, type UniverseProfile } from "./pathBranchingWorkspace.js";
@@ -91,6 +102,20 @@ import {
   type ThemeFamily,
   type ThemeId,
 } from "./themes.js";
+import { activeSequenceId, findBranch, findEvent, findSequence } from "./storySelection.js";
+import {
+  COLLAPSED_RAIL_WIDTH,
+  DEFAULT_PANEL_WIDTH,
+  NEW_SEQUENCE_SELECT_VALUE,
+  clampPanelWidth,
+  loadSettings,
+  normalizeWorkspaceSession,
+  rememberRecentProject,
+  saveSettings,
+  storableMarkdownTabs,
+  type AppSettings,
+  type PathBranchingWorkspaceSession,
+} from "./workspaceSettings.js";
 import { validateProject } from "./validate.js";
 import {
   buildStoryCanvasModel,
@@ -102,238 +127,6 @@ import {
   type StoryCanvasNodeData,
 } from "./canvas/storyCanvasModel.js";
 import { isTauriRuntime, shortcutMatches } from "./utils/appEnvironment.js";
-
-type Selection =
-  | { type: "node"; id: string }
-  | { type: "edge"; id: string }
-  | { type: "canon"; id: string }
-  | { type: "file"; id: string }
-  | { type: "dataObject"; id: string };
-
-type CanvasMode = "branching" | "focus";
-type AppView = "home" | "workspace";
-type ExportPreviewMode = "runtime" | "ink" | "gameData";
-type MarkdownDraftFormat = "markdown" | "ink" | "gameData" | "frontmatter";
-
-type MarkdownEditorTab = {
-  id: string;
-  canonRefId: string;
-  title: string;
-  sourcePath?: string;
-  workingCopyPath?: string;
-  format: MarkdownDraftFormat;
-  content: string;
-  dirty: boolean;
-  saving?: boolean;
-  lastSavedAt?: number;
-  modifiedMs?: number;
-};
-
-const SETTINGS_KEY = "pathbranching.settings.v1";
-const DEFAULT_PANEL_WIDTH = 282;
-const MIN_PANEL_WIDTH = 220;
-const MAX_PANEL_WIDTH = 420;
-const COLLAPSED_RAIL_WIDTH = 36;
-const NEW_SEQUENCE_SELECT_VALUE = "__new_sequence__";
-
-type PathBranchingWorkspaceSession = {
-  view?: AppView;
-  selection?: Selection;
-  canonOpen?: boolean;
-  filesOpen?: boolean;
-  canonWidth?: number;
-  storiesWidth?: number;
-  exportOpen?: boolean;
-  dataOpen?: boolean;
-  canvasMode?: CanvasMode;
-  focusNodeId?: string;
-  markdownTabs?: MarkdownEditorTab[];
-  activeMarkdownTabId?: string;
-};
-
-const MARKDOWN_FORMAT_LABELS: Record<MarkdownDraftFormat, string> = {
-  markdown: "Markdown",
-  ink: "Ink Beat",
-  gameData: "GameData",
-  frontmatter: "Frontmatter",
-};
-
-function canonMarkdownDraft(ref: CanonRef): string {
-  const title = ref.label ?? ref.id;
-  const lines = [
-    `# ${title}`,
-    "",
-    `> Canon source: ${ref.canonSourcePath ?? ref.id}`,
-    "",
-    ref.preview?.trim() ?? "",
-  ];
-  return `${lines.filter((line, index) => index < 4 || line.length > 0).join("\n")}\n`;
-}
-
-function markdownFormatTemplate(format: MarkdownDraftFormat, ref: CanonRef): string {
-  const title = ref.label ?? ref.id;
-  switch (format) {
-    case "ink":
-      return `# ${title}\n\n## Ink Beat\n\n\`\`\`ink\n=== ${ref.id.replace(/[^a-zA-Z0-9_]+/g, "_")} ===\n${title}\n+ [Continue]\n  -> DONE\n\`\`\`\n`;
-    case "gameData":
-      return `# ${title}\n\n## GameData Note\n\n\`\`\`json\n{\n  "canonRef": "${ref.id}",\n  "source": "${ref.canonSourcePath ?? ""}",\n  "tags": []\n}\n\`\`\`\n`;
-    case "frontmatter":
-      return `---\ncanonRef: ${ref.id}\ncanonSourcePath: ${ref.canonSourcePath ?? ""}\nformat: pathbranching-working-copy\n---\n\n# ${title}\n\n`;
-    case "markdown":
-    default:
-      return canonMarkdownDraft(ref);
-  }
-}
-
-type AppSettings = {
-  theme: ThemeId;
-  recentProjects: string[];
-  lastOpenedProject?: string;
-  lastView?: AppView;
-  workspaceSessions?: Record<string, PathBranchingWorkspaceSession>;
-};
-
-function loadSettings(): AppSettings {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "{}") as Partial<AppSettings>;
-    const workspaceSessions =
-      parsed.workspaceSessions && typeof parsed.workspaceSessions === "object" ? parsed.workspaceSessions : {};
-    return {
-      theme: normalizeThemeId(parsed.theme),
-      recentProjects: Array.isArray(parsed.recentProjects)
-        ? parsed.recentProjects.filter((item): item is string => typeof item === "string")
-        : [],
-      lastOpenedProject: typeof parsed.lastOpenedProject === "string" ? parsed.lastOpenedProject : undefined,
-      lastView: parsed.lastView === "workspace" || parsed.lastView === "home" ? parsed.lastView : "home",
-      workspaceSessions,
-    };
-  } catch {
-    return { theme: "worldnotion-light", recentProjects: [], lastView: "home", workspaceSessions: {} };
-  }
-}
-
-function saveSettings(settings: AppSettings) {
-  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
-}
-
-function badgeText(value: string) {
-  return value.length > 22 ? `${value.slice(0, 19)}...` : value;
-}
-
-function clampPanelWidth(value: unknown) {
-  const numericValue = typeof value === "number" && Number.isFinite(value) ? value : DEFAULT_PANEL_WIDTH;
-  return Math.min(MAX_PANEL_WIDTH, Math.max(MIN_PANEL_WIDTH, Math.round(numericValue)));
-}
-
-function rememberRecentProject(settings: AppSettings, path: string): AppSettings {
-  return {
-    ...settings,
-    lastOpenedProject: path,
-    recentProjects: [path, ...settings.recentProjects.filter((candidate) => candidate !== path)].slice(0, 8),
-    workspaceSessions: settings.workspaceSessions ?? {},
-  };
-}
-
-function storableMarkdownTabs(tabs: MarkdownEditorTab[]): MarkdownEditorTab[] {
-  return tabs.map((tab) => ({ ...tab, saving: false })).slice(-5);
-}
-
-function isSelection(value: unknown): value is Selection {
-  if (!value || typeof value !== "object" || !("type" in value) || !("id" in value)) return false;
-  const selection = value as { type?: unknown; id?: unknown };
-  return (
-    typeof selection.id === "string" &&
-    (selection.type === "node" ||
-      selection.type === "edge" ||
-      selection.type === "canon" ||
-      selection.type === "file" ||
-      selection.type === "dataObject")
-  );
-}
-
-function sessionMarkdownTabs(value: unknown): MarkdownEditorTab[] {
-  if (!Array.isArray(value)) return [];
-  return value
-    .filter((tab): tab is MarkdownEditorTab => {
-      return (
-        tab &&
-        typeof tab === "object" &&
-        typeof tab.id === "string" &&
-        typeof tab.canonRefId === "string" &&
-        typeof tab.title === "string" &&
-        typeof tab.content === "string" &&
-        (tab.format === "markdown" || tab.format === "ink" || tab.format === "gameData" || tab.format === "frontmatter")
-      );
-    })
-    .map((tab) => ({ ...tab, saving: false }))
-    .slice(-5);
-}
-
-function normalizeWorkspaceSession(session: PathBranchingWorkspaceSession | undefined): PathBranchingWorkspaceSession {
-  if (!session) return {};
-  return {
-    view: session.view === "home" || session.view === "workspace" ? session.view : undefined,
-    selection: isSelection(session.selection) ? session.selection : undefined,
-    canonOpen: typeof session.canonOpen === "boolean" ? session.canonOpen : undefined,
-    filesOpen: typeof session.filesOpen === "boolean" ? session.filesOpen : undefined,
-    canonWidth: session.canonWidth === undefined ? undefined : clampPanelWidth(session.canonWidth),
-    storiesWidth: session.storiesWidth === undefined ? undefined : clampPanelWidth(session.storiesWidth),
-    exportOpen: typeof session.exportOpen === "boolean" ? session.exportOpen : undefined,
-    dataOpen: typeof session.dataOpen === "boolean" ? session.dataOpen : undefined,
-    canvasMode: session.canvasMode === "branching" || session.canvasMode === "focus" ? session.canvasMode : undefined,
-    focusNodeId: typeof session.focusNodeId === "string" ? session.focusNodeId : undefined,
-    markdownTabs: sessionMarkdownTabs(session.markdownTabs),
-    activeMarkdownTabId: typeof session.activeMarkdownTabId === "string" ? session.activeMarkdownTabId : undefined,
-  };
-}
-
-function StoryNode({ data, selected }: NodeProps<StoryCanvasNode>) {
-  const nodeData = data as StoryCanvasNodeData;
-  const isFinalEvent = nodeData.kind === "event" && nodeData.badges.includes("terminal");
-  const focusClass = typeof nodeData.focusState === "string" ? ` focus-${nodeData.focusState}` : "";
-  const canReceive = nodeData.kind !== "start" && nodeData.kind !== "sequence";
-  const canSource = nodeData.kind === "start" || (nodeData.kind !== "sequence" && !isFinalEvent);
-
-  if (nodeData.isContainer) {
-    return (
-      <div className={`story-node branch-container${focusClass} ${selected ? "selected" : ""}`}>
-        {canReceive ? <Handle type="target" position={Position.Left} /> : null}
-        <div className="node-kind">{nodeData.kind}</div>
-        <div className="node-title">{nodeData.title}</div>
-        {nodeData.subtitle ? <div className="node-subtitle">{nodeData.subtitle}</div> : null}
-        {nodeData.badges.length > 0 ? (
-          <div className="node-badges">
-            {nodeData.badges.slice(0, 5).map((badge) => (
-              <span key={badge}>{badgeText(badge)}</span>
-            ))}
-          </div>
-        ) : null}
-        {canSource ? <Handle type="source" position={Position.Right} /> : null}
-      </div>
-    );
-  }
-
-  return (
-    <div className={`story-node ${nodeData.kind}${focusClass}${isFinalEvent ? " terminal" : ""}${selected ? " selected" : ""}`}>
-      {canReceive ? <Handle type="target" position={Position.Left} /> : null}
-      <div className="node-kind">{nodeData.kind}</div>
-      <div className="node-title">{nodeData.title}</div>
-      {nodeData.subtitle ? <div className="node-subtitle">{nodeData.subtitle}</div> : null}
-      {nodeData.badges.length > 0 ? (
-        <div className="node-badges">
-          {nodeData.badges.slice(0, 4).map((badge) => (
-            <span key={badge}>{badgeText(badge)}</span>
-          ))}
-        </div>
-      ) : null}
-      {canSource ? <Handle type="source" position={Position.Right} /> : null}
-    </div>
-  );
-}
-
-const nodeTypes = {
-  story: StoryNode,
-} satisfies NodeTypes;
 
 function groupCanon(project: BranchingProject) {
   return project.canonRefs.reduce<Record<string, typeof project.canonRefs>>((groups, ref) => {
@@ -462,23 +255,6 @@ function universeDisplayPath(fileState?: ProjectFileState) {
   return [universePath, storyPath].filter(Boolean).join(" / ");
 }
 
-function UniverseIconFrame({ profile, size = 28 }: { profile?: UniverseProfile; size?: number }) {
-  const icon = profile?.icon;
-  if (icon?.type === "image" && icon.value) {
-    return (
-      <span className="pathbranching-universe-icon" style={{ width: size, height: size }}>
-        <img src={icon.value} alt="" />
-      </span>
-    );
-  }
-
-  return (
-    <span className="pathbranching-universe-icon" style={{ width: size, height: size }}>
-      {icon?.type === "preset" && icon.value ? <span className="universe-preset-icon">{icon.value.slice(0, 2).toUpperCase()}</span> : <GitBranch size={16} />}
-    </span>
-  );
-}
-
 function updateProjectCanvas(project: BranchingProject, nodes: StoryCanvasNode[]): BranchingProject {
   return {
     ...project,
@@ -497,26 +273,9 @@ function updateProjectCanvas(project: BranchingProject, nodes: StoryCanvasNode[]
   };
 }
 
-function activeSequenceId(project: BranchingProject) {
-  const preferred = project.canvas?.activeSequenceId ?? project.entrySequenceId ?? project.sequences[0]?.id;
-  return project.sequences.some((sequence) => sequence.id === preferred) ? preferred : project.sequences[0]?.id;
-}
-
 function canonDisplay(project: BranchingProject, id: string) {
   const ref = project.canonRefs.find((canonRef) => canonRef.id === id);
   return ref ? `${ref.kind ?? "canon"} - ${ref.id}` : id;
-}
-
-function findSequence(project: BranchingProject, id: string): Sequence | undefined {
-  return project.sequences.find((sequence) => sequence.id === id);
-}
-
-function findEvent(project: BranchingProject, id: string): EventNode | undefined {
-  return project.events.find((event) => event.id === id);
-}
-
-function findBranch(project: BranchingProject, id: string): Branch | undefined {
-  return project.branches.find((branch) => branch.id === id);
 }
 
 function eventIdFromSelection(project: BranchingProject, nodes: StoryCanvasNode[], selection?: Selection): string | undefined {
@@ -652,14 +411,6 @@ function canvasGraph(
   };
 }
 
-function groupDataObjects(project: BranchingProject) {
-  return (project.projectDataObjects ?? []).reduce<Record<string, ProjectDataObject[]>>((groups, dataObject) => {
-    groups[dataObject.classId] ??= [];
-    groups[dataObject.classId].push(dataObject);
-    return groups;
-  }, {});
-}
-
 function fieldSummary(value: unknown) {
   if (Array.isArray(value)) {
     return value.join(", ");
@@ -759,6 +510,26 @@ function firstSimpleCondition(input: ConditionInput | undefined): Record<string,
   return expression;
 }
 
+function firstConditionSetChild(input: ConditionInput | undefined): ConditionInput | undefined {
+  if (!input) {
+    return undefined;
+  }
+  const expression = Array.isArray(input) ? input[0] : input;
+  if (!isConditionSet(expression)) {
+    return undefined;
+  }
+  if ("all" in expression) {
+    return expression.all[0];
+  }
+  if ("any" in expression) {
+    return expression.any[0];
+  }
+  if ("not" in expression) {
+    return expression.not;
+  }
+  return undefined;
+}
+
 function conditionInputKind(input: ConditionInput | undefined) {
   if (!input) {
     return "none";
@@ -838,7 +609,23 @@ function BasicConditionEditor({
       {type === "all" || type === "any" || type === "not" ? (
         <div className="mini-card">
           <strong>{type.toUpperCase()}</strong>
-          <span>Initial structured condition set. Add detailed nested logic in the RuleSet builder as it grows.</span>
+          <span>{type === "not" ? "Negates the child condition." : `Evaluates the child condition as part of a ${type} set.`}</span>
+          <BasicConditionEditor
+            label="Child Condition"
+            value={firstConditionSetChild(value)}
+            canonRefs={canonRefs}
+            dataObjects={dataObjects}
+            onChange={(child) => {
+              const nextChild = child ?? defaultCanonCondition(canonRefs);
+              if (type === "all") {
+                onChange({ all: Array.isArray(nextChild) ? nextChild : [nextChild] });
+              } else if (type === "any") {
+                onChange({ any: Array.isArray(nextChild) ? nextChild : [nextChild] });
+              } else {
+                onChange({ not: Array.isArray(nextChild) ? nextChild[0] ?? defaultCanonCondition(canonRefs) : nextChild });
+              }
+            }}
+          />
           <button
             type="button"
             onClick={() => {
@@ -1211,162 +998,52 @@ function CanonRefsPicker({
   );
 }
 
-function Topbar({
-  project,
-  fileState,
-  findings,
-  exportOpen,
-  dataOpen,
-  theme,
-  onOpenSettings,
-  onToggleTheme,
-  onOpenProject,
-  onSaveProject,
-  onSaveProjectAs,
-  onExportRuntime,
-  onHome,
-  onUndo,
-  onRedo,
-  canUndo,
-  canRedo,
-  onCreateSequence,
-  onValidate,
-  onToggleExport,
-  onToggleData,
-  onCreateDataObject,
-  onResetLayout,
+function CanonContextList({
+  title = "WorldNotion Context",
+  refs,
+  canonRefs,
+  onSelectCanon,
+  onSuggestEdit,
 }: {
-  project?: BranchingProject;
-  fileState?: ProjectFileState;
-  findings: ValidationFinding[];
-  exportOpen: boolean;
-  dataOpen: boolean;
-  theme: ThemeId;
-  onOpenSettings: () => void;
-  onToggleTheme: () => void;
-  onOpenProject: () => void;
-  onSaveProject: () => void;
-  onSaveProjectAs: () => void;
-  onExportRuntime: () => void;
-  onHome: () => void;
-  onUndo: () => void;
-  onRedo: () => void;
-  canUndo: boolean;
-  canRedo: boolean;
-  onCreateSequence: () => void;
-  onValidate: () => void;
-  onToggleExport: () => void;
-  onToggleData: () => void;
-  onCreateDataObject: () => void;
-  onResetLayout: () => void;
+  title?: string;
+  refs?: string[];
+  canonRefs: CanonRef[];
+  onSelectCanon: (id: string) => void;
+  onSuggestEdit: (id: string) => void;
 }) {
-  const errorCount = findings.filter((finding) => finding.severity === "error").length;
-  const status = findings.length === 0 ? "Clean" : `${findings.length} findings`;
-  const universeName = universeDisplayName(project, fileState);
-  const universePath = universeDisplayPath(fileState);
+  const linkedRefs = (refs ?? [])
+    .map((id) => canonRefs.find((ref) => ref.id === id))
+    .filter((ref): ref is CanonRef => Boolean(ref));
 
   return (
-    <header className="topbar dock-top-bar pathbranching-topbar" aria-label="Workspace controls">
-      <div className="dock-top-left">
-        <div className="forge-corner-menu">
-          <button type="button" className="forge-corner-button" title="Everend Forge">
-            <Crown size={16} />
-          </button>
-        </div>
-
-        <button type="button" className="dock-icon-button" title="Home" onClick={onHome}>
-          <Home size={15} />
-        </button>
-
-        <div className="dock-top-divider" />
-
-        <button type="button" className="dock-universe-button" onClick={onOpenSettings} title="Universe settings">
-          <UniverseIconFrame profile={fileState?.universeProfile} />
-          <span className="dock-universe-copy">
-            <strong>{universeName}</strong>
-            <span>
-              {universePath || "Open a universe"}
-              {fileState?.dirty ? " *" : ""}
-            </span>
-          </span>
-        </button>
-        <button type="button" className="dock-icon-button dock-settings-button" onClick={onOpenSettings} title="Application settings">
-          <Settings size={14} />
-        </button>
+    <section className="inspector-section canon-context-list">
+      <h2>{title}</h2>
+      <div className="stack-list">
+        {linkedRefs.map((ref) => (
+          <div className="mini-card canon-context-card" key={ref.id}>
+            <strong>{ref.label ?? ref.id}</strong>
+            <span>{ref.kind ?? "canon"} - {ref.canonSourcePath ?? ref.id}</span>
+            {ref.missingIdentity ? <span className="warning-text">{ref.identityWarning ?? "Missing WorldNotion identity."}</span> : null}
+            {ref.preview ? <p>{ref.preview.slice(0, 180)}{ref.preview.length > 180 ? "..." : ""}</p> : null}
+            <div className="inspector-actions wrap">
+              <button type="button" onClick={() => onSelectCanon(ref.id)}>
+                Preview Canon
+              </button>
+              <button type="button" onClick={() => onSuggestEdit(ref.id)}>
+                Suggest Edit
+              </button>
+            </div>
+          </div>
+        ))}
+        {linkedRefs.length === 0 ? <span className="empty-line">Add canon refs to pull live WorldNotion context into this story object.</span> : null}
       </div>
-
-      <div className="dock-top-right">
-        <div className="dock-command-group" aria-label="Universe">
-          <button type="button" title="Open universe" onClick={onOpenProject}>
-            <FolderOpen size={14} />
-            <span>Open</span>
-          </button>
-          <button type="button" title="Save branching story" onClick={onSaveProject}>
-            <Save size={14} />
-            <span>Save</span>
-          </button>
-          <button type="button" title="Export current preview" onClick={onExportRuntime}>
-            <Download size={14} />
-            <span>Export</span>
-          </button>
-        </div>
-
-        <div className="dock-command-group" aria-label="History">
-          <button type="button" title="Undo" onClick={onUndo} disabled={!canUndo}>
-            <ArrowLeft size={14} />
-            <span>Undo</span>
-          </button>
-          <button type="button" title="Redo" onClick={onRedo} disabled={!canRedo}>
-            <ArrowLeft size={14} style={{ transform: "scaleX(-1)" }} />
-            <span>Redo</span>
-          </button>
-        </div>
-
-        <div className="dock-command-group" aria-label="Authoring">
-          <button type="button" title="New sequence" onClick={onCreateSequence}>
-            <FilePlus2 size={14} />
-            <span>Sequence</span>
-          </button>
-          <button type="button" title="Validate project" onClick={onValidate}>
-            <SearchCheck size={14} />
-            <span>Validate</span>
-          </button>
-        </div>
-
-        <div className="dock-command-group" aria-label="Panels">
-          <button type="button" title="Toggle runtime export preview" className={exportOpen ? "active" : ""} onClick={onToggleExport}>
-            <Download size={14} />
-            <span>Export View</span>
-          </button>
-          <button type="button" title="Toggle project data drawer" className={dataOpen ? "active" : ""} onClick={onToggleData}>
-            <Database size={14} />
-            <span>Data</span>
-          </button>
-          <button type="button" title="Create knowledge data object" onClick={onCreateDataObject}>
-            <FilePlus2 size={14} />
-            <span>Knowledge</span>
-          </button>
-          <button type="button" title="Reset canvas layout" onClick={onResetLayout}>
-            <RotateCcw size={14} />
-            <span>Layout</span>
-          </button>
-        </div>
-
-        <span className={`pathbranching-status ${errorCount > 0 ? "has-errors" : ""}`} title={status}>
-          {status}
-          {errorCount > 0 ? ` (${errorCount})` : ""}
-        </span>
-
-        <button type="button" className="dock-icon-button" onClick={onToggleTheme} title={`Toggle theme (${themeById(theme).label})`}>
-          {isDarkTheme(theme) ? <Sun size={15} /> : <Moon size={15} />}
-        </button>
-      </div>
-    </header>
+    </section>
   );
 }
 
 function HomeDashboard({
   project,
+  workspace,
   fileState,
   settings,
   missingRecentProjects,
@@ -1383,6 +1060,7 @@ function HomeDashboard({
   onExportRuntime,
 }: {
   project?: BranchingProject;
+  workspace?: PathBranchingWorkspace;
   fileState: ProjectFileState;
   settings: AppSettings;
   missingRecentProjects: Set<string>;
@@ -1398,10 +1076,17 @@ function HomeDashboard({
   onSaveProjectAs: () => void;
   onExportRuntime: () => void;
 }) {
-  const errorCount = findings.filter((finding) => finding.severity === "error").length;
-  const warningCount = findings.filter((finding) => finding.severity === "warning").length;
   const activeSequence =
     project?.sequences.find((sequence) => sequence.id === activeSequenceId(project)) ?? project?.sequences[0];
+  const hasTransientStory = Boolean(workspace?.createdDefaultStory);
+  const canEnterWorkspace = Boolean(project);
+  const documentStatus = !project
+    ? "No universe"
+    : hasTransientStory
+      ? "No story yet"
+      : fileState.dirty
+        ? "Unsaved"
+        : "Saved";
 
   return (
     <main className="home-shell">
@@ -1440,8 +1125,8 @@ function HomeDashboard({
                 <GitBranch size={17} />
               </span>
               <span>
-                <strong>{project.name ?? project.projectId}</strong>
-                <small>{projectFileName(fileState.universePath)}{fileState.dirty ? " - unsaved changes" : ""}</small>
+                <strong>{fileState.universeProfile?.name ?? project.name ?? project.projectId}</strong>
+                <small>{projectFileName(fileState.universePath)} - {documentStatus}</small>
               </span>
               <Home size={16} />
             </button>
@@ -1453,19 +1138,19 @@ function HomeDashboard({
             <FolderOpen size={16} />
             Open Universe
           </button>
-          <button type="button" onClick={onEnterWorkspace} disabled={!project}>
+          <button type="button" onClick={onEnterWorkspace} disabled={!canEnterWorkspace}>
             <GitBranch size={16} />
             Workspace
           </button>
-          <button type="button" onClick={onSaveProject} disabled={!project}>
+          <button type="button" onClick={onSaveProject} disabled={!canEnterWorkspace}>
             <Save size={16} />
             Save
           </button>
-          <button type="button" onClick={onSaveProjectAs} disabled={!project}>
+          <button type="button" onClick={onSaveProjectAs} disabled={!canEnterWorkspace}>
             <Save size={16} />
             Save Into Universe
           </button>
-          <button type="button" onClick={onExportRuntime} disabled={!project}>
+          <button type="button" onClick={onExportRuntime} disabled={!canEnterWorkspace}>
             <Download size={16} />
             Export Runtime
           </button>
@@ -1493,8 +1178,8 @@ function HomeDashboard({
             <span>Active sequence</span>
           </div>
           <div>
-            <strong>{findings.length ? `${errorCount}/${warningCount}` : "Clean"}</strong>
-            <span>Errors / warnings</span>
+            <strong>{documentStatus}</strong>
+            <span>Document</span>
           </div>
         </div>
 
@@ -1517,22 +1202,29 @@ function HomeDashboard({
             <h3>Recent universes</h3>
             <div className="recent-list">
               {settings.recentProjects.map((path, itemIndex) => (
-                <button
+                <div
                   key={path}
-                  type="button"
-                  className={missingRecentProjects.has(path) ? "missing" : ""}
+                  className={`recent-row ${missingRecentProjects.has(path) ? "missing" : ""}`}
                   style={{ animationDelay: `${120 + itemIndex * 45}ms` }}
-                  onClick={() => missingRecentProjects.has(path) ? onRemoveRecentProject(path) : onOpenRecentProject(path)}
                 >
-                  <span className="recent-icon">
-                    <GitBranch size={16} />
-                  </span>
-                  <span>
-                    <strong>{projectFileName(path)}</strong>
-                    <small>{missingRecentProjects.has(path) ? "Missing folder - click to remove" : path}</small>
-                  </span>
-                  {missingRecentProjects.has(path) ? <span>x</span> : <FolderOpen size={14} />}
-                </button>
+                  <button
+                    type="button"
+                    className="recent-open-button"
+                    onClick={() => missingRecentProjects.has(path) ? onRemoveRecentProject(path) : onOpenRecentProject(path)}
+                  >
+                    <span className="recent-icon">
+                      <GitBranch size={16} />
+                    </span>
+                    <span>
+                      <strong>{projectFileName(path)}</strong>
+                      <small>{missingRecentProjects.has(path) ? "Missing folder" : path}</small>
+                    </span>
+                    <FolderOpen size={14} />
+                  </button>
+                  <button type="button" className="recent-remove-button" onClick={() => onRemoveRecentProject(path)} title="Remove recent universe">
+                    <X size={14} />
+                  </button>
+                </div>
               ))}
             </div>
           </section>
@@ -1563,6 +1255,102 @@ function DiscardChangesDialog({
         <div className="inspector-actions">
           <button type="button" className="danger" onClick={onDiscard}>
             Discard
+          </button>
+          <button type="button" onClick={onCancel}>
+            Cancel
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function NamePromptDialog({
+  open,
+  title,
+  label,
+  initialValue,
+  confirmLabel = "Save",
+  onConfirm,
+  onCancel,
+}: {
+  open: boolean;
+  title: string;
+  label: string;
+  initialValue?: string;
+  confirmLabel?: string;
+  onConfirm: (value: string) => void;
+  onCancel: () => void;
+}) {
+  const [value, setValue] = useState(initialValue ?? "");
+
+  useEffect(() => {
+    if (open) {
+      setValue(initialValue ?? "");
+    }
+  }, [initialValue, open]);
+
+  if (!open) {
+    return null;
+  }
+
+  return (
+    <div className="modal-backdrop">
+      <form
+        className="modal-dialog"
+        onSubmit={(event) => {
+          event.preventDefault();
+          const trimmed = value.trim();
+          if (trimmed) {
+            onConfirm(trimmed);
+          }
+        }}
+      >
+        <h2>{title}</h2>
+        <label className="field-label">
+          {label}
+          <input value={value} onChange={(event) => setValue(event.target.value)} autoFocus />
+        </label>
+        <div className="inspector-actions">
+          <button type="submit" disabled={!value.trim()}>
+            {confirmLabel}
+          </button>
+          <button type="button" onClick={onCancel}>
+            Cancel
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function ConfirmActionDialog({
+  open,
+  title,
+  message,
+  confirmLabel = "Delete",
+  onConfirm,
+  onCancel,
+}: {
+  open: boolean;
+  title: string;
+  message: string;
+  confirmLabel?: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  if (!open) {
+    return null;
+  }
+
+  return (
+    <div className="modal-backdrop">
+      <section className="modal-dialog">
+        <h2>{title}</h2>
+        <p>{message}</p>
+        <div className="inspector-actions">
+          <button type="button" className="danger" onClick={onConfirm}>
+            {confirmLabel}
           </button>
           <button type="button" onClick={onCancel}>
             Cancel
@@ -2212,12 +2000,27 @@ function buildStoryExplorerSections(project: BranchingProject): StoryExplorerSec
           badges: [dataObject.scope?.global ? "global" : "", dataObject.canonRefs?.length ? `${dataObject.canonRefs.length} refs` : ""].filter(Boolean),
         })),
     },
+    {
+      id: "suggestions",
+      label: "WorldNotion Suggestions",
+      items: (project.canonEditSuggestions ?? [])
+        .filter((suggestion) => !suggestion.sourceEventId || activeEventIds.has(suggestion.sourceEventId))
+        .map((suggestion) => ({
+          id: `file:canon-suggestion:${suggestion.id}`,
+          label: suggestion.title,
+          detail: suggestion.targetPath ?? suggestion.canonRefId,
+          badges: [suggestion.status, "safe review"].filter(Boolean),
+        })),
+    },
   ].filter((section) => section.items.length > 0);
 }
 
 function FilesPanel({
   project,
   files,
+  stories = [],
+  activeStoryId,
+  storyName,
   open,
   selectedId,
   onToggle,
@@ -2225,11 +2028,20 @@ function FilesPanel({
   onResetWidth,
   onResizeStateChange,
   onSequenceChange,
+  onStoryChange = () => undefined,
+  onCreateStory,
+  onRenameStory,
+  onDeleteStory,
   onCreateSequence,
+  onRenameSequence,
+  onDeleteSequence,
   onSelect,
 }: {
   project: BranchingProject;
   files: PathBranchingFileItem[];
+  stories: Array<{ id: string; name: string }>;
+  activeStoryId?: string;
+  storyName?: string;
   open: boolean;
   selectedId?: string;
   onToggle: () => void;
@@ -2237,7 +2049,13 @@ function FilesPanel({
   onResetWidth: () => void;
   onResizeStateChange: (resizing: boolean) => void;
   onSequenceChange: (id: string) => void;
+  onStoryChange: (id: string) => void;
+  onCreateStory: () => void;
+  onRenameStory: () => void;
+  onDeleteStory: () => void;
   onCreateSequence: () => void;
+  onRenameSequence: () => void;
+  onDeleteSequence: () => void;
   onSelect: (id: string) => void;
 }) {
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
@@ -2257,7 +2075,35 @@ function FilesPanel({
       onResetWidth={onResetWidth}
       onResizeStateChange={onResizeStateChange}
     >
-      <div className="stories-sequence-toolbar">
+      <div className="stories-sequence-toolbar story-management-toolbar">
+        <label>
+          <span>Story</span>
+          <select
+            value={activeStoryId ?? project.storyId ?? ""}
+            onChange={(event) => onStoryChange(event.target.value)}
+            aria-label="Select active story"
+          >
+            {stories.map((story) => (
+              <option key={story.id} value={story.id}>
+                {story.name}
+              </option>
+            ))}
+            {stories.length === 0 ? <option value="">{storyName ?? project.name ?? project.storyId ?? "Branching Story"}</option> : null}
+          </select>
+        </label>
+        <div className="toolbar-button-row">
+          <button type="button" onClick={onCreateStory} title="Create story">
+            <FilePlus2 size={13} />
+          </button>
+          <button type="button" onClick={onRenameStory} title="Rename story" disabled={!activeStoryId}>
+            <Pencil size={13} />
+          </button>
+          <button type="button" onClick={onDeleteStory} title="Delete story" disabled={stories.length <= 1}>
+            <Trash2 size={13} />
+          </button>
+        </div>
+      </div>
+      <div className="stories-sequence-toolbar story-management-toolbar">
         <label>
           <span>Sequence</span>
           <select
@@ -2279,9 +2125,17 @@ function FilesPanel({
             <option value={NEW_SEQUENCE_SELECT_VALUE}>Create new sequence...</option>
           </select>
         </label>
-        <button type="button" onClick={onCreateSequence}>
-          New
-        </button>
+        <div className="toolbar-button-row">
+          <button type="button" onClick={onCreateSequence} title="Create sequence" disabled={!activeStoryId}>
+            <FilePlus2 size={13} />
+          </button>
+          <button type="button" onClick={onRenameSequence} title="Rename sequence" disabled={!activeSequence}>
+            <Pencil size={13} />
+          </button>
+          <button type="button" onClick={onDeleteSequence} title="Delete sequence" disabled={!activeSequence}>
+            <Trash2 size={13} />
+          </button>
+        </div>
         <p>
           {activeSequence ? `${activeSequence.eventIds.length} events` : "No sequence loaded"}
           {totalItems ? ` / ${totalItems} files` : ""}
@@ -2327,139 +2181,6 @@ function FilesPanel({
         {totalItems === 0 ? <span className="empty-line">No story objects match this search.</span> : null}
       </div>
     </PanelShell>
-  );
-}
-
-function DataDrawer({
-  project,
-  selectedId,
-  onSelect,
-  onClose,
-}: {
-  project: BranchingProject;
-  selectedId?: string;
-  onSelect: (id: string) => void;
-  onClose: () => void;
-}) {
-  const groups = groupDataObjects(project);
-  const dataObjectCount = project.projectDataObjects?.length ?? 0;
-
-  return (
-    <aside className="data-drawer">
-      <div className="inspector-header">
-        <div>
-          <strong>Project Data</strong>
-          <span>{dataObjectCount} object(s)</span>
-        </div>
-        <button type="button" title="Close data drawer" onClick={onClose}>
-          x
-        </button>
-      </div>
-      <div className="inspector-scroll">
-        {Object.entries(groups).map(([classId, objects]) => (
-          <section className="inspector-section" key={classId}>
-            <h2>{project.dataClasses?.find((dataClass) => dataClass.id === classId)?.label ?? classId}</h2>
-            <div className="stack-list">
-              {objects.map((dataObject) => (
-                <button
-                  className={`list-item ${selectedId === dataObject.id ? "active" : ""}`}
-                  key={dataObject.id}
-                  type="button"
-                  onClick={() => onSelect(dataObject.id)}
-                >
-                  <strong>{dataObject.name}</strong>
-                  <span>{dataObject.canonRefs?.join(", ") ?? "manual project data"}</span>
-                  <span>{Object.keys(dataObject.fields).length} field(s)</span>
-                </button>
-              ))}
-            </div>
-          </section>
-        ))}
-        {dataObjectCount === 0 ? (
-          <section className="inspector-section">
-            <h2>No project data yet</h2>
-            <span className="empty-line">Create Knowledge entries or manual data objects from canon refs.</span>
-          </section>
-        ) : null}
-      </div>
-    </aside>
-  );
-}
-
-function MarkdownEditorDock({
-  tabs,
-  activeTabId,
-  onActivate,
-  onClose,
-  onChangeContent,
-  onChangeFormat,
-  onSave,
-}: {
-  tabs: MarkdownEditorTab[];
-  activeTabId?: string;
-  onActivate: (id: string) => void;
-  onClose: (id: string) => void;
-  onChangeContent: (id: string, content: string) => void;
-  onChangeFormat: (id: string, format: MarkdownDraftFormat) => void;
-  onSave: (id: string) => void;
-}) {
-  const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0];
-  if (!activeTab) return null;
-
-  return (
-    <aside className="markdown-dock" aria-label="Markdown working copy editor">
-      <div className="markdown-tab-stack" role="tablist" aria-label="Open Markdown drafts">
-        {tabs.map((tab, index) => (
-          <button
-            type="button"
-            role="tab"
-            aria-selected={tab.id === activeTab.id}
-            className={tab.id === activeTab.id ? "active" : ""}
-            key={tab.id}
-            style={{ transform: `translateY(${index * -3}px)` }}
-            onClick={() => onActivate(tab.id)}
-          >
-            <span>{tab.title}</span>
-            {tab.dirty ? <i aria-label="unsaved changes" /> : null}
-          </button>
-        ))}
-      </div>
-
-      <div className="markdown-editor-panel">
-        <div className="markdown-editor-header">
-          <div>
-            <strong>{activeTab.title}</strong>
-            <span>{activeTab.workingCopyPath ?? activeTab.sourcePath ?? "new working copy"}</span>
-          </div>
-          <div className="markdown-editor-actions">
-            <select
-              value={activeTab.format}
-              title="Draft format"
-              onChange={(event) => onChangeFormat(activeTab.id, event.target.value as MarkdownDraftFormat)}
-            >
-              {Object.entries(MARKDOWN_FORMAT_LABELS).map(([value, label]) => (
-                <option key={value} value={value}>
-                  {label}
-                </option>
-              ))}
-            </select>
-            <button type="button" title="Save working copy" disabled={activeTab.saving} onClick={() => onSave(activeTab.id)}>
-              <Save size={14} />
-              <span>{activeTab.saving ? "Saving" : "Save"}</span>
-            </button>
-            <button type="button" title="Close tab" onClick={() => onClose(activeTab.id)}>
-              x
-            </button>
-          </div>
-        </div>
-
-        <textarea
-          spellCheck
-          value={activeTab.content}
-          onChange={(event) => onChangeContent(activeTab.id, event.target.value)}
-        />
-      </div>
-    </aside>
   );
 }
 
@@ -2590,8 +2311,13 @@ function Inspector({
   onDeleteOutcome,
   onUpdateTransition,
   onDeleteTransition,
+  onCreateCanonSuggestion,
+  onUpdateCanonSuggestion,
+  onDeleteCanonSuggestion,
   onUpdateDataObject,
   onDeleteDataObject,
+  onSelectCanon,
+  onSelectSuggestion,
   onEditCanonRef,
   onUpdateEdgeLabel,
   onDeleteSelection,
@@ -2620,19 +2346,18 @@ function Inspector({
   onDeleteOutcome: (eventId: string, decisionId: string, outcomeId: string) => void;
   onUpdateTransition: (transitionId: string, updates: Partial<Transition>) => void;
   onDeleteTransition: (transitionId: string) => void;
+  onCreateCanonSuggestion: (canonRefId: string, source?: { eventId?: string; dataObjectId?: string }) => void;
+  onUpdateCanonSuggestion: (id: string, updates: Partial<CanonEditSuggestion>) => void;
+  onDeleteCanonSuggestion: (id: string) => void;
   onUpdateDataObject: (id: string, updates: Partial<ProjectDataObject>) => void;
   onDeleteDataObject: (id: string) => void;
+  onSelectCanon: (id: string) => void;
+  onSelectSuggestion: (id: string) => void;
   onEditCanonRef: (ref: CanonRef) => void;
   onUpdateEdgeLabel: (edgeId: string, label: string) => void;
   onDeleteSelection: (selection: Selection) => void;
 }) {
-  const runtimePackage = useMemo(() => exportRuntimePackage(project), [project]);
-  const inkExport = useMemo(() => exportInkProject(project), [project]);
-  const gameDataExport = useMemo(() => exportSinpoGameData(project), [project]);
-  const exportPreview =
-    exportPreviewMode === "ink"
-      ? inkExport.files.map((file) => `// ${file.path}\n${file.content}`).join("\n\n")
-      : JSON.stringify(exportPreviewMode === "gameData" ? gameDataExport : runtimePackage, null, 2);
+  const exportPreview = useMemo(() => buildExportPreview(project, exportPreviewMode), [exportPreviewMode, project]);
   const selectedNode = selection?.type === "node" ? nodes.find((node) => node.id === selection.id) : undefined;
   const selectedEdge = selection?.type === "edge" ? edges.find((edgeItem) => edgeItem.id === selection.id) : undefined;
   const selectedCanon =
@@ -2641,6 +2366,10 @@ function Inspector({
   const selectedDataObject =
     selection?.type === "dataObject"
       ? project.projectDataObjects?.find((dataObject) => dataObject.id === selection.id)
+      : undefined;
+  const selectedSuggestion =
+    selection?.type === "canonSuggestion"
+      ? project.canonEditSuggestions?.find((suggestion) => suggestion.id === selection.id)
       : undefined;
 
   const sequence = selectedNode ? findSequence(project, selectedNode.id) : undefined;
@@ -2852,6 +2581,12 @@ function Inspector({
               value={event.canonRefs}
               canonRefs={project.canonRefs}
               onChange={(canonRefs) => onUpdateEvent(event.id, { canonRefs })}
+            />
+            <CanonContextList
+              refs={event.canonRefs}
+              canonRefs={project.canonRefs}
+              onSelectCanon={onSelectCanon}
+              onSuggestEdit={(canonRefId) => onCreateCanonSuggestion(canonRefId, { eventId: event.id })}
             />
 
             <section className="inspector-section">
@@ -3264,12 +2999,96 @@ function Inspector({
               ) : null}
             </dl>
             <div className="inspector-actions">
+              <button type="button" onClick={() => onCreateCanonSuggestion(selectedCanon.id)}>
+                Suggest Edit
+              </button>
               <button type="button" onClick={() => onEditCanonRef(selectedCanon)}>
                 Edit in Branch
               </button>
             </div>
+            {(project.canonEditSuggestions ?? []).filter((suggestion) => suggestion.canonRefId === selectedCanon.id).length ? (
+              <div className="stack-list">
+                {(project.canonEditSuggestions ?? [])
+                  .filter((suggestion) => suggestion.canonRefId === selectedCanon.id)
+                  .map((suggestion) => (
+                    <button
+                      className={`list-item ${selection?.type === "canonSuggestion" && selection.id === suggestion.id ? "active" : ""}`}
+                      type="button"
+                      key={suggestion.id}
+                      onClick={() => onSelectSuggestion(suggestion.id)}
+                    >
+                      <strong>{suggestion.title}</strong>
+                      <span>{suggestion.status}</span>
+                    </button>
+                  ))}
+              </div>
+            ) : null}
             <div className="readonly-preview-label">Read-only canon preview</div>
             {selectedCanon.preview ? <pre>{selectedCanon.preview}</pre> : <span className="empty-line">No preview available.</span>}
+          </section>
+        ) : null}
+
+        {selectedSuggestion ? (
+          <section className="inspector-section">
+            <h2>WorldNotion Edit Suggestion</h2>
+            <div className="readonly-preview-label">
+              Safe suggestion only. PathBranching stores this proposal; WorldNotion remains the source of truth and must apply final edits.
+            </div>
+            <label className="field-label">
+              Title
+              <input
+                value={selectedSuggestion.title}
+                onChange={(event) => onUpdateCanonSuggestion(selectedSuggestion.id, { title: event.target.value })}
+              />
+            </label>
+            <label className="field-label">
+              Status
+              <select
+                value={selectedSuggestion.status}
+                onChange={(event) => onUpdateCanonSuggestion(selectedSuggestion.id, { status: event.target.value })}
+              >
+                <option value="draft">draft</option>
+                <option value="proposed">proposed</option>
+                <option value="sent-to-worldnotion">sent to WorldNotion</option>
+                <option value="applied-in-worldnotion">applied in WorldNotion</option>
+                <option value="dismissed">dismissed</option>
+              </select>
+            </label>
+            <label className="field-label">
+              Summary
+              <textarea
+                rows={3}
+                value={selectedSuggestion.summary ?? ""}
+                onChange={(event) => onUpdateCanonSuggestion(selectedSuggestion.id, { summary: event.target.value })}
+              />
+            </label>
+            <label className="field-label">
+              Proposed Content
+              <textarea
+                rows={10}
+                value={selectedSuggestion.proposedContent}
+                onChange={(event) => onUpdateCanonSuggestion(selectedSuggestion.id, { proposedContent: event.target.value })}
+              />
+            </label>
+            <dl>
+              <div>
+                <dt>Canon Ref</dt>
+                <dd>{selectedSuggestion.canonRefId}</dd>
+              </div>
+              <div>
+                <dt>Target Path</dt>
+                <dd>{selectedSuggestion.targetPath ?? "unknown"}</dd>
+              </div>
+              <div>
+                <dt>Safety</dt>
+                <dd>{selectedSuggestion.safety}</dd>
+              </div>
+            </dl>
+            <div className="inspector-actions">
+              <button type="button" className="danger" onClick={() => onDeleteCanonSuggestion(selectedSuggestion.id)}>
+                Delete Suggestion
+              </button>
+            </div>
           </section>
         ) : null}
 
@@ -3456,22 +3275,22 @@ function Inspector({
           <dl>
             <div>
               <dt>Package</dt>
-              <dd>{runtimePackage.packageId}</dd>
+              <dd>{exportPreview.runtimePackage.packageId}</dd>
             </div>
             <div>
               <dt>Entry</dt>
-              <dd>{runtimePackage.entryNodeId}</dd>
+              <dd>{exportPreview.runtimePackage.entryNodeId}</dd>
             </div>
             <div>
               <dt>Nodes</dt>
-              <dd>{runtimePackage.nodes.length}</dd>
+              <dd>{exportPreview.runtimePackage.nodes.length}</dd>
             </div>
             <div>
               <dt>Ink files</dt>
-              <dd>{inkExport.files.length}</dd>
+              <dd>{exportPreview.inkExport.files.length}</dd>
             </div>
           </dl>
-          {exportOpen ? <pre>{exportPreview}</pre> : null}
+          {exportOpen ? <pre>{exportPreview.content}</pre> : null}
         </section>
       </div>
     </aside>
@@ -3524,6 +3343,11 @@ function StoryCanvas({
   onDeleteOutcome,
   onUpdateTransition,
   onDeleteTransition,
+  onCreateCanonSuggestion,
+  onUpdateCanonSuggestion,
+  onDeleteCanonSuggestion,
+  onCreateDataObject,
+  onCreateKnowledgeObject,
   onUpdateDataObject,
   onDeleteDataObject,
   onEditCanonRef,
@@ -3573,6 +3397,11 @@ function StoryCanvas({
   onDeleteOutcome: (eventId: string, decisionId: string, outcomeId: string) => void;
   onUpdateTransition: (transitionId: string, updates: Partial<Transition>) => void;
   onDeleteTransition: (transitionId: string) => void;
+  onCreateCanonSuggestion: (canonRefId: string, source?: { eventId?: string; dataObjectId?: string }) => void;
+  onUpdateCanonSuggestion: (id: string, updates: Partial<CanonEditSuggestion>) => void;
+  onDeleteCanonSuggestion: (id: string) => void;
+  onCreateDataObject: (classId: string) => void;
+  onCreateKnowledgeObject: () => void;
   onUpdateDataObject: (id: string, updates: Partial<ProjectDataObject>) => void;
   onDeleteDataObject: (id: string) => void;
   onEditCanonRef: (ref: CanonRef) => void;
@@ -3764,6 +3593,8 @@ function StoryCanvas({
           project={project}
           selectedId={selection?.type === "dataObject" ? selection.id : undefined}
           onSelect={(id) => onSelect({ type: "dataObject", id })}
+          onCreateDataObject={onCreateDataObject}
+          onCreateKnowledgeObject={onCreateKnowledgeObject}
           onClose={onToggleData}
         />
       ) : null}
@@ -3800,8 +3631,13 @@ function StoryCanvas({
           onDeleteOutcome={onDeleteOutcome}
           onUpdateTransition={onUpdateTransition}
           onDeleteTransition={onDeleteTransition}
+          onCreateCanonSuggestion={onCreateCanonSuggestion}
+          onUpdateCanonSuggestion={onUpdateCanonSuggestion}
+          onDeleteCanonSuggestion={onDeleteCanonSuggestion}
           onUpdateDataObject={onUpdateDataObject}
           onDeleteDataObject={onDeleteDataObject}
+          onSelectCanon={(id) => onSelect({ type: "canon", id })}
+          onSelectSuggestion={(id) => onSelect({ type: "canonSuggestion", id })}
           onEditCanonRef={onEditCanonRef}
           onUpdateEdgeLabel={onUpdateEdgeLabel}
           onDeleteSelection={onDeleteSelection}
@@ -3812,6 +3648,7 @@ function StoryCanvas({
 }
 
 export function App() {
+  const desktopRuntime = isTauriRuntime();
   const [settings, setSettings] = useState<AppSettings>(() => loadSettings());
   const [view, setView] = useState<AppView>(() => loadSettings().lastView ?? "home");
   const settingsRef = useRef(settings);
@@ -3839,6 +3676,16 @@ export function App() {
   const [undoStack, setUndoStack] = useState<BranchingProject[]>([]);
   const [redoStack, setRedoStack] = useState<BranchingProject[]>([]);
   const [discardDialog, setDiscardDialog] = useState<{ resolve: (discard: boolean) => void }>();
+  const [nameDialog, setNameDialog] = useState<
+    | { kind: "createStory"; title: string; label: string; initialValue?: string }
+    | { kind: "renameStory"; title: string; label: string; initialValue?: string }
+    | { kind: "createSequence"; title: string; label: string; initialValue?: string }
+    | { kind: "renameSequence"; title: string; label: string; initialValue?: string }
+  >();
+  const [confirmDialog, setConfirmDialog] = useState<
+    | { kind: "deleteStory"; title: string; message: string }
+    | { kind: "deleteSequence"; title: string; message: string }
+  >();
   const [missingRecentProjects, setMissingRecentProjects] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string>();
   const [message, setMessage] = useState<string>();
@@ -3995,11 +3842,13 @@ export function App() {
 
   const runMutation = useCallback(
     (result: mutations.MutationResult) => {
-      if (project && result.project !== project) {
-        setUndoStack((current) => [...current.slice(-49), project]);
+      const previousProject = projectRef.current ?? project;
+      const changed = Boolean(previousProject && result.project !== previousProject);
+      if (previousProject && changed) {
+        setUndoStack((current) => [...current.slice(-49), previousProject]);
         setRedoStack([]);
       }
-      applyProject(result.project, { dirty: result.project !== project });
+      applyProject(result.project, { dirty: changed });
       if (result.selection) {
         setSelection(result.selection as Selection);
       }
@@ -4150,6 +3999,44 @@ export function App() {
     [project, updateProject],
   );
 
+  const setActiveStory = useCallback(
+    async (storyId: string) => {
+      if (!storyId || !fileStateRef.current.universePath || workspaceRef.current?.activeStory?.id === storyId) {
+        return;
+      }
+      if (!(await confirmDiscardChanges())) {
+        return;
+      }
+      try {
+        const opened = await openUniverseStory(fileStateRef.current.universePath, storyId);
+        const snapshot = await saveBranchingDocument({
+          project: normalizeProject({
+            ...opened.workspace.activeProject,
+            universeRootPath: opened.path,
+          }),
+          workspace: opened.workspace,
+          fileState: {
+            path: opened.workspace.activeStory?.path,
+            storyPath: opened.workspace.activeStory?.path,
+            universePath: opened.path,
+            dirty: false,
+            modifiedMs: opened.workspace.storyModifiedMs,
+            universeProfile: opened.workspace.universeProfile,
+          },
+          revision: projectRevisionRef.current,
+        });
+        applyWorkspace(snapshot.nextWorkspace, opened.path);
+        setSettings((current) => rememberRecentProject(current, opened.path));
+        setView("workspace");
+        setError(undefined);
+        setMessage(`Opened story ${snapshot.nextWorkspace.activeStory?.name ?? storyId}.`);
+      } catch (openError) {
+        setError(openError instanceof Error ? openError.message : String(openError));
+      }
+    },
+    [applyWorkspace, confirmDiscardChanges],
+  );
+
   useEffect(() => {
     let disposed = false;
     async function loadInitialProject() {
@@ -4284,41 +4171,29 @@ export function App() {
           throw new Error("Open a universe before saving a PathBranching story.");
         }
 
-        const result = await saveUniverseStory(
-          currentFileState.universePath,
-          currentWorkspace,
-          currentProject,
-          currentFileState.modifiedMs,
-        );
-        if (!result.ok) {
-          throw new Error(result.message ?? "Could not save project.");
-        }
-
-        const savedProject = normalizeProject({
-          ...currentProject,
-          storyId: currentWorkspace.activeStory?.id ?? currentProject.storyId,
-          universeRootPath: currentFileState.universePath,
+        const snapshot = await saveBranchingDocument({
+          project: currentProject,
+          workspace: currentWorkspace,
+          fileState: currentFileState,
+          revision: saveRevision,
         });
         const isStillCurrentRevision = projectRevisionRef.current === saveRevision;
         const nextFileState: ProjectFileState = {
-          ...fileStateRef.current,
-          path: result.storyPath ?? fileStateRef.current.storyPath,
-          storyPath: result.storyPath ?? fileStateRef.current.storyPath,
+          ...snapshot.nextFileState,
           dirty: isStillCurrentRevision ? false : true,
-          lastSavedAt: Date.now(),
-          modifiedMs: result.storyModifiedMs ?? result.modifiedMs,
         };
-        fileStateRef.current = nextFileState;
-        setFileState(nextFileState);
+        fileStateRef.current = {
+          ...nextFileState,
+          dirty: isStillCurrentRevision ? false : true,
+        };
+        setFileState(fileStateRef.current);
         setSettings((current) => rememberRecentProject(current, currentFileState.universePath as string));
         setWorkspace((current) => {
           const nextWorkspace = current
             ? {
-                ...current,
-                manifest: result.manifest ?? current.manifest,
-                activeProject: isStillCurrentRevision ? savedProject : projectRef.current ?? current.activeProject,
+                ...snapshot.nextWorkspace,
+                activeProject: isStillCurrentRevision ? snapshot.savedProject : projectRef.current ?? current.activeProject,
                 createdDefaultStory: false,
-                storyModifiedMs: result.storyModifiedMs ?? result.modifiedMs,
               }
             : current;
           workspaceRef.current = nextWorkspace;
@@ -4340,7 +4215,7 @@ export function App() {
             if (fileStateRef.current.dirty) {
               void persistProject();
             }
-          }, 180);
+          }, 0);
         }
       };
 
@@ -4373,23 +4248,19 @@ export function App() {
 
     const token = autoSaveTokenRef.current + 1;
     autoSaveTokenRef.current = token;
-    const timer = window.setTimeout(() => {
-      void (async () => {
-        try {
-          await persistProject();
-          if (autoSaveTokenRef.current !== token) {
-            return;
-          }
-        } catch (autoSaveError) {
-          if (autoSaveTokenRef.current !== token) {
-            return;
-          }
-          setError(autoSaveError instanceof Error ? autoSaveError.message : String(autoSaveError));
+    void (async () => {
+      try {
+        await persistProject();
+        if (autoSaveTokenRef.current !== token) {
+          return;
         }
-      })();
-    }, 180);
-
-    return () => window.clearTimeout(timer);
+      } catch (autoSaveError) {
+        if (autoSaveTokenRef.current !== token) {
+          return;
+        }
+        setError(autoSaveError instanceof Error ? autoSaveError.message : String(autoSaveError));
+      }
+    })();
   }, [fileState.dirty, fileState.modifiedMs, fileState.universePath, initialLoading, persistProject, project, workspace]);
 
   const saveProjectAs = useCallback(async () => {
@@ -4408,15 +4279,13 @@ export function App() {
       return;
     }
     try {
-      const runtimePackage = exportRuntimePackage(project);
-      const inkExport = exportInkProject(project);
-      const gameDataExport = exportSinpoGameData(project);
+      const preview = buildExportPreview(project, mode);
       const result =
         mode === "ink"
-          ? await exportTextDialog(inkExport.files.map((file) => `// ${file.path}\n${file.content}`).join("\n\n"), "story.ink")
+          ? await exportTextDialog(preview.content, preview.defaultName)
           : mode === "gameData"
-            ? await exportTextDialog(`${JSON.stringify(gameDataExport, null, 2)}\n`, "sinpo-game-data.json")
-            : await exportRuntimeDialog(runtimePackage);
+            ? await exportTextDialog(preview.content, preview.defaultName)
+            : await exportRuntimeDialog(preview.runtimePackage);
       if (!result) {
         return;
       }
@@ -4490,10 +4359,6 @@ export function App() {
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (shortcutMatches(event, "Mod+S")) {
-        event.preventDefault();
-        void saveProject();
-      }
       if (shortcutMatches(event, "Mod+Z")) {
         event.preventDefault();
         undoProject();
@@ -4509,7 +4374,7 @@ export function App() {
     };
     window.addEventListener("keydown", handleKeyDown, true);
     return () => window.removeEventListener("keydown", handleKeyDown, true);
-  }, [openProject, redoProject, saveProject, undoProject]);
+  }, [openProject, redoProject, undoProject]);
 
   const enterFocus = useCallback((nodeId: string) => {
     setFocusNodeId(nodeId);
@@ -4528,34 +4393,262 @@ export function App() {
     }
     return [...validateProject(project), ...validateStoryCanvasEdges(nodes, edges)];
   }, [project, nodes, edges]);
+  const webPreviewBanner = desktopRuntime ? null : (
+    <div className="persistence-warning" role="status">
+      Preview web: no guarda en universo. Abre PathBranching con Tauri para crear stories, secuencias y eventos persistentes.
+    </div>
+  );
 
-  const createSequence = useCallback(() => {
-    if (!project) {
+  const createStory = useCallback(async (name?: string) => {
+    if (!isTauriRuntime()) {
+      setMessage("Preview web: no guarda en universo. Abre PathBranching con Tauri para crear stories persistentes.");
       return;
     }
-    runMutation(mutations.createSequence(project));
-  }, [project, runMutation]);
+    const currentWorkspace = workspaceRef.current;
+    const currentFileState = fileStateRef.current;
+    if (!currentWorkspace || !currentFileState.universePath) {
+      setMessage("Open a universe before creating a story.");
+      return;
+    }
+
+    try {
+      if (currentFileState.dirty && !currentWorkspace.createdDefaultStory) {
+        await persistProject({ manual: true });
+      }
+      setMessage("Creating PathBranching story...");
+      const revision = projectRevisionRef.current + 1;
+      const snapshot = await createBranchingStory({
+        workspace: workspaceRef.current ?? currentWorkspace,
+        fileState: fileStateRef.current,
+        name,
+        revision,
+      });
+      applyWorkspace(snapshot.nextWorkspace, currentFileState.universePath);
+      projectRevisionRef.current = revision;
+      savedRevisionRef.current = revision;
+      fileStateRef.current = snapshot.nextFileState;
+      setFileState(snapshot.nextFileState);
+      setSettings((current) => rememberRecentProject(current, currentFileState.universePath as string));
+      setView("workspace");
+      setMessage(`Created story ${snapshot.nextWorkspace.activeStory?.name ?? snapshot.savedProject.name}.`);
+    } catch (createError) {
+      setError(createError instanceof Error ? createError.message : String(createError));
+    }
+  }, [applyWorkspace, persistProject]);
+
+  const createSequence = useCallback((name?: string) => {
+    if (!isTauriRuntime()) {
+      setMessage("Preview web: no guarda en universo. Abre PathBranching con Tauri para crear secuencias persistentes.");
+      return;
+    }
+    const currentProject = projectRef.current;
+    if (!currentProject || workspaceRef.current?.createdDefaultStory) {
+      setNameDialog({ kind: "createStory", title: "Create Story", label: "Story name", initialValue: "Branching Story" });
+      setMessage("Create a PathBranching story before adding sequences.");
+      return;
+    }
+    runMutation(mutations.createSequence(currentProject, name));
+  }, [runMutation]);
+
+  const requestCreateStory = useCallback(() => {
+    setNameDialog({ kind: "createStory", title: "Create Story", label: "Story name", initialValue: "Branching Story" });
+  }, []);
+
+  const requestRenameStory = useCallback(() => {
+    const activeStory = workspaceRef.current?.activeStory;
+    if (!activeStory || workspaceRef.current?.createdDefaultStory) {
+      setNameDialog({ kind: "createStory", title: "Create Story", label: "Story name", initialValue: activeStory?.name ?? "Branching Story" });
+      return;
+    }
+    setNameDialog({ kind: "renameStory", title: "Rename Story", label: "Story name", initialValue: activeStory.name });
+  }, []);
+
+  const requestDeleteStory = useCallback(() => {
+    const currentWorkspace = workspaceRef.current;
+    const activeStory = currentWorkspace?.activeStory;
+    if (!activeStory || !currentWorkspace || currentWorkspace.manifest.stories.length <= 1) {
+      setMessage("Cannot delete the only story in this universe.");
+      return;
+    }
+    setConfirmDialog({
+      kind: "deleteStory",
+      title: "Delete Story",
+      message: `Remove "${activeStory.name}" from this universe? The story file will remain on disk for safety.`,
+    });
+  }, []);
+
+  const requestCreateSequence = useCallback(() => {
+    if (workspaceRef.current?.createdDefaultStory) {
+      setNameDialog({ kind: "createStory", title: "Create Story", label: "Story name", initialValue: "Branching Story" });
+      return;
+    }
+    setNameDialog({ kind: "createSequence", title: "Create Sequence", label: "Sequence name", initialValue: "New Sequence" });
+  }, []);
+
+  const requestRenameSequence = useCallback(() => {
+    const currentProject = projectRef.current;
+    if (!currentProject) return;
+    const sequenceId = activeSequenceId(currentProject);
+    const sequence = sequenceId ? findSequence(currentProject, sequenceId) : undefined;
+    if (!sequence) {
+      setMessage("No sequence is selected.");
+      return;
+    }
+    setNameDialog({ kind: "renameSequence", title: "Rename Sequence", label: "Sequence name", initialValue: sequence.name });
+  }, []);
+
+  const requestDeleteSequence = useCallback(() => {
+    const currentProject = projectRef.current;
+    if (!currentProject) return;
+    const sequenceId = activeSequenceId(currentProject);
+    const sequence = sequenceId ? findSequence(currentProject, sequenceId) : undefined;
+    if (!sequence) {
+      setMessage("No sequence is selected.");
+      return;
+    }
+    setConfirmDialog({
+      kind: "deleteSequence",
+      title: "Delete Sequence",
+      message: `Delete "${sequence.name}"? This is blocked if it is the entry sequence or still contains events.`,
+    });
+  }, []);
+
+  const confirmNameDialog = useCallback(
+    async (value: string) => {
+      const dialog = nameDialog;
+      if (!dialog) return;
+      setNameDialog(undefined);
+      if (dialog.kind === "createStory") {
+        await createStory(value);
+        return;
+      }
+      if (dialog.kind === "renameStory") {
+        const currentProject = projectRef.current;
+        const currentWorkspace = workspaceRef.current;
+        const currentFileState = fileStateRef.current;
+        if (!currentProject || !currentWorkspace) return;
+        try {
+          const revision = projectRevisionRef.current + 1;
+          const snapshot = await renameBranchingStory({
+            project: currentProject,
+            workspace: currentWorkspace,
+            fileState: currentFileState,
+            name: value,
+            revision,
+          });
+          applyWorkspace(snapshot.nextWorkspace, currentFileState.universePath as string);
+          projectRevisionRef.current = revision;
+          savedRevisionRef.current = revision;
+          fileStateRef.current = snapshot.nextFileState;
+          setFileState(snapshot.nextFileState);
+          setMessage(`Renamed story to ${value}.`);
+        } catch (renameError) {
+          setError(renameError instanceof Error ? renameError.message : String(renameError));
+        }
+        return;
+      }
+      if (dialog.kind === "createSequence") {
+        createSequence(value);
+        return;
+      }
+      if (dialog.kind === "renameSequence") {
+        const currentProject = projectRef.current;
+        const sequenceId = currentProject ? activeSequenceId(currentProject) : undefined;
+        if (currentProject && sequenceId) {
+          runMutation(mutations.updateSequence(currentProject, sequenceId, { name: value }));
+        }
+      }
+    },
+    [applyWorkspace, createSequence, createStory, nameDialog, runMutation],
+  );
+
+  const confirmActionDialog = useCallback(async () => {
+    const dialog = confirmDialog;
+    if (!dialog) return;
+    setConfirmDialog(undefined);
+    if (dialog.kind === "deleteSequence") {
+      const currentProject = projectRef.current;
+      const sequenceId = currentProject ? activeSequenceId(currentProject) : undefined;
+      if (currentProject && sequenceId) {
+        const sequence = findSequence(currentProject, sequenceId);
+        if (!sequence) return;
+        if (currentProject.entrySequenceId === sequence.id || sequence.eventIds.length > 0) {
+          setMessage("Sequence deletion is blocked while it is entry or still contains events.");
+          return;
+        }
+        const nextSequences = currentProject.sequences.filter((item) => item.id !== sequence.id);
+        updateProject(
+          {
+            ...currentProject,
+            sequences: nextSequences,
+            canvas: {
+              ...currentProject.canvas,
+              activeSequenceId: currentProject.canvas?.activeSequenceId === sequence.id ? nextSequences[0]?.id : currentProject.canvas?.activeSequenceId,
+            },
+          },
+          nextSequences[0] ? { type: "node", id: nextSequences[0].id } : undefined,
+        );
+      }
+      return;
+    }
+    if (dialog.kind === "deleteStory") {
+      const currentWorkspace = workspaceRef.current;
+      const currentFileState = fileStateRef.current;
+      const activeStory = currentWorkspace?.activeStory;
+      if (!currentWorkspace || !activeStory) return;
+      if (!(await confirmDiscardChanges())) return;
+      try {
+        const snapshot = await deleteBranchingStory({
+          workspace: currentWorkspace,
+          fileState: currentFileState,
+          storyId: activeStory.id,
+        });
+        const opened = await openUniverseStory(currentFileState.universePath as string, snapshot.nextWorkspace.activeStory?.id ?? "");
+        applyWorkspace(opened.workspace, opened.path);
+        setFileState((current) => {
+          const nextState = { ...current, dirty: false };
+          fileStateRef.current = nextState;
+          return nextState;
+        });
+        setMessage(`Deleted story ${activeStory.name} from the manifest.`);
+      } catch (deleteError) {
+        setError(deleteError instanceof Error ? deleteError.message : String(deleteError));
+      }
+    }
+  }, [applyWorkspace, confirmDialog, confirmDiscardChanges, updateProject]);
 
   const createBranch = useCallback(
     (position?: { x: number; y: number }) => {
-      if (!project) {
+      if (!isTauriRuntime()) {
+        setMessage("Preview web: no guarda en universo. Abre PathBranching con Tauri para crear branches persistentes.");
+        return;
+      }
+      const currentProject = projectRef.current;
+      if (!currentProject || workspaceRef.current?.createdDefaultStory) {
+        setMessage("Create a PathBranching story before adding branches.");
         return;
       }
 
-      runMutation(mutations.createBranch(project, position));
+      runMutation(mutations.createBranch(currentProject, position));
     },
-    [project, runMutation],
+    [runMutation],
   );
 
   const createEvent = useCallback(
     (type: EventType = "normal", position?: { x: number; y: number }, branchId?: string) => {
-      if (!project) {
+      if (!isTauriRuntime()) {
+        setMessage("Preview web: no guarda en universo. Abre PathBranching con Tauri para crear eventos persistentes.");
+        return;
+      }
+      const currentProject = projectRef.current;
+      if (!currentProject || workspaceRef.current?.createdDefaultStory) {
+        setMessage("Create a PathBranching story before adding events.");
         return;
       }
 
-      runMutation(mutations.createEvent(project, type, position, branchId));
+      runMutation(mutations.createEvent(currentProject, type, position, branchId));
     },
-    [project, runMutation],
+    [runMutation],
   );
 
   const createEventInBranch = useCallback(
@@ -4681,6 +4774,37 @@ export function App() {
         return;
       }
       runMutation(mutations.deleteTransition(project, transitionId));
+    },
+    [project, runMutation],
+  );
+
+  const createCanonSuggestion = useCallback(
+    (canonRefId: string, source?: { eventId?: string; dataObjectId?: string }) => {
+      if (!project) {
+        return;
+      }
+      runMutation(mutations.createCanonEditSuggestion(project, canonRefId, source));
+    },
+    [project, runMutation],
+  );
+
+  const updateCanonSuggestion = useCallback(
+    (id: string, updates: Partial<CanonEditSuggestion>) => {
+      if (!project) {
+        return;
+      }
+      runMutation(mutations.updateCanonEditSuggestion(project, id, updates));
+    },
+    [project, runMutation],
+  );
+
+  const deleteCanonSuggestion = useCallback(
+    (id: string) => {
+      if (!project) {
+        return;
+      }
+      runMutation(mutations.deleteCanonEditSuggestion(project, id));
+      setSelection(undefined);
     },
     [project, runMutation],
   );
@@ -5023,6 +5147,24 @@ export function App() {
     }
   }, [applyProject, project, selection]);
 
+  const createDataObject = useCallback(
+    (classId: string) => {
+      if (!project) {
+        return;
+      }
+
+      const canonRefId = selection?.type === "canon" ? selection.id : undefined;
+      const result = mutations.createDataObject(project, classId, canonRefId);
+      applyProject(result.project, { dirty: result.project !== project });
+      setDataOpen(true);
+      if (result.selection) {
+        setSelection(result.selection as Selection);
+      }
+      setMessage(result.message);
+    },
+    [applyProject, project, selection],
+  );
+
   const toggleCanon = useCallback(() => {
     setCanonOpen((open) => {
       const nextOpen = !open;
@@ -5057,7 +5199,7 @@ export function App() {
           void openProject();
           break;
         case "pb:file:save":
-          void saveProject();
+          setMessage("Autosave is active; Ctrl/Cmd+S is disabled for now.");
           break;
         case "pb:file:save-as":
           void saveProjectAs();
@@ -5179,6 +5321,12 @@ export function App() {
         return;
       }
 
+      const suggestionPrefix = "file:canon-suggestion:";
+      if (id.startsWith(suggestionPrefix)) {
+        setSelection({ type: "canonSuggestion", id: id.slice(suggestionPrefix.length) });
+        return;
+      }
+
       setSelection({ type: "file", id });
     },
     [setActiveSequence],
@@ -5209,6 +5357,28 @@ export function App() {
     />
   ) : null;
 
+  const appDialogs = (
+    <>
+      <DiscardChangesDialog open={Boolean(discardDialog)} onDiscard={() => resolveDiscardDialog(true)} onCancel={() => resolveDiscardDialog(false)} />
+      <NamePromptDialog
+        open={Boolean(nameDialog)}
+        title={nameDialog?.title ?? ""}
+        label={nameDialog?.label ?? "Name"}
+        initialValue={nameDialog?.initialValue}
+        confirmLabel={nameDialog?.kind?.startsWith("rename") ? "Rename" : "Create"}
+        onConfirm={confirmNameDialog}
+        onCancel={() => setNameDialog(undefined)}
+      />
+      <ConfirmActionDialog
+        open={Boolean(confirmDialog)}
+        title={confirmDialog?.title ?? ""}
+        message={confirmDialog?.message ?? ""}
+        onConfirm={confirmActionDialog}
+        onCancel={() => setConfirmDialog(undefined)}
+      />
+    </>
+  );
+
   if (error) {
     return (
       <>
@@ -5230,17 +5400,18 @@ export function App() {
             onRedo={redoProject}
             canUndo={undoStack.length > 0}
             canRedo={redoStack.length > 0}
-            onCreateSequence={createSequence}
+            onCreateSequence={requestCreateSequence}
             onValidate={() => setSelection(undefined)}
             onToggleExport={() => setExportOpen((open) => !open)}
             onToggleData={() => setDataOpen((open) => !open)}
             onCreateDataObject={createKnowledgeObject}
             onResetLayout={resetLayout}
           />
+          {webPreviewBanner}
           <div className="error-state">{error}</div>
         </div>
         {settingsModal}
-        <DiscardChangesDialog open={Boolean(discardDialog)} onDiscard={() => resolveDiscardDialog(true)} onCancel={() => resolveDiscardDialog(false)} />
+        {appDialogs}
       </>
     );
   }
@@ -5266,19 +5437,20 @@ export function App() {
             onRedo={redoProject}
             canUndo={undoStack.length > 0}
             canRedo={redoStack.length > 0}
-            onCreateSequence={createSequence}
+            onCreateSequence={requestCreateSequence}
             onValidate={() => setSelection(undefined)}
             onToggleExport={() => setExportOpen((open) => !open)}
             onToggleData={() => setDataOpen((open) => !open)}
             onCreateDataObject={createKnowledgeObject}
             onResetLayout={resetLayout}
           />
+          {webPreviewBanner}
           <div className="loading-state">
             {settings.lastOpenedProject ? "Loading last universe..." : "Preparing dashboard..."}
           </div>
         </div>
         {settingsModal}
-        <DiscardChangesDialog open={Boolean(discardDialog)} onDiscard={() => resolveDiscardDialog(true)} onCancel={() => resolveDiscardDialog(false)} />
+        {appDialogs}
       </>
     );
   }
@@ -5288,6 +5460,7 @@ export function App() {
       <>
         <HomeDashboard
           project={project}
+          workspace={workspace}
           fileState={fileState}
           settings={settings}
           missingRecentProjects={missingRecentProjects}
@@ -5303,8 +5476,9 @@ export function App() {
           onSaveProjectAs={saveProjectAs}
           onExportRuntime={exportRuntime}
         />
+        {webPreviewBanner}
         {settingsModal}
-        <DiscardChangesDialog open={Boolean(discardDialog)} onDiscard={() => resolveDiscardDialog(true)} onCancel={() => resolveDiscardDialog(false)} />
+        {appDialogs}
       </>
     );
   }
@@ -5330,13 +5504,14 @@ export function App() {
         onRedo={redoProject}
         canUndo={undoStack.length > 0}
         canRedo={redoStack.length > 0}
-        onCreateSequence={createSequence}
+        onCreateSequence={requestCreateSequence}
         onValidate={() => setSelection(undefined)}
         onToggleExport={() => setExportOpen((open) => !open)}
         onToggleData={() => setDataOpen((open) => !open)}
         onCreateDataObject={createKnowledgeObject}
         onResetLayout={resetLayout}
       />
+        {webPreviewBanner}
 
         <div
         className={`workspace ${panelResizing ? "resizing" : ""}`}
@@ -5357,6 +5532,9 @@ export function App() {
         <FilesPanel
           project={project}
           files={files}
+          stories={workspace?.manifest.stories ?? []}
+          activeStoryId={workspace?.activeStory?.id}
+          storyName={workspace?.activeStory?.name}
           open={filesOpen}
           selectedId={storyExplorerSelectionId(project, selection)}
           onToggle={toggleFiles}
@@ -5364,7 +5542,13 @@ export function App() {
           onResetWidth={() => setStoriesWidth(DEFAULT_PANEL_WIDTH)}
           onResizeStateChange={setPanelResizing}
           onSequenceChange={setActiveSequence}
-          onCreateSequence={createSequence}
+          onStoryChange={setActiveStory}
+          onCreateStory={requestCreateStory}
+          onRenameStory={requestRenameStory}
+          onDeleteStory={requestDeleteStory}
+          onCreateSequence={requestCreateSequence}
+          onRenameSequence={requestRenameSequence}
+          onDeleteSequence={requestDeleteSequence}
           onSelect={handleFileSelect}
         />
         <StoryCanvas
@@ -5404,13 +5588,18 @@ export function App() {
           onCreateOutcome={createOutcome}
           onUpdateOutcome={updateOutcome}
           onDeleteOutcome={deleteOutcome}
-        onUpdateTransition={updateTransition}
-        onDeleteTransition={deleteTransition}
-        onUpdateDataObject={updateDataObject}
-        onDeleteDataObject={deleteDataObject}
-        onEditCanonRef={editCanonRefInBranch}
-        onUpdateEdgeLabel={updateEdgeLabel}
-        onDeleteSelection={deleteSelection}
+          onUpdateTransition={updateTransition}
+          onDeleteTransition={deleteTransition}
+          onCreateCanonSuggestion={createCanonSuggestion}
+          onUpdateCanonSuggestion={updateCanonSuggestion}
+          onDeleteCanonSuggestion={deleteCanonSuggestion}
+          onCreateDataObject={createDataObject}
+          onCreateKnowledgeObject={createKnowledgeObject}
+          onUpdateDataObject={updateDataObject}
+          onDeleteDataObject={deleteDataObject}
+          onEditCanonRef={editCanonRefInBranch}
+          onUpdateEdgeLabel={updateEdgeLabel}
+          onDeleteSelection={deleteSelection}
           onActivateMarkdownTab={setActiveMarkdownTabId}
           onCloseMarkdownTab={closeMarkdownTab}
           onChangeMarkdownContent={changeMarkdownContent}
@@ -5420,7 +5609,7 @@ export function App() {
         </div>
       </div>
       {settingsModal}
-      <DiscardChangesDialog open={Boolean(discardDialog)} onDiscard={() => resolveDiscardDialog(true)} onCancel={() => resolveDiscardDialog(false)} />
+      {appDialogs}
     </>
   );
 }
