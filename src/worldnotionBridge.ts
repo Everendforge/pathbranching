@@ -1,3 +1,4 @@
+import YAML from "yaml";
 import type { BranchingProject, CanonRef, ValidationFinding } from "./domain.js";
 
 export type WorldNotionVaultFile = {
@@ -15,15 +16,20 @@ export type WorldNotionEntity = {
   aliases: string[];
   parentId?: string;
   childrenIds: string[];
+  folder?: string;
   customProperties: Record<string, unknown>;
+  frontmatter: Record<string, unknown>;
   body: string;
 };
+
+export type WorldNotionPropertiesConfig = Record<string, unknown>;
 
 export type WorldNotionBridgeIndex = {
   entities: WorldNotionEntity[];
   canonRefs: CanonRef[];
   findings: ValidationFinding[];
   typeCounts: Record<string, number>;
+  propertiesConfig?: WorldNotionPropertiesConfig;
 };
 
 const BASE_ENTITY_FIELDS = new Set([
@@ -35,59 +41,10 @@ const BASE_ENTITY_FIELDS = new Set([
   "aliases",
   "parentId",
   "childrenIds",
+  "folder",
 ]);
 
-function parseScalar(value: string): unknown {
-  const trimmed = value.trim();
-  if (!trimmed) return "";
-  if (trimmed === "true") return true;
-  if (trimmed === "false") return false;
-  if (/^-?\d+(\.\d+)?$/.test(trimmed)) return Number(trimmed);
-  if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
-    const inner = trimmed.slice(1, -1).trim();
-    if (!inner) return [];
-    return inner.split(",").map((item) => String(parseScalar(item.trim().replace(/^["']|["']$/g, ""))));
-  }
-  return trimmed.replace(/^["']|["']$/g, "");
-}
-
-function parseTopLevelFrontmatter(frontmatter: string): Record<string, unknown> {
-  const data: Record<string, unknown> = {};
-  const lines = frontmatter.split(/\r?\n/);
-  let currentListKey: string | undefined;
-
-  lines.forEach((line) => {
-    if (!line.trim() || line.trimStart().startsWith("#")) return;
-
-    const listMatch = line.match(/^\s*-\s+(.+)$/);
-    if (listMatch && currentListKey) {
-      const current = Array.isArray(data[currentListKey]) ? (data[currentListKey] as unknown[]) : [];
-      data[currentListKey] = [...current, parseScalar(listMatch[1] ?? "")];
-      return;
-    }
-
-    const match = line.match(/^([A-Za-z0-9_-]+):(?:\s*(.*))?$/);
-    if (!match) {
-      currentListKey = undefined;
-      return;
-    }
-
-    const [, key, rawValue = ""] = match;
-    if (!key) return;
-    if (rawValue.trim() === "") {
-      data[key] = [];
-      currentListKey = key;
-      return;
-    }
-
-    data[key] = parseScalar(rawValue);
-    currentListKey = undefined;
-  });
-
-  return data;
-}
-
-function splitMarkdown(content: string): { data?: Record<string, unknown>; body: string } {
+function splitMarkdown(content: string): { data?: Record<string, unknown>; body: string; error?: string } {
   const normalized = content.replace(/\r\n/g, "\n");
   if (!normalized.startsWith("---\n")) {
     return { body: normalized };
@@ -95,16 +52,24 @@ function splitMarkdown(content: string): { data?: Record<string, unknown>; body:
 
   const closingFence = normalized.indexOf("\n---", 4);
   if (closingFence === -1) {
-    return { body: normalized };
+    return { body: normalized, error: "Unterminated YAML frontmatter fence." };
   }
 
   const frontmatter = normalized.slice(4, closingFence);
   const bodyStart = normalized.indexOf("\n", closingFence + 4);
   const body = bodyStart === -1 ? "" : normalized.slice(bodyStart + 1);
-  return {
-    data: parseTopLevelFrontmatter(frontmatter),
-    body,
-  };
+  try {
+    const parsed = YAML.parse(frontmatter) as unknown;
+    return {
+      data: parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {},
+      body,
+    };
+  } catch (error) {
+    return {
+      body,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 function stringArray(value: unknown): string[] {
@@ -113,6 +78,33 @@ function stringArray(value: unknown): string[] {
 
 function requiredString(value: unknown): string {
   return typeof value === "string" ? value : "";
+}
+
+function parsePropertiesConfig(files: WorldNotionVaultFile[], findings: ValidationFinding[]): WorldNotionPropertiesConfig | undefined {
+  const propertiesFile = files.find((file) => file.relativePath === ".everend/properties.json");
+  if (!propertiesFile) return undefined;
+
+  try {
+    const parsed = JSON.parse(propertiesFile.content) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      findings.push({
+        code: "invalid_worldnotion_properties",
+        severity: "warning",
+        message: "WorldNotion properties config must be a JSON object.",
+        ref: propertiesFile.relativePath,
+      });
+      return undefined;
+    }
+    return parsed as WorldNotionPropertiesConfig;
+  } catch (error) {
+    findings.push({
+      code: "invalid_worldnotion_properties",
+      severity: "warning",
+      message: `WorldNotion properties config must be valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+      ref: propertiesFile.relativePath,
+    });
+    return undefined;
+  }
 }
 
 function isTemplateLikeValue(value: unknown): boolean {
@@ -164,7 +156,12 @@ function toCanonRef(entity: WorldNotionEntity): CanonRef {
     tags: entity.tags,
     status: entity.status,
     favorite,
-    folderDescription: entity.type === "folder-description" || typeof entity.customProperties.folder === "string",
+    aliases: entity.aliases,
+    parentId: entity.parentId,
+    childrenIds: entity.childrenIds,
+    properties: entity.customProperties,
+    frontmatter: entity.frontmatter,
+    folderDescription: entity.type === "folder-description" || typeof entity.folder === "string",
     source: "worldnotion",
     canonSourcePath: entity.path,
   };
@@ -221,6 +218,7 @@ export function indexWorldNotionVaultFiles(files: WorldNotionVaultFile[]): World
   const looseCanonRefs: CanonRef[] = [];
   const seenIds = new Set<string>();
   const duplicateIds = new Set<string>();
+  const propertiesConfig = parsePropertiesConfig(files, findings);
 
   files
     .filter((file) => file.relativePath.endsWith(".md"))
@@ -229,11 +227,16 @@ export function indexWorldNotionVaultFiles(files: WorldNotionVaultFile[]): World
       const parsed = splitMarkdown(file.content);
       if (!parsed.data) {
         if (isTemplatePath(file.relativePath)) return;
-        looseCanonRefs.push(toUnidentifiedCanonRef(file, parsed.body, "This note has no WorldNotion frontmatter/id."));
+        const reason = parsed.error
+          ? `This note has invalid WorldNotion frontmatter: ${parsed.error}`
+          : "This note has no WorldNotion frontmatter/id.";
+        looseCanonRefs.push(toUnidentifiedCanonRef(file, parsed.body, reason));
         findings.push({
-          code: "missing_canon_identity",
+          code: parsed.error ? "invalid_frontmatter" : "missing_canon_identity",
           severity: "warning",
-          message: `WorldNotion note "${file.relativePath}" has no frontmatter/id and was imported as read-only unidentified canon.`,
+          message: parsed.error
+            ? `WorldNotion note "${file.relativePath}" has invalid frontmatter and was imported as read-only unidentified canon: ${parsed.error}`
+            : `WorldNotion note "${file.relativePath}" has no frontmatter/id and was imported as read-only unidentified canon.`,
           ref: file.relativePath,
         });
         return;
@@ -243,16 +246,16 @@ export function indexWorldNotionVaultFiles(files: WorldNotionVaultFile[]): World
       const id = requiredString(parsed.data.id);
       const type = requiredString(parsed.data.type);
       const name = requiredString(parsed.data.name);
-      const status = requiredString(parsed.data.status);
+      const status = requiredString(parsed.data.status) || "unknown";
 
-      if (!id || !type || !name || !status) {
+      if (!id || !type || !name) {
         looseCanonRefs.push(
-          toUnidentifiedCanonRef(file, parsed.body, "This note is missing id, type, name, or status in frontmatter."),
+          toUnidentifiedCanonRef(file, parsed.body, "This note is missing id, type, or name in frontmatter."),
         );
         findings.push({
           code: "missing_canon_identity",
           severity: "warning",
-          message: `WorldNotion note "${file.relativePath}" is missing id, type, name, or status and was imported as read-only unidentified canon.`,
+          message: `WorldNotion note "${file.relativePath}" is missing id, type, or name and was imported as read-only unidentified canon.`,
           ref: file.relativePath,
         });
         return;
@@ -275,7 +278,9 @@ export function indexWorldNotionVaultFiles(files: WorldNotionVaultFile[]): World
         aliases: stringArray(parsed.data.aliases),
         parentId: requiredString(parsed.data.parentId) || undefined,
         childrenIds: stringArray(parsed.data.childrenIds),
+        folder: requiredString(parsed.data.folder) || undefined,
         customProperties,
+        frontmatter: parsed.data,
         body: parsed.body,
       });
     });
@@ -299,6 +304,7 @@ export function indexWorldNotionVaultFiles(files: WorldNotionVaultFile[]): World
     canonRefs: [...entities.map(toCanonRef), ...looseCanonRefs],
     findings,
     typeCounts,
+    propertiesConfig,
   };
 }
 

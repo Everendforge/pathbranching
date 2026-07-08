@@ -1,5 +1,6 @@
 import { normalizeThemeId, type ThemeId } from "./themes.js";
 import type { AppView, CanvasMode, MarkdownEditorTab, Selection } from "./appTypes.js";
+import type { StoryOutlineTab } from "./storyOutlineModel.js";
 
 export const SETTINGS_KEY = "pathbranching.settings.v1";
 export const DEFAULT_PANEL_WIDTH = 282;
@@ -7,6 +8,24 @@ export const MIN_PANEL_WIDTH = 220;
 export const MAX_PANEL_WIDTH = 420;
 export const COLLAPSED_RAIL_WIDTH = 36;
 export const NEW_SEQUENCE_SELECT_VALUE = "__new_sequence__";
+
+export type CanvasBackgroundSettings = {
+  showDots: boolean;
+  showGrid: boolean;
+  snapToGrid: boolean;
+  gridSize: number;
+  opacity: number;
+};
+
+export type CanvasLayoutMode = "branching" | "timeline" | "branches";
+
+export const DEFAULT_CANVAS_BACKGROUND_SETTINGS: CanvasBackgroundSettings = {
+  showDots: true,
+  showGrid: false,
+  snapToGrid: false,
+  gridSize: 24,
+  opacity: 0.5,
+};
 
 export type PathBranchingWorkspaceSession = {
   view?: AppView;
@@ -17,10 +36,14 @@ export type PathBranchingWorkspaceSession = {
   storiesWidth?: number;
   exportOpen?: boolean;
   dataOpen?: boolean;
+  eventInspectorOpen?: boolean;
+  eventInspectorOpenEventIds?: string[];
+  eventInspectorExpandedEventId?: string;
   canvasMode?: CanvasMode;
   focusNodeId?: string;
   markdownTabs?: MarkdownEditorTab[];
   activeMarkdownTabId?: string;
+  storyOutlineTab?: StoryOutlineTab;
 };
 
 export type AppSettings = {
@@ -28,8 +51,31 @@ export type AppSettings = {
   recentProjects: string[];
   lastOpenedProject?: string;
   lastView?: AppView;
+  canvasBackground: CanvasBackgroundSettings;
+  canvasLayout: CanvasLayoutMode;
   workspaceSessions?: Record<string, PathBranchingWorkspaceSession>;
 };
+
+export function normalizeCanvasBackgroundSettings(value: unknown): CanvasBackgroundSettings {
+  const settings = value && typeof value === "object" ? (value as Partial<CanvasBackgroundSettings>) : {};
+  const gridSize = typeof settings.gridSize === "number" && Number.isFinite(settings.gridSize)
+    ? Math.min(80, Math.max(8, Math.round(settings.gridSize)))
+    : DEFAULT_CANVAS_BACKGROUND_SETTINGS.gridSize;
+  const opacity = typeof settings.opacity === "number" && Number.isFinite(settings.opacity)
+    ? Math.min(1, Math.max(0.05, settings.opacity))
+    : DEFAULT_CANVAS_BACKGROUND_SETTINGS.opacity;
+  return {
+    showDots: typeof settings.showDots === "boolean" ? settings.showDots : DEFAULT_CANVAS_BACKGROUND_SETTINGS.showDots,
+    showGrid: typeof settings.showGrid === "boolean" ? settings.showGrid : DEFAULT_CANVAS_BACKGROUND_SETTINGS.showGrid,
+    snapToGrid: typeof settings.snapToGrid === "boolean" ? settings.snapToGrid : DEFAULT_CANVAS_BACKGROUND_SETTINGS.snapToGrid,
+    gridSize,
+    opacity,
+  };
+}
+
+export function normalizeCanvasLayoutMode(value: unknown): CanvasLayoutMode {
+  return value === "timeline" || value === "branches" || value === "branching" ? value : "branching";
+}
 
 export function loadSettings(): AppSettings {
   try {
@@ -43,10 +89,19 @@ export function loadSettings(): AppSettings {
         : [],
       lastOpenedProject: typeof parsed.lastOpenedProject === "string" ? parsed.lastOpenedProject : undefined,
       lastView: parsed.lastView === "workspace" || parsed.lastView === "home" ? parsed.lastView : "home",
+      canvasBackground: normalizeCanvasBackgroundSettings(parsed.canvasBackground),
+      canvasLayout: normalizeCanvasLayoutMode(parsed.canvasLayout),
       workspaceSessions,
     };
   } catch {
-    return { theme: "worldnotion-light", recentProjects: [], lastView: "home", workspaceSessions: {} };
+    return {
+      theme: "worldnotion-light",
+      recentProjects: [],
+      lastView: "home",
+      canvasBackground: DEFAULT_CANVAS_BACKGROUND_SETTINGS,
+      canvasLayout: "branching",
+      workspaceSessions: {},
+    };
   }
 }
 
@@ -104,6 +159,11 @@ export function sessionMarkdownTabs(value: unknown): MarkdownEditorTab[] {
     .slice(-5);
 }
 
+export function sessionStringIds(value: unknown, limit = 5): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string" && item.length > 0).slice(-limit);
+}
+
 export function normalizeWorkspaceSession(session: PathBranchingWorkspaceSession | undefined): PathBranchingWorkspaceSession {
   if (!session) return {};
   return {
@@ -115,9 +175,17 @@ export function normalizeWorkspaceSession(session: PathBranchingWorkspaceSession
     storiesWidth: session.storiesWidth === undefined ? undefined : clampPanelWidth(session.storiesWidth),
     exportOpen: typeof session.exportOpen === "boolean" ? session.exportOpen : undefined,
     dataOpen: typeof session.dataOpen === "boolean" ? session.dataOpen : undefined,
+    eventInspectorOpen: typeof session.eventInspectorOpen === "boolean" ? session.eventInspectorOpen : undefined,
+    eventInspectorOpenEventIds: sessionStringIds(session.eventInspectorOpenEventIds),
+    eventInspectorExpandedEventId:
+      typeof session.eventInspectorExpandedEventId === "string" ? session.eventInspectorExpandedEventId : undefined,
     canvasMode: session.canvasMode === "branching" || session.canvasMode === "focus" ? session.canvasMode : undefined,
     focusNodeId: typeof session.focusNodeId === "string" ? session.focusNodeId : undefined,
     markdownTabs: sessionMarkdownTabs(session.markdownTabs),
     activeMarkdownTabId: typeof session.activeMarkdownTabId === "string" ? session.activeMarkdownTabId : undefined,
+    storyOutlineTab:
+      session.storyOutlineTab === "sequence" || session.storyOutlineTab === "branches" || session.storyOutlineTab === "events"
+        ? session.storyOutlineTab
+        : undefined,
   };
 }

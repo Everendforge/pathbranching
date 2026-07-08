@@ -1,15 +1,10 @@
 import {
   ArrowLeft,
   Crown,
-  Database,
   Download,
-  FilePlus2,
   FolderOpen,
   Home,
   Moon,
-  RotateCcw,
-  Save,
-  SearchCheck,
   Settings,
   Sun,
 } from "lucide-react";
@@ -33,48 +28,31 @@ export function Topbar({
   fileState,
   findings,
   exportOpen,
-  dataOpen,
   theme,
   onOpenSettings,
+  onRevealUniverse,
   onToggleTheme,
-  onOpenProject,
-  onSaveProject,
   onExportRuntime,
   onHome,
   onUndo,
   onRedo,
   canUndo,
   canRedo,
-  onCreateSequence,
-  onValidate,
-  onToggleExport,
-  onToggleData,
-  onCreateDataObject,
-  onResetLayout,
 }: {
   project?: BranchingProject;
   fileState?: ProjectFileState;
   findings: ValidationFinding[];
   exportOpen: boolean;
-  dataOpen: boolean;
   theme: ThemeId;
   onOpenSettings: () => void;
+  onRevealUniverse: () => void;
   onToggleTheme: () => void;
-  onOpenProject: () => void;
-  onSaveProject: () => void;
-  onSaveProjectAs: () => void;
   onExportRuntime: () => void;
   onHome: () => void;
   onUndo: () => void;
   onRedo: () => void;
   canUndo: boolean;
   canRedo: boolean;
-  onCreateSequence: () => void;
-  onValidate: () => void;
-  onToggleExport: () => void;
-  onToggleData: () => void;
-  onCreateDataObject: () => void;
-  onResetLayout: () => void;
 }) {
   const errorCount = findings.filter((finding) => finding.severity === "error").length;
   const status = findings.length === 0 ? "Clean" : `${findings.length} findings`;
@@ -109,24 +87,18 @@ export function Topbar({
         <button type="button" className="dock-icon-button dock-settings-button" onClick={onOpenSettings} title="Application settings">
           <Settings size={14} />
         </button>
+        <button
+          type="button"
+          className="dock-icon-button"
+          onClick={onRevealUniverse}
+          disabled={!fileState?.universePath}
+          title={fileState?.universePath ? "Reveal universe folder" : "Open a universe first"}
+        >
+          <FolderOpen size={14} />
+        </button>
       </div>
 
       <div className="dock-top-right">
-        <div className="dock-command-group" aria-label="Universe">
-          <button type="button" title="Open universe" onClick={onOpenProject}>
-            <FolderOpen size={14} />
-            <span>Open</span>
-          </button>
-          <button type="button" title="Save branching story" onClick={onSaveProject}>
-            <Save size={14} />
-            <span>Save</span>
-          </button>
-          <button type="button" title="Export current preview" onClick={onExportRuntime}>
-            <Download size={14} />
-            <span>Export</span>
-          </button>
-        </div>
-
         <div className="dock-command-group" aria-label="History">
           <button type="button" title="Undo" onClick={onUndo} disabled={!canUndo}>
             <ArrowLeft size={14} />
@@ -138,33 +110,10 @@ export function Topbar({
           </button>
         </div>
 
-        <div className="dock-command-group" aria-label="Authoring">
-          <button type="button" title="New sequence" onClick={onCreateSequence}>
-            <FilePlus2 size={14} />
-            <span>Sequence</span>
-          </button>
-          <button type="button" title="Validate project" onClick={onValidate}>
-            <SearchCheck size={14} />
-            <span>Validate</span>
-          </button>
-        </div>
-
         <div className="dock-command-group" aria-label="Panels">
-          <button type="button" title="Toggle runtime export preview" className={exportOpen ? "active" : ""} onClick={onToggleExport}>
+          <button type="button" title="Export current story" className={exportOpen ? "active" : ""} onClick={onExportRuntime}>
             <Download size={14} />
-            <span>Export View</span>
-          </button>
-          <button type="button" title="Toggle project data drawer" className={dataOpen ? "active" : ""} onClick={onToggleData}>
-            <Database size={14} />
-            <span>Data</span>
-          </button>
-          <button type="button" title="Create knowledge data object" onClick={onCreateDataObject}>
-            <FilePlus2 size={14} />
-            <span>Knowledge</span>
-          </button>
-          <button type="button" title="Reset canvas layout" onClick={onResetLayout}>
-            <RotateCcw size={14} />
-            <span>Layout</span>
+            <span>Export</span>
           </button>
         </div>
 

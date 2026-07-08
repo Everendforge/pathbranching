@@ -20,7 +20,7 @@ export function platformLabelsFor(platform: string, userAgent: string): Platform
 
   return {
     openProject: isMac ? "Open universe..." : "Open universe...",
-    saveProject: "Save branching story",
+    saveProject: "Save event edits",
     saveProjectAs: "Save into universe...",
     exportRuntime: "Export runtime package...",
     revealProject: isWindows ? "Reveal universe in Explorer" : isMac ? "Reveal universe in Finder" : "Reveal universe in Files",

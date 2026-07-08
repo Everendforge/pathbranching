@@ -245,6 +245,11 @@ export async function saveWorkingCopy(
   return saveUniverseTextFile(universePath, workingCopyPathForCanonRef(canonRefId), content, expectedModifiedMs);
 }
 
+export async function revealUniverseFolder(path: string): Promise<WriteResult> {
+  assertDesktopRuntime("Revealing a universe folder");
+  return invoke<WriteResult>("reveal_universe", { path });
+}
+
 export async function saveProjectAsDialog(project: BranchingProject): Promise<WriteResult | undefined> {
   assertDesktopRuntime("Saving a local project");
   const result = await invoke<WriteResult | null>("save_project_as_dialog", {

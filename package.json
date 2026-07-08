@@ -5,12 +5,12 @@
   "type": "module",
   "description": "Visual branching narrative editor core for Everend Forge.",
   "scripts": {
-    "dev": "node scripts/run-vite.mjs --host 127.0.0.1",
+    "dev": "node scripts/run-vite.mjs --host 127.0.0.1 --force",
     "build": "npm run typecheck && node scripts/run-vite.mjs build",
     "typecheck": "node scripts/run-tsc.mjs --noEmit",
     "build:core": "node scripts/run-tsc.mjs -p tsconfig.build.json",
-    "verify:core": "npm run build:core && node scripts/verify-core.mjs && node scripts/verify-workspace-persistence.mjs",
-    "verify:persistence": "npm run build:core && node scripts/verify-workspace-persistence.mjs",
+    "verify:core": "npm run build:core && node scripts/verify-core.mjs && node scripts/verify-workspace-persistence.mjs && node scripts/verify-action-persistence.mjs && node scripts/verify-worldnotion-yaml-import.mjs && node scripts/verify-story-outline.mjs",
+    "verify:persistence": "npm run build:core && node scripts/verify-workspace-persistence.mjs && node scripts/verify-action-persistence.mjs",
     "demo:bridge": "npm run build:core && node scripts/demo-worldnotion-bridge.mjs",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
@@ -30,6 +30,7 @@
     "@xyflow/react": "^12.11.0",
     "lucide-react": "^1.21.0",
     "react": "^19.2.7",
-    "react-dom": "^19.2.7"
+    "react-dom": "^19.2.7",
+    "yaml": "^2.8.1"
   }
 }

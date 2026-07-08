@@ -1,5 +1,6 @@
 import {
   Background,
+  BackgroundVariant,
   Controls,
   MiniMap,
   ReactFlow,
@@ -10,6 +11,7 @@ import {
   type EdgeChange,
   type NodeChange,
   type OnConnect,
+  type OnConnectEnd,
   type ReactFlowInstance,
 } from "@xyflow/react";
 import { listen } from "@tauri-apps/api/event";
@@ -20,18 +22,27 @@ import { nodeTypes } from "./components/StoryNode.js";
 import { Topbar } from "./components/Topbar.js";
 import { UniverseIconFrame } from "./components/UniverseIconFrame.js";
 import {
-  ArrowLeft,
+  Bold,
+  ChevronDown,
+  ChevronUp,
+  Code,
   Crown,
   Database,
   Download,
+  Eye,
+  EyeOff,
   FilePlus2,
   FolderOpen,
   Focus,
   GitBranch,
+  Heading1,
   Home,
+  Italic,
+  Link,
+  List,
+  ListOrdered,
   Moon,
-  RotateCcw,
-  Save,
+  Quote,
   SearchCheck,
   Settings,
   Sun,
@@ -77,6 +88,14 @@ import {
   renameBranchingStory,
   saveBranchingDocument,
 } from "./documentController.js";
+import {
+  applyEventDraftToProject,
+  createEventDraftFromSelection,
+  setEventDraftMode,
+  updateEventDraft,
+  type EventDraft,
+  type EventDraftMode,
+} from "./eventDraft.js";
 import { buildExportPreview, type ExportPreviewMode } from "./exportPreview.js";
 import { conditionCount, conditionLabels, consequenceLabel, isConditionSet } from "./logic.js";
 import * as mutations from "./projectMutations.js";
@@ -87,6 +106,7 @@ import {
   openUniversePath,
   openUniverseStory,
   projectFileName,
+  revealUniverseFolder,
   exportTextDialog,
   saveWorkingCopy,
   type ProjectFileState,
@@ -104,16 +124,28 @@ import {
 } from "./themes.js";
 import { activeSequenceId, findBranch, findEvent, findSequence } from "./storySelection.js";
 import {
+  buildEventDependencyOutline,
+  buildSequenceConnectionPreview,
+  assignEventToBranch,
+  branchesForSequence,
+  eventsForBranch,
+  type StoryOutlineTab,
+} from "./storyOutlineModel.js";
+import {
   COLLAPSED_RAIL_WIDTH,
   DEFAULT_PANEL_WIDTH,
   NEW_SEQUENCE_SELECT_VALUE,
   clampPanelWidth,
   loadSettings,
+  normalizeCanvasBackgroundSettings,
+  normalizeCanvasLayoutMode,
   normalizeWorkspaceSession,
   rememberRecentProject,
   saveSettings,
   storableMarkdownTabs,
   type AppSettings,
+  type CanvasBackgroundSettings,
+  type CanvasLayoutMode,
   type PathBranchingWorkspaceSession,
 } from "./workspaceSettings.js";
 import { validateProject } from "./validate.js";
@@ -159,9 +191,39 @@ function canonRefPath(ref: CanonRef) {
   return ref.canonSourcePath ?? ref.id;
 }
 
+function searchablePropertyValues(value: unknown): string[] {
+  if (value == null) return [];
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return [String(value)];
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap(searchablePropertyValues);
+  }
+  if (typeof value === "object") {
+    return Object.entries(value as Record<string, unknown>).flatMap(([key, nested]) => [
+      key,
+      ...searchablePropertyValues(nested),
+    ]);
+  }
+  return [];
+}
+
 function canonRefMatches(ref: CanonRef, query: string) {
   if (!query) return true;
-  return [ref.id, ref.label, ref.kind, ref.status, ref.canonSourcePath, ref.identityWarning, ...(ref.tags ?? [])]
+  return [
+    ref.id,
+    ref.label,
+    ref.kind,
+    ref.status,
+    ref.canonSourcePath,
+    ref.identityWarning,
+    ref.parentId,
+    ...(ref.tags ?? []),
+    ...(ref.aliases ?? []),
+    ...(ref.childrenIds ?? []),
+    ...searchablePropertyValues(ref.properties),
+    ...searchablePropertyValues(ref.frontmatter),
+  ]
     .filter(Boolean)
     .some((value) => String(value).toLowerCase().includes(query));
 }
@@ -255,6 +317,10 @@ function universeDisplayPath(fileState?: ProjectFileState) {
   return [universePath, storyPath].filter(Boolean).join(" / ");
 }
 
+function workspaceLoadWarningMessage(workspace: PathBranchingWorkspace) {
+  return workspace.loadWarnings?.length ? workspace.loadWarnings.join(" ") : undefined;
+}
+
 function updateProjectCanvas(project: BranchingProject, nodes: StoryCanvasNode[]): BranchingProject {
   return {
     ...project,
@@ -273,6 +339,135 @@ function updateProjectCanvas(project: BranchingProject, nodes: StoryCanvasNode[]
   };
 }
 
+type CanvasPoint = { x: number; y: number };
+
+function snapCanvasPoint(point: CanvasPoint, snapToGrid: boolean, gridSize: number): CanvasPoint {
+  if (!snapToGrid) return point;
+  const size = Math.max(1, gridSize);
+  return {
+    x: Math.round(point.x / size) * size,
+    y: Math.round(point.y / size) * size,
+  };
+}
+
+function eventDepthsForSequence(project: BranchingProject, sequence: Sequence) {
+  const depths = new Map<string, number>();
+  const eventIds = new Set(sequence.eventIds);
+  const queue: string[] = [];
+  const entryId = sequence.entryEventId && eventIds.has(sequence.entryEventId) ? sequence.entryEventId : sequence.eventIds[0];
+  if (entryId) {
+    depths.set(entryId, 0);
+    queue.push(entryId);
+  }
+
+  while (queue.length) {
+    const eventId = queue.shift() as string;
+    const depth = depths.get(eventId) ?? 0;
+    const eventNode = findEvent(project, eventId);
+    eventNode?.transitions?.forEach((transition) => {
+      if (!eventIds.has(transition.to)) return;
+      const nextDepth = depth + 1;
+      if (!depths.has(transition.to)) {
+        depths.set(transition.to, nextDepth);
+        queue.push(transition.to);
+      }
+    });
+  }
+
+  sequence.eventIds.forEach((eventId, index) => {
+    if (!depths.has(eventId)) {
+      depths.set(eventId, index);
+    }
+  });
+
+  return depths;
+}
+
+function canvasLayoutPositions(project: BranchingProject, mode: CanvasLayoutMode, snapToGrid: boolean, gridSize: number) {
+  const sequenceId = activeSequenceId(project);
+  const sequence = sequenceId ? findSequence(project, sequenceId) : undefined;
+  if (!sequence) return {};
+
+  const positions: Record<string, CanvasPoint> = {};
+  const activeEvents = sequence.eventIds
+    .map((eventId) => findEvent(project, eventId))
+    .filter((eventNode): eventNode is EventNode => Boolean(eventNode));
+  const point = (x: number, y: number) => snapCanvasPoint({ x, y }, snapToGrid, gridSize);
+  const startId = `start:${sequence.id}`;
+  positions[startId] = point(80, 80);
+
+  if (mode === "timeline") {
+    activeEvents.forEach((eventNode, index) => {
+      positions[eventNode.id] = point(360, 80 + index * 188);
+    });
+    return positions;
+  }
+
+  if (mode === "branches") {
+    const branchIds = Array.from(
+      new Set([
+        ...(sequence.branchIds ?? []),
+        ...activeEvents.map((eventNode) => eventNode.branchRef).filter((branchId): branchId is string => Boolean(branchId)),
+      ]),
+    );
+    const lanes = [...branchIds, "__unbranched__"];
+    const laneCounts = new Map<string, number>();
+    activeEvents.forEach((eventNode, sequenceIndex) => {
+      const laneId = eventNode.branchRef && branchIds.includes(eventNode.branchRef) ? eventNode.branchRef : "__unbranched__";
+      const laneIndex = lanes.indexOf(laneId);
+      const indexInLane = laneCounts.get(laneId) ?? 0;
+      laneCounts.set(laneId, indexInLane + 1);
+      positions[eventNode.id] = point(360 + indexInLane * 292, 80 + Math.max(0, laneIndex) * 190 + (sequenceIndex % 2) * 10);
+    });
+    return positions;
+  }
+
+  const depths = eventDepthsForSequence(project, sequence);
+  const depthCounts = new Map<number, number>();
+  activeEvents
+    .slice()
+    .sort((left, right) => {
+      const depthDelta = (depths.get(left.id) ?? 0) - (depths.get(right.id) ?? 0);
+      if (depthDelta !== 0) return depthDelta;
+      return sequence.eventIds.indexOf(left.id) - sequence.eventIds.indexOf(right.id);
+    })
+    .forEach((eventNode) => {
+      const depth = depths.get(eventNode.id) ?? 0;
+      const indexInDepth = depthCounts.get(depth) ?? 0;
+      depthCounts.set(depth, indexInDepth + 1);
+      positions[eventNode.id] = point(360 + depth * 292, 80 + indexInDepth * 176);
+    });
+  return positions;
+}
+
+function applyCanvasLayoutToProject(
+  project: BranchingProject,
+  mode: CanvasLayoutMode,
+  options: { snapToGrid: boolean; gridSize: number },
+): BranchingProject {
+  const layoutPositions = canvasLayoutPositions(project, mode, options.snapToGrid, options.gridSize);
+  const nextNodes = {
+    ...(project.canvas?.nodes ?? {}),
+    ...Object.fromEntries(
+      Object.entries(layoutPositions).map(([id, position]) => [
+        id,
+        {
+          ...(project.canvas?.nodes?.[id] ?? {}),
+          position,
+        },
+      ]),
+    ),
+  };
+  return {
+    ...project,
+    canvas: {
+      ...project.canvas,
+      activeSequenceId: activeSequenceId(project),
+      nodes: nextNodes,
+    },
+  };
+}
+
 function canonDisplay(project: BranchingProject, id: string) {
   const ref = project.canonRefs.find((canonRef) => canonRef.id === id);
   return ref ? `${ref.kind ?? "canon"} - ${ref.id}` : id;
@@ -282,9 +477,6 @@ function eventIdFromSelection(project: BranchingProject, nodes: StoryCanvasNode[
   if (!selection) return undefined;
   if (selection.type === "node") {
     if (findEvent(project, selection.id)) return selection.id;
-    const selectedNode = nodes.find((node) => node.id === selection.id);
-    const detailEventId = selectedNode?.data.details?.eventId;
-    return typeof detailEventId === "string" && findEvent(project, detailEventId) ? detailEventId : undefined;
   }
   if (selection.type === "file" && selection.id.startsWith("file:event:")) {
     const eventId = selection.id.slice("file:event:".length);
@@ -1055,8 +1247,6 @@ function HomeDashboard({
   onOpenProject,
   onOpenRecentProject,
   onRemoveRecentProject,
-  onSaveProject,
-  onSaveProjectAs,
   onExportRuntime,
 }: {
   project?: BranchingProject;
@@ -1072,8 +1262,6 @@ function HomeDashboard({
   onOpenProject: () => void;
   onOpenRecentProject: (path: string) => void;
   onRemoveRecentProject: (path: string) => void;
-  onSaveProject: () => void;
-  onSaveProjectAs: () => void;
   onExportRuntime: () => void;
 }) {
   const activeSequence =
@@ -1084,9 +1272,7 @@ function HomeDashboard({
     ? "No universe"
     : hasTransientStory
       ? "No story yet"
-      : fileState.dirty
-        ? "Unsaved"
-        : "Saved";
+      : "Ready";
 
   return (
     <main className="home-shell">
@@ -1141,14 +1327,6 @@ function HomeDashboard({
           <button type="button" onClick={onEnterWorkspace} disabled={!canEnterWorkspace}>
             <GitBranch size={16} />
             Workspace
-          </button>
-          <button type="button" onClick={onSaveProject} disabled={!canEnterWorkspace}>
-            <Save size={16} />
-            Save
-          </button>
-          <button type="button" onClick={onSaveProjectAs} disabled={!canEnterWorkspace}>
-            <Save size={16} />
-            Save Into Universe
           </button>
           <button type="button" onClick={onExportRuntime} disabled={!canEnterWorkspace}>
             <Download size={16} />
@@ -1251,8 +1429,44 @@ function DiscardChangesDialog({
     <div className="modal-backdrop">
       <section className="modal-dialog">
         <h2>Unsaved changes</h2>
-        <p>This project has unsaved changes. Discard them and continue?</p>
+        <p>This event has unsaved edits. Discard them and continue?</p>
         <div className="inspector-actions">
+          <button type="button" className="danger" onClick={onDiscard}>
+            Discard
+          </button>
+          <button type="button" onClick={onCancel}>
+            Cancel
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function EventDraftChangesDialog({
+  open,
+  onSave,
+  onDiscard,
+  onCancel,
+}: {
+  open: boolean;
+  onSave: () => void;
+  onDiscard: () => void;
+  onCancel: () => void;
+}) {
+  if (!open) {
+    return null;
+  }
+
+  return (
+    <div className="modal-backdrop">
+      <section className="modal-dialog">
+        <h2>Unsaved event edits</h2>
+        <p>This event has unsaved text or component edits. Save them before changing selection?</p>
+        <div className="inspector-actions">
+          <button type="button" onClick={onSave}>
+            Save
+          </button>
           <button type="button" className="danger" onClick={onDiscard}>
             Discard
           </button>
@@ -1450,6 +1664,7 @@ function PathBranchingSettingsModal({
   findings,
   theme,
   onUpdateEventCategories,
+  onCanvasBackgroundChange,
   onThemeChange,
   onToggleTheme,
   onOpenUniverse,
@@ -1463,6 +1678,7 @@ function PathBranchingSettingsModal({
   findings: ValidationFinding[];
   theme: ThemeId;
   onUpdateEventCategories: (categories: EventCategoryDefinition[]) => void;
+  onCanvasBackgroundChange: (updates: Partial<CanvasBackgroundSettings>) => void;
   onThemeChange: (theme: ThemeId) => void;
   onToggleTheme: () => void;
   onOpenUniverse: () => void;
@@ -1654,6 +1870,52 @@ function PathBranchingSettingsModal({
                   <label>
                     <span>Last universe</span>
                     <input value={settings.lastOpenedProject ?? "None"} readOnly />
+                  </label>
+                  <label>
+                    <span>Canvas circles</span>
+                    <input
+                      type="checkbox"
+                      checked={settings.canvasBackground.showDots}
+                      onChange={(event) => onCanvasBackgroundChange({ showDots: event.target.checked })}
+                    />
+                  </label>
+                  <label>
+                    <span>Canvas grid</span>
+                    <input
+                      type="checkbox"
+                      checked={settings.canvasBackground.showGrid}
+                      onChange={(event) => onCanvasBackgroundChange({ showGrid: event.target.checked })}
+                    />
+                  </label>
+                  <label>
+                    <span>Align to grid</span>
+                    <input
+                      type="checkbox"
+                      checked={settings.canvasBackground.snapToGrid}
+                      onChange={(event) => onCanvasBackgroundChange({ snapToGrid: event.target.checked })}
+                    />
+                  </label>
+                  <label>
+                    <span>Grid size</span>
+                    <input
+                      type="number"
+                      min={8}
+                      max={80}
+                      step={2}
+                      value={settings.canvasBackground.gridSize}
+                      onChange={(event) => onCanvasBackgroundChange({ gridSize: Number(event.target.value) })}
+                    />
+                  </label>
+                  <label>
+                    <span>Grid opacity</span>
+                    <input
+                      type="range"
+                      min={0.05}
+                      max={1}
+                      step={0.05}
+                      value={settings.canvasBackground.opacity}
+                      onChange={(event) => onCanvasBackgroundChange({ opacity: Number(event.target.value) })}
+                    />
                   </label>
                 </div>
               </div>
@@ -1911,108 +2173,320 @@ function CanonPanel({
   );
 }
 
-type StoryExplorerItem = {
-  id: string;
-  label: string;
-  detail?: string;
-  badges?: string[];
-};
+function OutlineBadges({ badges }: { badges: string[] }) {
+  const visibleBadges = badges.filter(Boolean);
+  if (!visibleBadges.length) return null;
+  return (
+    <span className="explorer-meta">
+      {visibleBadges.map((badge) => (
+        <small key={badge}>{badge}</small>
+      ))}
+    </span>
+  );
+}
 
-type StoryExplorerSection = {
-  id: string;
-  label: string;
-  items: StoryExplorerItem[];
-};
+function SequenceOutlinePanel({
+  project,
+  sequence,
+  selectedId,
+  onSelect,
+  onUpdateSequence,
+}: {
+  project: BranchingProject;
+  sequence?: Sequence;
+  selectedId?: string;
+  onSelect: (id: string) => void;
+  onUpdateSequence: (id: string, updates: Partial<Sequence>) => void;
+}) {
+  const connections = buildSequenceConnectionPreview(project).filter(
+    (connection) => connection.fromSequenceId === sequence?.id || connection.toSequenceId === sequence?.id,
+  );
 
-function buildStoryExplorerSections(project: BranchingProject): StoryExplorerSection[] {
-  const sequenceId = activeSequenceId(project);
-  const activeSequence = sequenceId ? findSequence(project, sequenceId) : undefined;
-  const activeEventIds = new Set(activeSequence?.eventIds ?? []);
-  const sequenceEvents = project.events.filter((event) => activeEventIds.has(event.id));
-  const declaredBranchIds = new Set(activeSequence?.branchIds ?? []);
-  const sequenceBranches = project.branches.filter((branch) => declaredBranchIds.has(branch.id) || branch.eventIds.some((eventId) => activeEventIds.has(eventId)));
-  const activeBranchIds = new Set([...(activeSequence?.branchIds ?? []), ...sequenceBranches.map((branch) => branch.id)]);
-  return [
-    {
-      id: "sequence",
-      label: "Active Sequence",
-      items: activeSequence
-        ? [
-            {
-              id: `file:sequence:${activeSequence.id}`,
-              label: activeSequence.name,
-              detail: activeSequence.entryEventId ? `entry ${activeSequence.entryEventId}` : "no entry event",
-              badges: [
-                activeSequence.id === project.entrySequenceId ? "entry" : "",
-                `${activeSequence.branchIds?.length ?? 0} branches`,
-                `${activeSequence.eventIds.length} events`,
-              ].filter(Boolean),
-            },
-          ]
-        : [],
-    },
-    {
-      id: "branches",
-      label: "Branches",
-      items: sequenceBranches.map((branch) => ({
-        id: `file:branch:${branch.id}`,
-        label: branch.title,
-        detail: branch.description || branch.id,
-        badges: [`${branch.eventIds.filter((eventId) => activeEventIds.has(eventId)).length} events`],
-      })),
-    },
-    {
-      id: "events",
-      label: "Events",
-      items: sequenceEvents.map((event) => ({
-        id: `file:event:${event.id}`,
-        label: event.name,
-        detail: event.script?.sourcePath || event.branchRef || event.id,
-        badges: [event.type, event.script ? "ink" : "", event.canonRefs?.length ? `${event.canonRefs.length} refs` : ""].filter(Boolean),
-      })),
-    },
-    {
-      id: "scripts",
-      label: "Scripts",
-      items: project.scripts
-        .filter((script) =>
-          sequenceEvents.some((event) => event.script ? event.script.id === script.id || Boolean(event.script.sourcePath && event.script.sourcePath === script.sourcePath) : false),
-        )
-        .map((script) => ({
-          id: `file:script:${script.id}`,
-          label: script.id,
-          detail: script.sourcePath ?? script.entrySection ?? script.format,
-          badges: [script.format],
-        })),
-    },
-    {
-      id: "data",
-      label: "Data Objects",
-      items: (project.projectDataObjects ?? [])
-        .filter((dataObject) => {
-          const scope = dataObject.scope;
-          return !scope || scope.global || scope.sequenceId === activeSequence?.id || (scope.branchId ? activeBranchIds.has(scope.branchId) : false) || (scope.eventId ? activeEventIds.has(scope.eventId) : false);
-        })
-        .map((dataObject) => ({
-          id: `file:data-object:${dataObject.id}`,
-          label: dataObject.name,
-          detail: dataObject.classId,
-          badges: [dataObject.scope?.global ? "global" : "", dataObject.canonRefs?.length ? `${dataObject.canonRefs.length} refs` : ""].filter(Boolean),
-        })),
-    },
-    {
-      id: "suggestions",
-      label: "WorldNotion Suggestions",
-      items: (project.canonEditSuggestions ?? [])
-        .filter((suggestion) => !suggestion.sourceEventId || activeEventIds.has(suggestion.sourceEventId))
-        .map((suggestion) => ({
-          id: `file:canon-suggestion:${suggestion.id}`,
-          label: suggestion.title,
-          detail: suggestion.targetPath ?? suggestion.canonRefId,
-          badges: [suggestion.status, "safe review"].filter(Boolean),
-        })),
-    },
-  ].filter((section) => section.items.length > 0);
+  if (!sequence) {
+    return <span className="empty-line">Create a sequence to start outlining this story.</span>;
+  }
+
+  return (
+    <div className="story-outline-map">
+      <button
+        type="button"
+        className={`outline-card primary ${selectedId === `file:sequence:${sequence.id}` ? "active" : ""}`}
+        onClick={() => onSelect(`file:sequence:${sequence.id}`)}
+      >
+        <strong>{sequence.name}</strong>
+        <span>{sequence.id}</span>
+        <OutlineBadges
+          badges={[
+            sequence.id === project.entrySequenceId ? "entry sequence" : "",
+            `${sequence.eventIds.length} events`,
+            `${sequence.branchIds?.length ?? 0} branches`,
+            conditionCount(sequence.availability) ? `${conditionCount(sequence.availability)} conditions` : "",
+            sequence.ruleSets?.length ? `${sequence.ruleSets.length} rules` : "",
+          ]}
+        />
+      </button>
+      <section className="outline-editor">
+        <label className="field-label">
+          Name
+          <input value={sequence.name} onChange={(event) => onUpdateSequence(sequence.id, { name: event.target.value })} />
+        </label>
+        <label className="field-label">
+          Entry Event
+          <select value={sequence.entryEventId} onChange={(event) => onUpdateSequence(sequence.id, { entryEventId: event.target.value })}>
+            {sequence.eventIds.map((eventId) => (
+              <option key={eventId} value={eventId}>
+                {findEvent(project, eventId)?.name ?? eventId}
+              </option>
+            ))}
+          </select>
+        </label>
+      </section>
+      <section className="outline-section">
+        <h3>Sequence Connections</h3>
+        {connections.length ? (
+          connections.map((connection) => (
+            <button
+              type="button"
+              className="outline-card relation"
+              key={connection.id}
+              onClick={() => onSelect(`file:event:${connection.fromEventId}`)}
+            >
+              <strong>{connection.fromSequenceName} {"->"} {connection.toSequenceName}</strong>
+              <span>{connection.fromEventName} {"->"} {connection.toEventName}</span>
+              <OutlineBadges badges={[connection.label, connection.conditionCount ? `${connection.conditionCount} conditions` : ""]} />
+            </button>
+          ))
+        ) : (
+          <span className="empty-line">No cross-sequence transitions yet.</span>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function BranchTagPanel({
+  project,
+  sequence,
+  selectedId,
+  onSelect,
+  onCreateBranch,
+  onUpdateBranch,
+  onDeleteBranch,
+  onCreateEventInBranch,
+  onAssignEventToBranch,
+}: {
+  project: BranchingProject;
+  sequence?: Sequence;
+  selectedId?: string;
+  onSelect: (id: string) => void;
+  onCreateBranch: () => void;
+  onUpdateBranch: (id: string, updates: Partial<Branch>) => void;
+  onDeleteBranch: (id: string) => void;
+  onCreateEventInBranch: (branchId: string, type?: EventType) => void;
+  onAssignEventToBranch: (eventId: string, branchId?: string) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [expandedBranches, setExpandedBranches] = useState<Record<string, boolean>>({});
+  const normalizedQuery = query.trim().toLowerCase();
+  const sequenceBranches = branchesForSequence(project, sequence?.id);
+  const sequenceBranchIds = new Set(sequenceBranches.map((branch) => branch.id));
+  const branches = project.branches.filter((branch) =>
+    [branch.id, branch.title, branch.description]
+      .filter(Boolean)
+      .some((value) => String(value).toLowerCase().includes(normalizedQuery)),
+  );
+  const activeSequenceEventIds = new Set(sequence?.eventIds ?? []);
+
+  return (
+    <div className="story-outline-map">
+      <div className="outline-toolbar">
+        <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search branches" aria-label="Search branches" />
+        <button type="button" onClick={onCreateBranch}>
+          <FilePlus2 size={13} />
+          Branch
+        </button>
+      </div>
+      {branches.map((branch) => {
+        const activeEvents = eventsForBranch(project, branch.id, sequence?.id);
+        const allEvents = eventsForBranch(project, branch.id);
+        const branchSelectionId = `file:branch:${branch.id}`;
+        const expanded = expandedBranches[branch.id] ?? selectedId === branchSelectionId;
+        return (
+          <section className={`branch-capsule ${expanded ? "expanded" : ""}`} key={branch.id}>
+            <button
+              type="button"
+              className={`branch-capsule-header ${selectedId === branchSelectionId ? "active" : ""}`}
+              onClick={() => {
+                onSelect(branchSelectionId);
+                setExpandedBranches((current) => ({ ...current, [branch.id]: !expanded }));
+              }}
+              aria-expanded={expanded}
+            >
+              <span className="branch-capsule-caret">{expanded ? "v" : ">"}</span>
+              <strong>{branch.title}</strong>
+              <OutlineBadges
+                badges={[
+                  `${activeEvents.length} here`,
+                  `${allEvents.length} total`,
+                ]}
+              />
+            </button>
+            {expanded ? (
+              <div className="branch-capsule-body">
+                <span className="branch-capsule-description">
+                  {branch.description || branch.id}
+                  {sequenceBranchIds.has(branch.id) ? " / active sequence" : " / story branch"}
+                </span>
+                <div className="outline-editor compact">
+                  <input value={branch.title} aria-label="Branch title" onChange={(event) => onUpdateBranch(branch.id, { title: event.target.value })} />
+                  <textarea
+                    value={branch.description ?? ""}
+                    rows={2}
+                    aria-label="Branch description"
+                    placeholder="Branch description"
+                    onChange={(event) => onUpdateBranch(branch.id, { description: event.target.value || undefined })}
+                  />
+                  <div className="inspector-actions">
+                    <button type="button" onClick={() => onCreateEventInBranch(branch.id)}>
+                      New Event
+                    </button>
+                    <button type="button" onClick={() => onCreateEventInBranch(branch.id, "final")}>
+                      New Final
+                    </button>
+                    <button type="button" className="danger" onClick={() => onDeleteBranch(branch.id)} disabled={allEvents.length > 0}>
+                      Delete
+                    </button>
+                  </div>
+                </div>
+                <div className="outline-children branch-capsule-events">
+                  {project.events
+                    .filter((event) => activeSequenceEventIds.has(event.id) && (event.branchRef === branch.id || !event.branchRef))
+                    .map((event) => (
+                      <div className="outline-row" key={event.id}>
+                        <button type="button" onClick={() => onSelect(`file:event:${event.id}`)}>
+                          {event.name}
+                        </button>
+                        <select
+                          value={event.branchRef ?? ""}
+                          aria-label={`Branch for ${event.name}`}
+                          onChange={(selectEvent) => onAssignEventToBranch(event.id, selectEvent.target.value || undefined)}
+                        >
+                          <option value="">No branch</option>
+                          {project.branches.map((candidate) => (
+                            <option key={candidate.id} value={candidate.id}>
+                              {candidate.title}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    ))}
+                </div>
+              </div>
+            ) : null}
+          </section>
+        );
+      })}
+      {!branches.length ? <span className="empty-line">No branches match this search.</span> : null}
+    </div>
+  );
+}
+
+function EventDependencyOutlinePanel({
+  project,
+  sequence,
+  selectedId,
+  onSelect,
+  onAssignEventToBranch,
+}: {
+  project: BranchingProject;
+  sequence?: Sequence;
+  selectedId?: string;
+  onSelect: (id: string) => void;
+  onAssignEventToBranch: (eventId: string, branchId?: string) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const normalizedQuery = query.trim().toLowerCase();
+  const outline = buildEventDependencyOutline(project, sequence?.id).filter(({ event, branch }) =>
+    [event.id, event.name, event.type, branch?.title, event.script?.sourcePath, ...(event.canonRefs ?? [])]
+      .filter(Boolean)
+      .some((value) => String(value).toLowerCase().includes(normalizedQuery)),
+  );
+
+  return (
+    <div className="story-outline-map">
+      <div className="outline-toolbar">
+        <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search events" aria-label="Search events" />
+        <span>{outline.length}/{sequence?.eventIds.length ?? 0}</span>
+      </div>
+      {outline.map((item) => (
+        <section className={`outline-card event-outline-card ${selectedId === `file:event:${item.event.id}` ? "active" : ""}`} key={item.event.id}>
+          <button type="button" className="outline-card-button" onClick={() => onSelect(`file:event:${item.event.id}`)}>
+            <strong>{item.event.name}</strong>
+            <span>{item.event.id}</span>
+            <OutlineBadges
+              badges={[
+                item.event.type,
+                item.branch ? `branch: ${item.branch.title}` : "no branch",
+                item.isEntry ? "entry" : "",
+                item.isTerminal ? "terminal" : "",
+                item.event.decisions?.length ? `${item.event.decisions.length} decisions` : "",
+                item.event.canonRefs?.length ? `${item.event.canonRefs.length} refs` : "",
+                item.event.script ? "script" : "",
+              ]}
+            />
+          </button>
+          <div className="outline-row">
+            <span>Branch</span>
+            <select
+              value={item.event.branchRef ?? ""}
+              aria-label={`Branch for ${item.event.name}`}
+              onChange={(event) => onAssignEventToBranch(item.event.id, event.target.value || undefined)}
+            >
+              <option value="">No branch</option>
+              {project.branches.map((branch) => (
+                <option key={branch.id} value={branch.id}>
+                  {branch.title}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="outline-children">
+            {item.incoming.length ? (
+              <div className="outline-mini-group">
+                <strong>Incoming</strong>
+                {item.incoming.map((link) => (
+                  <button type="button" key={link.transitionId} onClick={() => onSelect(`file:event:${link.eventId}`)}>
+                    {link.eventName} {"->"} {item.event.name}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            {item.outgoing.length ? (
+              <div className="outline-mini-group">
+                <strong>Outgoing</strong>
+                {item.outgoing.map((link) => (
+                  <button type="button" key={link.transitionId} onClick={() => onSelect(`file:event:${link.eventId}`)}>
+                    {item.event.name} {"->"} {link.eventName}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            {item.event.decisions?.map((decision) => (
+              <div className="outline-mini-group" key={decision.id}>
+                <strong>{decision.name}</strong>
+                <span>{decision.type} / {decision.outcomes.length} outcomes</span>
+                {decision.outcomes.map((outcome) => (
+                  <span key={outcome.id}>{outcome.name}</span>
+                ))}
+              </div>
+            ))}
+            {item.event.script ? <span className="outline-note">{item.event.script.sourcePath ?? item.event.script.id}</span> : null}
+          </div>
+        </section>
+      ))}
+      {!outline.length ? <span className="empty-line">No events match this search.</span> : null}
+    </div>
+  );
 }
 
 function FilesPanel({
@@ -2035,7 +2509,15 @@ function FilesPanel({
   onCreateSequence,
   onRenameSequence,
   onDeleteSequence,
+  onUpdateSequence,
+  onCreateBranch,
+  onUpdateBranch,
+  onDeleteBranch,
+  onCreateEventInBranch,
+  onAssignEventToBranch,
   onSelect,
+  activeOutlineTab,
+  onOutlineTabChange,
 }: {
   project: BranchingProject;
   files: PathBranchingFileItem[];
@@ -2056,13 +2538,19 @@ function FilesPanel({
   onCreateSequence: () => void;
   onRenameSequence: () => void;
   onDeleteSequence: () => void;
+  onUpdateSequence: (id: string, updates: Partial<Sequence>) => void;
+  onCreateBranch: () => void;
+  onUpdateBranch: (id: string, updates: Partial<Branch>) => void;
+  onDeleteBranch: (id: string) => void;
+  onCreateEventInBranch: (branchId: string, type?: EventType) => void;
+  onAssignEventToBranch: (eventId: string, branchId?: string) => void;
   onSelect: (id: string) => void;
+  activeOutlineTab: StoryOutlineTab;
+  onOutlineTabChange: (tab: StoryOutlineTab) => void;
 }) {
-  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
   const currentSequenceId = activeSequenceId(project) ?? "";
   const activeSequence = currentSequenceId ? findSequence(project, currentSequenceId) : undefined;
-  const sections = buildStoryExplorerSections(project);
-  const totalItems = sections.reduce((total, section) => total + section.items.length, 0);
+  const totalItems = (activeSequence?.eventIds.length ?? 0) + branchesForSequence(project, activeSequence?.id).length + 1;
 
   return (
     <PanelShell
@@ -2142,146 +2630,383 @@ function FilesPanel({
         </p>
       </div>
       <div className="panel-scroll">
-        {sections.map((section) => (
-          <section className="panel-group" key={section.id}>
+        <div className="story-outline-tabs" role="tablist" aria-label="Story outline tabs">
+          {(["sequence", "branches", "events"] as StoryOutlineTab[]).map((tab) => (
             <button
-              className="explorer-section-heading"
               type="button"
-              onClick={() => setCollapsedGroups((current) => ({ ...current, [section.id]: !current[section.id] }))}
+              role="tab"
+              aria-selected={activeOutlineTab === tab}
+              className={activeOutlineTab === tab ? "active" : ""}
+              key={tab}
+              onClick={() => onOutlineTabChange(tab)}
             >
-              <span>{collapsedGroups[section.id] ? ">" : "v"} {section.label}</span>
-              <span>{section.items.length}</span>
+              {tab === "sequence" ? "Sequence" : tab === "branches" ? "Branches" : "Events"}
             </button>
-            {!collapsedGroups[section.id] ? (
-              <div className="panel-list">
-                {section.items.map((item) => (
-                  <button
-                    className={`list-item explorer-item ${selectedId === item.id ? "active" : ""}`}
-                    type="button"
-                    key={item.id}
-                    onClick={() => onSelect(item.id)}
-                  >
-                    <span className="explorer-item-title">
-                      <strong>{item.label}</strong>
-                    </span>
-                    {item.detail ? <span>{item.detail}</span> : null}
-                    {item.badges?.length ? (
-                      <span className="explorer-meta">
-                        {item.badges.map((badge) => (
-                          <small key={badge}>{badge}</small>
-                        ))}
-                      </span>
-                    ) : null}
-                  </button>
-                ))}
-              </div>
-            ) : null}
-          </section>
-        ))}
-        {totalItems === 0 ? <span className="empty-line">No story objects match this search.</span> : null}
+          ))}
+        </div>
+        {activeOutlineTab === "sequence" ? (
+          <SequenceOutlinePanel
+            project={project}
+            sequence={activeSequence}
+            selectedId={selectedId}
+            onSelect={onSelect}
+            onUpdateSequence={onUpdateSequence}
+          />
+        ) : null}
+        {activeOutlineTab === "branches" ? (
+          <BranchTagPanel
+            project={project}
+            sequence={activeSequence}
+            selectedId={selectedId}
+            onSelect={onSelect}
+            onCreateBranch={onCreateBranch}
+            onUpdateBranch={onUpdateBranch}
+            onDeleteBranch={onDeleteBranch}
+            onCreateEventInBranch={onCreateEventInBranch}
+            onAssignEventToBranch={onAssignEventToBranch}
+          />
+        ) : null}
+        {activeOutlineTab === "events" ? (
+          <EventDependencyOutlinePanel
+            project={project}
+            sequence={activeSequence}
+            selectedId={selectedId}
+            onSelect={onSelect}
+            onAssignEventToBranch={onAssignEventToBranch}
+          />
+        ) : null}
+        {totalItems === 0 ? <span className="empty-line">No story objects yet.</span> : null}
       </div>
     </PanelShell>
   );
+}
+
+type MarkdownTextAction = "bold" | "italic" | "heading" | "quote" | "unorderedList" | "orderedList" | "code" | "link";
+
+function prefixMarkdownLines(value: string, prefixForLine: (index: number) => string) {
+  return value
+    .split("\n")
+    .map((line, index) => {
+      const prefix = prefixForLine(index);
+      return line.startsWith(prefix.trimEnd()) ? line : `${prefix}${line}`;
+    })
+    .join("\n");
+}
+
+function formatMarkdownText(
+  content: string,
+  action: MarkdownTextAction,
+  selectionStart: number,
+  selectionEnd: number,
+): { content: string; selectionStart: number; selectionEnd: number } {
+  const selected = content.slice(selectionStart, selectionEnd);
+  const fallback = selected || (action === "link" ? "link text" : "text");
+  let replacement = fallback;
+
+  if (action === "bold") replacement = `**${fallback}**`;
+  if (action === "italic") replacement = `_${fallback}_`;
+  if (action === "code") replacement = `\`${fallback}\``;
+  if (action === "link") replacement = `[${fallback}](url)`;
+  if (action === "heading") replacement = prefixMarkdownLines(fallback, () => "## ");
+  if (action === "quote") replacement = prefixMarkdownLines(fallback, () => "> ");
+  if (action === "unorderedList") replacement = prefixMarkdownLines(fallback, () => "- ");
+  if (action === "orderedList") replacement = prefixMarkdownLines(fallback, (index) => `${index + 1}. `);
+
+  return {
+    content: `${content.slice(0, selectionStart)}${replacement}${content.slice(selectionEnd)}`,
+    selectionStart,
+    selectionEnd: selectionStart + replacement.length,
+  };
 }
 
 function EventAuthoringDock({
   project,
   nodes,
   selection,
+  eventDraft,
+  open,
+  openEventIds,
+  expandedEventId,
+  onOpenChange,
+  onOpenEventIdsChange,
+  onExpandedEventIdChange,
   onSelect,
-  onUpdateEvent,
+  onEventDraftModeChange,
+  onUpdateEventDraft,
+  onSaveEventDraft,
   children,
 }: {
   project: BranchingProject;
   nodes: StoryCanvasNode[];
   selection?: Selection;
+  eventDraft?: EventDraft;
+  open: boolean;
+  openEventIds: string[];
+  expandedEventId?: string;
+  onOpenChange: (open: boolean) => void;
+  onOpenEventIdsChange: (eventIds: string[]) => void;
+  onExpandedEventIdChange: (eventId?: string) => void;
   onSelect: (selection?: Selection) => void;
-  onUpdateEvent: (id: string, updates: Partial<EventNode>) => void;
+  onEventDraftModeChange: (mode: EventDraftMode) => void;
+  onUpdateEventDraft: (updates: Partial<EventNode>) => void;
+  onSaveEventDraft: () => void;
   children: ReactNode;
 }) {
-  const [collapsed, setCollapsed] = useState(false);
+  const markdownTextAreaRef = useRef<HTMLTextAreaElement | null>(null);
   const currentSequence = project.sequences.find((sequence) => sequence.id === activeSequenceId(project));
   const eventIds = new Set(currentSequence?.eventIds ?? []);
-  const eventTabs = project.events.filter((event) => eventIds.has(event.id));
   const selectedEventId = eventIdFromSelection(project, nodes, selection);
+  const selectedEvent = selectedEventId ? project.events.find((event) => event.id === selectedEventId) : undefined;
+  const openEvents = openEventIds
+    .map((eventId) => project.events.find((event) => event.id === eventId))
+    .filter((event): event is EventNode => Boolean(event));
   const activeEvent =
-    (selectedEventId ? project.events.find((event) => event.id === selectedEventId) : undefined) ??
-    (currentSequence?.entryEventId ? project.events.find((event) => event.id === currentSequence.entryEventId) : undefined) ??
-    eventTabs[0];
+    (expandedEventId ? project.events.find((event) => event.id === expandedEventId) : undefined) ??
+    openEvents[openEvents.length - 1];
+  const draftMatchesActiveEvent = Boolean(eventDraft && activeEvent?.id === eventDraft.eventId);
+  const editableEvent = draftMatchesActiveEvent ? eventDraft?.draftEvent : activeEvent;
+  const mode = eventDraft?.mode ?? "components";
 
-  return (
-    <aside className={`event-authoring-dock ${collapsed ? "collapsed" : ""}`} aria-label="Event authoring dock">
-      <div className="event-dock-tabs" role="tablist" aria-label="Sequence events">
+  useEffect(() => {
+    const nextOpenEventIds = openEventIds.filter((eventId) => eventIds.has(eventId));
+    if (nextOpenEventIds.length !== openEventIds.length || nextOpenEventIds.some((eventId, index) => eventId !== openEventIds[index])) {
+      onOpenEventIdsChange(nextOpenEventIds);
+    }
+    if (expandedEventId && !eventIds.has(expandedEventId)) {
+      onExpandedEventIdChange(undefined);
+    }
+  }, [currentSequence?.id, eventIds, expandedEventId, onExpandedEventIdChange, onOpenEventIdsChange, openEventIds]);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    if (selectedEventId && eventIds.has(selectedEventId)) {
+      if (!openEventIds.includes(selectedEventId)) {
+        onOpenEventIdsChange([...openEventIds, selectedEventId].slice(-5));
+      }
+      if (expandedEventId !== selectedEventId) {
+        onExpandedEventIdChange(selectedEventId);
+      }
+      return;
+    }
+  }, [
+    onExpandedEventIdChange,
+    onOpenEventIdsChange,
+    open,
+    openEventIds,
+    expandedEventId,
+    selectedEventId,
+    eventIds,
+  ]);
+
+  const closeInspector = useCallback(
+    (eventId: string) => {
+      if (eventDraft?.dirty && eventDraft.eventId === eventId) {
+        onSelect({ type: "node", id: eventId });
+        return;
+      }
+      const nextOpenEventIds = openEventIds.filter((candidate) => candidate !== eventId);
+      onOpenEventIdsChange(nextOpenEventIds);
+      if (nextOpenEventIds.length === 0) {
+        onOpenChange(false);
+      }
+      if (expandedEventId === eventId) {
+        onExpandedEventIdChange(nextOpenEventIds[nextOpenEventIds.length - 1]);
+      }
+    },
+    [eventDraft, expandedEventId, onExpandedEventIdChange, onOpenChange, onOpenEventIdsChange, onSelect, openEventIds],
+  );
+
+  const toggleInspector = useCallback((eventId: string) => {
+    onOpenChange(true);
+    onExpandedEventIdChange(eventId);
+    if (!openEventIds.includes(eventId)) {
+      onOpenEventIdsChange([...openEventIds, eventId].slice(-5));
+    }
+    onSelect({ type: "node", id: eventId });
+  }, [onExpandedEventIdChange, onOpenChange, onOpenEventIdsChange, onSelect, openEventIds]);
+
+  const minimizeInspector = useCallback(
+    (eventId: string) => {
+      onExpandedEventIdChange(expandedEventId === eventId ? undefined : expandedEventId);
+    },
+    [expandedEventId, onExpandedEventIdChange],
+  );
+
+  const applyMarkdownAction = useCallback(
+    (action: MarkdownTextAction) => {
+      if (!draftMatchesActiveEvent || !editableEvent) return;
+      const textarea = markdownTextAreaRef.current;
+      const content = editableEvent.text?.content ?? "";
+      const selectionStart = textarea?.selectionStart ?? content.length;
+      const selectionEnd = textarea?.selectionEnd ?? selectionStart;
+      const formatted = formatMarkdownText(content, action, selectionStart, selectionEnd);
+      // Keep text.format intact for now; editor format controls and export mapping will be integrated later.
+      onUpdateEventDraft({
+        text: {
+          format: editableEvent.text?.format ?? "plain",
+          content: formatted.content,
+        },
+      });
+      window.requestAnimationFrame(() => {
+        markdownTextAreaRef.current?.focus();
+        markdownTextAreaRef.current?.setSelectionRange(formatted.selectionStart, formatted.selectionEnd);
+      });
+    },
+    [draftMatchesActiveEvent, editableEvent, onUpdateEventDraft],
+  );
+
+  if (!open || openEvents.length === 0) {
+    return selectedEvent ? (
+      <aside className="event-authoring-dock collapsed" aria-label="Event authoring dock">
         <button
           type="button"
-          className="event-dock-toggle"
-          title={collapsed ? "Open event dock" : "Collapse event dock"}
-          onClick={() => setCollapsed((value) => !value)}
+          className="event-stack-launcher"
+          onClick={() => {
+            if (openEventIds.length > 0) {
+              onOpenChange(true);
+              return;
+            }
+            toggleInspector(selectedEvent.id);
+          }}
         >
-          {collapsed ? "<" : ">"}
+          <ChevronUp size={14} />
+          <span>Inspector</span>
         </button>
-        {eventTabs.map((event) => (
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeEvent?.id === event.id}
-            className={`event-tab-button ${activeEvent?.id === event.id ? "active" : ""}`}
-            key={event.id}
-            title={event.name}
-            onClick={() => {
-              setCollapsed(false);
-              onSelect({ type: "node", id: event.id });
-            }}
-          >
-            <span>{event.name}</span>
-            {event.type === "final" ? <i>final</i> : null}
-          </button>
-        ))}
-      </div>
+      </aside>
+    ) : null;
+  }
 
-      {!collapsed ? (
-        <div className="event-dock-panels">
-          <div className="event-dock-inspector">{children}</div>
-          <section className="event-editor-panel" aria-label="Event text editor">
+  return (
+    <aside className="event-authoring-dock" aria-label="Event inspector stack">
+      <div className="event-inspector-stack">
+        {openEvents.map((event, index) => {
+          const isExpanded = expandedEventId === event.id;
+          const isDraftEvent = eventDraft?.eventId === event.id;
+          const cardEvent = isExpanded && isDraftEvent ? eventDraft?.draftEvent ?? event : event;
+          return (
+            <section
+              className={`event-editor-panel event-inspector-card ${isExpanded ? "expanded" : "minimized"}`}
+              aria-label={`${event.name} inspector`}
+              key={event.id}
+              style={{ "--stack-index": index + 1 } as CSSProperties}
+            >
             <div className="event-editor-header">
-              <div>
-                <strong>{activeEvent?.name ?? "No event selected"}</strong>
-                <span>{activeEvent ? `${activeEvent.type} event` : "Create or select an event to write."}</span>
-              </div>
-              {activeEvent ? (
-                <select
-                  value={activeEvent.text?.format ?? "plain"}
-                  title="Story text format"
-                  onChange={(event) =>
-                    onUpdateEvent(activeEvent.id, {
-                      text: { format: event.target.value, content: activeEvent.text?.content ?? "" },
-                    })
-                  }
+              {isExpanded ? (
+                <div className="event-header-title">
+                  <strong>
+                    {cardEvent.name ?? "No event selected"}
+                    {isDraftEvent && eventDraft?.dirty ? <span className="event-dirty-star" aria-label="unsaved edits">*</span> : null}
+                  </strong>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  className="event-minimized-title"
+                  onClick={() => toggleInspector(event.id)}
+                  title={`Open ${event.name}`}
                 >
-                  <option value="plain">plain</option>
-                  <option value="ink">ink</option>
-                  <option value="harlowe">harlowe</option>
-                  <option value="sugarcube">sugarcube</option>
-                </select>
-              ) : null}
+                  <strong>
+                    {event.name}
+                    {isDraftEvent && eventDraft?.dirty ? <span className="event-dirty-star" aria-label="unsaved edits">*</span> : null}
+                  </strong>
+                </button>
+              )}
+              <div className="event-editor-actions">
+                  {isExpanded ? (
+                    <div className="segmented-toggle" role="tablist" aria-label="Event inspector mode">
+                      <button
+                        type="button"
+                        className={mode === "components" ? "active" : ""}
+                        onClick={() => onEventDraftModeChange("components")}
+                      >
+                        Components
+                      </button>
+                      <button
+                        type="button"
+                        className={mode === "text" ? "active" : ""}
+                        onClick={() => onEventDraftModeChange("text")}
+                      >
+                        Text
+                      </button>
+                    </div>
+                  ) : null}
+                  {isExpanded ? (
+                    <button type="button" disabled={!eventDraft?.dirty || !isDraftEvent || eventDraft.saving} onClick={onSaveEventDraft}>
+                      {isDraftEvent && eventDraft?.dirty ? <span className="event-dirty-star" aria-hidden="true">*</span> : null}
+                      {eventDraft?.saving && isDraftEvent ? "Saving..." : "Save"}
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    title={isExpanded ? "Minimize inspector" : "Expand inspector"}
+                    onClick={() => (isExpanded ? minimizeInspector(event.id) : toggleInspector(event.id))}
+                  >
+                    {isExpanded ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
+                  </button>
+                  <button
+                    type="button"
+                    title={isDraftEvent && eventDraft?.dirty ? "Save or discard edits before closing" : "Close inspector"}
+                    disabled={isDraftEvent && eventDraft?.dirty}
+                    onClick={() => closeInspector(event.id)}
+                  >
+                    <X size={14} />
+                </button>
+              </div>
             </div>
-            {activeEvent ? (
-              <textarea
-                spellCheck
-                value={activeEvent.text?.content ?? ""}
-                placeholder="Write the playable event text here."
-                onChange={(event) =>
-                  onUpdateEvent(activeEvent.id, {
-                    text: { format: activeEvent.text?.format ?? "plain", content: event.target.value },
-                  })
-                }
-              />
-            ) : (
-              <div className="event-editor-empty">No event available in this sequence.</div>
-            )}
+              <div className="event-inspector-body" aria-hidden={!isExpanded}>
+                {isExpanded ? (
+                  mode === "text" ? (
+                    <>
+                      <div className="event-markdown-toolbar" aria-label="Markdown editing tools">
+                        <button type="button" title="Bold" disabled={!draftMatchesActiveEvent} onClick={() => applyMarkdownAction("bold")}>
+                          <Bold size={13} />
+                        </button>
+                        <button type="button" title="Italic" disabled={!draftMatchesActiveEvent} onClick={() => applyMarkdownAction("italic")}>
+                          <Italic size={13} />
+                        </button>
+                        <button type="button" title="Heading" disabled={!draftMatchesActiveEvent} onClick={() => applyMarkdownAction("heading")}>
+                          <Heading1 size={13} />
+                        </button>
+                        <button type="button" title="Quote" disabled={!draftMatchesActiveEvent} onClick={() => applyMarkdownAction("quote")}>
+                          <Quote size={13} />
+                        </button>
+                        <button type="button" title="Bulleted list" disabled={!draftMatchesActiveEvent} onClick={() => applyMarkdownAction("unorderedList")}>
+                          <List size={13} />
+                        </button>
+                        <button type="button" title="Numbered list" disabled={!draftMatchesActiveEvent} onClick={() => applyMarkdownAction("orderedList")}>
+                          <ListOrdered size={13} />
+                        </button>
+                        <button type="button" title="Inline code" disabled={!draftMatchesActiveEvent} onClick={() => applyMarkdownAction("code")}>
+                          <Code size={13} />
+                        </button>
+                        <button type="button" title="Link" disabled={!draftMatchesActiveEvent} onClick={() => applyMarkdownAction("link")}>
+                          <Link size={13} />
+                        </button>
+                      </div>
+                      <textarea
+                        ref={markdownTextAreaRef}
+                        spellCheck
+                        disabled={!draftMatchesActiveEvent}
+                        value={editableEvent?.text?.content ?? ""}
+                        placeholder="Write the playable event text here."
+                        onChange={(event) =>
+                          onUpdateEventDraft({
+                            text: { format: editableEvent?.text?.format ?? "plain", content: event.target.value },
+                          })
+                        }
+                      />
+                    </>
+                  ) : (
+                    <div className="event-dock-inspector">{children}</div>
+                  )
+                ) : null}
+              </div>
           </section>
-        </div>
-      ) : null}
+          );
+        })}
+      </div>
     </aside>
   );
 }
@@ -2299,7 +3024,6 @@ function Inspector({
   onExportPreviewModeChange,
   onClose,
   onUpdateSequence,
-  onSetEntrySequence,
   onUpdateBranch,
   onCreateEventInBranch,
   onUpdateEvent,
@@ -2334,7 +3058,6 @@ function Inspector({
   onExportPreviewModeChange: (mode: ExportPreviewMode) => void;
   onClose: () => void;
   onUpdateSequence: (id: string, updates: Partial<Sequence>) => void;
-  onSetEntrySequence: (id: string) => void;
   onUpdateBranch: (id: string, updates: Partial<Branch>) => void;
   onCreateEventInBranch: (branchId: string, type?: EventType) => void;
   onUpdateEvent: (id: string, updates: Partial<EventNode>) => void;
@@ -2357,7 +3080,6 @@ function Inspector({
   onUpdateEdgeLabel: (edgeId: string, label: string) => void;
   onDeleteSelection: (selection: Selection) => void;
 }) {
-  const exportPreview = useMemo(() => buildExportPreview(project, exportPreviewMode), [exportPreviewMode, project]);
   const selectedNode = selection?.type === "node" ? nodes.find((node) => node.id === selection.id) : undefined;
   const selectedEdge = selection?.type === "edge" ? edges.find((edgeItem) => edgeItem.id === selection.id) : undefined;
   const selectedCanon =
@@ -2372,9 +3094,9 @@ function Inspector({
       ? project.canonEditSuggestions?.find((suggestion) => suggestion.id === selection.id)
       : undefined;
 
-  const sequence = selectedNode ? findSequence(project, selectedNode.id) : undefined;
-  const branch = selectedNode ? findBranch(project, selectedNode.id) : undefined;
-  const event = selectedNode ? findEvent(project, selectedNode.id) : undefined;
+  const sequence = selection?.type === "node" ? findSequence(project, selection.id) : undefined;
+  const branch = selection?.type === "node" ? findBranch(project, selection.id) : undefined;
+  const event = selection?.type === "node" ? findEvent(project, selection.id) : undefined;
   const selectedDecisionContext =
     selectedNode?.data.kind === "decision" && typeof selectedNode.data.details?.eventId === "string"
       ? {
@@ -2407,15 +3129,17 @@ function Inspector({
 
   return (
     <aside className={`canvas-inspector ${embedded ? "embedded" : ""}`}>
-      <div className="inspector-header">
-        <div>
-          <strong>Inspector</strong>
-          <span>{selection ? selection.type : "project"}</span>
+      {!embedded ? (
+        <div className="inspector-header">
+          <div>
+            <strong>Inspector</strong>
+            <span>{selection ? selection.type : "project"}</span>
+          </div>
+          <button type="button" title="Close inspector" onClick={onClose}>
+            x
+          </button>
         </div>
-        <button type="button" title="Close inspector" onClick={onClose}>
-          x
-        </button>
-      </div>
+      ) : null}
 
       <div className="inspector-scroll">
         {sequence ? (
@@ -2438,14 +3162,6 @@ function Inspector({
                 ))}
               </select>
             </label>
-            <label className="field-label">
-              Character Ref
-              <input
-                value={sequence.characterRef ?? ""}
-                placeholder="optional speaker/character ref"
-                onChange={(event) => onUpdateSequence(sequence.id, { characterRef: event.target.value || undefined })}
-              />
-            </label>
             <dl>
               <div>
                 <dt>ID</dt>
@@ -2461,9 +3177,6 @@ function Inspector({
               </div>
             </dl>
             <div className="inspector-actions">
-              <button type="button" onClick={() => onSetEntrySequence(sequence.id)}>
-                Mark Entry Sequence
-              </button>
               <button type="button" className="danger" onClick={() => onDeleteSelection({ type: "node", id: sequence.id })}>
                 Delete
               </button>
@@ -2998,6 +3711,20 @@ function Inspector({
                 </div>
               ) : null}
             </dl>
+            {selectedCanon.properties && Object.keys(selectedCanon.properties).length ? (
+              <section className="inspector-section">
+                <h2>WorldNotion Properties</h2>
+                <div className="readonly-preview-label">Read-only metadata imported from WorldNotion.</div>
+                <pre>{JSON.stringify(selectedCanon.properties, null, 2)}</pre>
+              </section>
+            ) : null}
+            {selectedCanon.frontmatter && Object.keys(selectedCanon.frontmatter).length ? (
+              <section className="inspector-section">
+                <h2>WorldNotion Frontmatter</h2>
+                <div className="readonly-preview-label">Full YAML frontmatter snapshot. PathBranching does not write it back.</div>
+                <pre>{JSON.stringify(selectedCanon.frontmatter, null, 2)}</pre>
+              </section>
+            ) : null}
             <div className="inspector-actions">
               <button type="button" onClick={() => onCreateCanonSuggestion(selectedCanon.id)}>
                 Suggest Edit
@@ -3249,59 +3976,18 @@ function Inspector({
           </>
         ) : null}
 
-        <section className="inspector-section">
-          <h2>Validation</h2>
-          <div className="stack-list">
-            {findings.length === 0 ? <span className="clean">No findings.</span> : null}
-            {findings.map((finding) => (
-              <div className={`finding ${finding.severity}`} key={`${finding.code}:${finding.id ?? ""}:${finding.ref ?? ""}`}>
-                <strong>{finding.code}</strong>
-                <span>{finding.message}</span>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        <section className="inspector-section">
-          <h2>Export Preview</h2>
-          <label className="field-label">
-            Format
-            <select value={exportPreviewMode} onChange={(event) => onExportPreviewModeChange(event.target.value as ExportPreviewMode)}>
-              <option value="runtime">Runtime JSON</option>
-              <option value="ink">Ink</option>
-              <option value="gameData">SINPO GameData</option>
-            </select>
-          </label>
-          <dl>
-            <div>
-              <dt>Package</dt>
-              <dd>{exportPreview.runtimePackage.packageId}</dd>
-            </div>
-            <div>
-              <dt>Entry</dt>
-              <dd>{exportPreview.runtimePackage.entryNodeId}</dd>
-            </div>
-            <div>
-              <dt>Nodes</dt>
-              <dd>{exportPreview.runtimePackage.nodes.length}</dd>
-            </div>
-            <div>
-              <dt>Ink files</dt>
-              <dd>{exportPreview.inkExport.files.length}</dd>
-            </div>
-          </dl>
-          {exportOpen ? <pre>{exportPreview.content}</pre> : null}
-        </section>
       </div>
     </aside>
   );
 }
 
 type CanvasContextMenu = {
+  kind: "create" | "connect-create";
   x: number;
   y: number;
   flowX: number;
   flowY: number;
+  sourceNodeId?: string;
 };
 
 function StoryCanvas({
@@ -3317,8 +4003,14 @@ function StoryCanvas({
   exportOpen,
   exportPreviewMode,
   dataOpen,
+  canvasLayout,
   markdownTabs,
   activeMarkdownTabId,
+  eventDraft,
+  eventInspectorOpen,
+  eventInspectorOpenEventIds,
+  eventInspectorExpandedEventId,
+  canvasBackground,
   onNodesChange,
   onEdgesChange,
   onConnect,
@@ -3328,10 +4020,10 @@ function StoryCanvas({
   onExitFocus,
   onExportPreviewModeChange,
   onToggleData,
-  onCreateBranch,
+  onApplyCanvasLayout,
   onCreateEvent,
+  onCreateConnectedEvent,
   onUpdateSequence,
-  onSetEntrySequence,
   onUpdateBranch,
   onCreateEventInBranch,
   onUpdateEvent,
@@ -3358,6 +4050,12 @@ function StoryCanvas({
   onChangeMarkdownContent,
   onChangeMarkdownFormat,
   onSaveMarkdownTab,
+  onEventInspectorOpenChange,
+  onEventInspectorOpenEventIdsChange,
+  onEventInspectorExpandedEventIdChange,
+  onEventDraftModeChange,
+  onUpdateEventDraft,
+  onSaveEventDraft,
 }: {
   project: BranchingProject;
   files: PathBranchingFileItem[];
@@ -3371,8 +4069,14 @@ function StoryCanvas({
   exportOpen: boolean;
   exportPreviewMode: ExportPreviewMode;
   dataOpen: boolean;
+  canvasLayout: CanvasLayoutMode;
   markdownTabs: MarkdownEditorTab[];
   activeMarkdownTabId?: string;
+  eventDraft?: EventDraft;
+  eventInspectorOpen: boolean;
+  eventInspectorOpenEventIds: string[];
+  eventInspectorExpandedEventId?: string;
+  canvasBackground: CanvasBackgroundSettings;
   onNodesChange: (changes: NodeChange<StoryCanvasNode>[]) => void;
   onEdgesChange: (changes: EdgeChange<StoryCanvasEdge>[]) => void;
   onConnect: OnConnect;
@@ -3382,10 +4086,10 @@ function StoryCanvas({
   onExitFocus: () => void;
   onExportPreviewModeChange: (mode: ExportPreviewMode) => void;
   onToggleData: () => void;
-  onCreateBranch: (position?: { x: number; y: number }) => void;
+  onApplyCanvasLayout: (mode: CanvasLayoutMode) => void;
   onCreateEvent: (type?: EventType, position?: { x: number; y: number }, branchId?: string) => void;
+  onCreateConnectedEvent: (sourceNodeId: string, type: EventType, position: { x: number; y: number }) => void;
   onUpdateSequence: (id: string, updates: Partial<Sequence>) => void;
-  onSetEntrySequence: (id: string) => void;
   onUpdateBranch: (id: string, updates: Partial<Branch>) => void;
   onCreateEventInBranch: (branchId: string, type?: EventType) => void;
   onUpdateEvent: (id: string, updates: Partial<EventNode>) => void;
@@ -3412,19 +4116,34 @@ function StoryCanvas({
   onChangeMarkdownContent: (id: string, content: string) => void;
   onChangeMarkdownFormat: (id: string, format: MarkdownDraftFormat) => void;
   onSaveMarkdownTab: (id: string) => void;
+  onEventInspectorOpenChange: (open: boolean) => void;
+  onEventInspectorOpenEventIdsChange: (eventIds: string[]) => void;
+  onEventInspectorExpandedEventIdChange: (eventId?: string) => void;
+  onEventDraftModeChange: (mode: EventDraftMode) => void;
+  onUpdateEventDraft: (updates: Partial<EventNode>) => void;
+  onSaveEventDraft: () => void;
 }) {
   const shellRef = useRef<HTMLElement | null>(null);
   const [reactFlowInstance, setReactFlowInstance] = useState<ReactFlowInstance<StoryCanvasNode, StoryCanvasEdge>>();
   const [contextMenu, setContextMenu] = useState<CanvasContextMenu>();
   const [draggingEvent, setDraggingEvent] = useState(false);
-  const [paletteCategoryId, setPaletteCategoryId] = useState("normal");
+  const [minimapOpen, setMinimapOpen] = useState(true);
   const graph = useMemo(() => canvasGraph(nodes, edges, canvasMode, focusNodeId), [canvasMode, edges, focusNodeId, nodes]);
   const currentSequence = project.sequences.find((sequence) => sequence.id === activeSequenceId(project));
-  const focusedNode = graph.nodes.find((node) => node.id === focusNodeId) ?? nodes.find((node) => node.id === focusNodeId);
   const sequenceEvents = currentSequence?.eventIds.length ?? 0;
   const sequenceBranches = currentSequence?.branchIds?.length ?? nodes.filter((node) => node.data.kind === "branch").length;
-  const errorCount = findings.filter((finding) => finding.severity === "error").length;
   const selectedNodeId = selection?.type === "node" ? selection.id : undefined;
+  const snapGrid: [number, number] = [canvasBackground.gridSize, canvasBackground.gridSize];
+  const backgroundColor = `color-mix(in srgb, var(--wn-border) ${Math.round(canvasBackground.opacity * 100)}%, transparent)`;
+  const inspectorProject = useMemo(
+    () => (eventDraft ? applyEventDraftToProject(project, eventDraft) : project),
+    [eventDraft, project],
+  );
+  const inspectorEventId =
+    eventInspectorExpandedEventId ??
+    eventInspectorOpenEventIds[eventInspectorOpenEventIds.length - 1] ??
+    eventIdFromSelection(inspectorProject, nodes, selection);
+  const inspectorSelection = inspectorEventId ? { type: "node" as const, id: inspectorEventId } : undefined;
 
   useEffect(() => {
     if (!reactFlowInstance) {
@@ -3444,6 +4163,7 @@ function StoryCanvas({
       const shellRect = shellRef.current?.getBoundingClientRect();
       const flowPosition = reactFlowInstance.screenToFlowPosition({ x: event.clientX, y: event.clientY });
       setContextMenu({
+        kind: "create",
         x: event.clientX - (shellRect?.left ?? 0),
         y: event.clientY - (shellRect?.top ?? 0),
         flowX: flowPosition.x,
@@ -3453,21 +4173,59 @@ function StoryCanvas({
     [reactFlowInstance],
   );
 
+  const openConnectionCreateMenu = useCallback<OnConnectEnd>(
+    (event, connectionState) => {
+      if (canvasMode !== "branching" || connectionState.toNode || !connectionState.fromNode || !reactFlowInstance) {
+        return;
+      }
+
+      const point = "changedTouches" in event ? event.changedTouches[0] : event;
+      if (!point) {
+        return;
+      }
+
+      const shellRect = shellRef.current?.getBoundingClientRect();
+      const flowPosition = reactFlowInstance.screenToFlowPosition({ x: point.clientX, y: point.clientY });
+      setContextMenu({
+        kind: "connect-create",
+        sourceNodeId: connectionState.fromNode.id,
+        x: point.clientX - (shellRect?.left ?? 0),
+        y: point.clientY - (shellRect?.top ?? 0),
+        flowX: flowPosition.x,
+        flowY: flowPosition.y,
+      });
+    },
+    [canvasMode, reactFlowInstance],
+  );
+
+  const eventTypeOptions: EventCategoryDefinition[] =
+    (project.eventCategories?.length ?? 0) > 0
+      ? (project.eventCategories ?? [])
+      : [
+          { id: "normal", label: "Normal" },
+          { id: "final", label: "Final", terminal: true },
+        ];
+  const minimapNodeColor = useCallback((node: StoryCanvasNode) => {
+    if (typeof node.data.minimapColor === "string") return node.data.minimapColor;
+    if (typeof node.data.accentColor === "string") return node.data.accentColor;
+    if (node.data.kind === "start") return "var(--pb-start)";
+    if (node.data.kind === "decision") return "var(--pb-decision)";
+    if (node.data.kind === "outcome") return "var(--pb-outcome)";
+    return "var(--wn-muted)";
+  }, []);
+  const minimapNodeStrokeColor = useCallback((node: StoryCanvasNode) => {
+    if (typeof node.data.accentColor === "string") return node.data.accentColor;
+    if (node.data.kind === "event") return "var(--pb-event)";
+    return "var(--wn-border)";
+  }, []);
+
   return (
     <main className={`canvas-shell ${canvasMode === "focus" ? "focus-mode" : ""} ${draggingEvent ? "dragging-event" : ""}`} ref={shellRef}>
-      <div className="canvas-status">
-        <strong>{canvasMode === "focus" ? `Focus: ${focusedNode?.data.title ?? "Node"}` : currentSequence?.name ?? project.name ?? project.projectId}</strong>
-        <span>
-          {canvasMode === "focus"
-            ? `${graph.nodes.length} components - ${graph.edges.length} links`
-            : `${sequenceBranches} branches - ${sequenceEvents} events - ${findings.length} findings`}
-          {errorCount > 0 ? ` (${errorCount} errors)` : ""}
-        </span>
-      </div>
-
       {message ? <div className="canvas-message">{message}</div> : null}
 
       <div className="canvas-modebar">
+        <strong>{currentSequence?.name ?? project.name ?? project.projectId}</strong>
+        <span>{sequenceBranches} branches - {sequenceEvents} events</span>
         <button type="button" className={canvasMode === "branching" ? "active" : ""} onClick={onExitFocus}>
           <GitBranch size={14} />
           <span>Branching</span>
@@ -3489,34 +4247,7 @@ function StoryCanvas({
           <Focus size={14} />
           <span>Focus</span>
         </button>
-        {canvasMode === "focus" ? (
-          <button type="button" onClick={onExitFocus}>
-            <ArrowLeft size={14} />
-            <span>Exit</span>
-          </button>
-        ) : null}
       </div>
-
-      {canvasMode === "branching" ? (
-        <div className="canvas-palette">
-          <select value={paletteCategoryId} onChange={(event) => setPaletteCategoryId(event.target.value)} aria-label="Event category">
-            {(project.eventCategories ?? []).map((category) => (
-              <option key={category.id} value={category.id}>
-                {category.label}
-              </option>
-            ))}
-          </select>
-          <button type="button" onClick={() => onCreateBranch()}>
-            Branch
-          </button>
-          <button type="button" onClick={() => onCreateEvent(paletteCategoryId)}>
-            Event
-          </button>
-          <button type="button" onClick={() => onCreateEvent("final")}>
-            Final Event
-          </button>
-        </div>
-      ) : null}
 
       <ReactFlowProvider>
         <ReactFlow
@@ -3526,6 +4257,7 @@ function StoryCanvas({
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onConnect={onConnect}
+          onConnectEnd={openConnectionCreateMenu}
           onInit={setReactFlowInstance}
           onNodeDrag={(_, node) => setDraggingEvent(node.data.kind === "event")}
           onNodeDragStop={(event, node) => {
@@ -3533,58 +4265,119 @@ function StoryCanvas({
             onNodeDragStop(event, node);
           }}
           onNodeClick={(_, node) => {
+            if (node.data.kind !== "event") {
+              setContextMenu(undefined);
+              return;
+            }
             onSelect({ type: "node", id: node.id });
-            if (canvasMode === "focus") {
+            if (canvasMode === "focus" && node.data.kind === "event") {
               onEnterFocus(node.id);
             }
           }}
-          onNodeDoubleClick={(_, node) => onEnterFocus(node.id)}
-          onEdgeClick={(_, edgeItem) => onSelect({ type: "edge", id: edgeItem.id })}
+          onNodeDoubleClick={(_, node) => {
+            if (node.data.kind === "event") {
+              onEnterFocus(node.id);
+            }
+          }}
+          onEdgeClick={() => setContextMenu(undefined)}
           onPaneClick={() => {
             setContextMenu(undefined);
-            onSelect(undefined);
           }}
           onPaneContextMenu={canvasMode === "branching" ? openContextMenu : undefined}
           fitView
           fitViewOptions={{ padding: 0.24 }}
           defaultViewport={project.canvas?.viewport}
           proOptions={{ hideAttribution: true }}
+          snapToGrid={canvasBackground.snapToGrid}
+          snapGrid={snapGrid}
         >
-          <MiniMap pannable zoomable nodeStrokeWidth={3} />
-          <Controls />
-          <Background gap={28} size={1} />
+          {minimapOpen ? (
+            <MiniMap
+              pannable
+              zoomable
+              nodeColor={minimapNodeColor}
+              nodeStrokeColor={minimapNodeStrokeColor}
+              nodeStrokeWidth={3}
+              position="bottom-left"
+            />
+          ) : null}
+          <Controls position="bottom-left">
+            <button
+              type="button"
+              className={`react-flow__controls-button ${minimapOpen ? "active" : ""}`}
+              onClick={() => setMinimapOpen((open) => !open)}
+              title={minimapOpen ? "Hide minimap" : "Show minimap"}
+              aria-label={minimapOpen ? "Hide minimap" : "Show minimap"}
+            >
+              {minimapOpen ? <Eye size={14} /> : <EyeOff size={14} />}
+            </button>
+          </Controls>
+          {canvasBackground.showGrid ? (
+            <Background id="grid" variant={BackgroundVariant.Lines} gap={canvasBackground.gridSize} size={1} color={backgroundColor} />
+          ) : null}
+          {canvasBackground.showDots ? (
+            <Background id="dots" variant={BackgroundVariant.Dots} gap={canvasBackground.gridSize} size={1.2} color={backgroundColor} />
+          ) : null}
         </ReactFlow>
       </ReactFlowProvider>
 
       {contextMenu ? (
         <div className="canvas-menu" style={{ left: contextMenu.x, top: contextMenu.y }}>
-          <button
-            type="button"
-            onClick={() => {
-              onCreateBranch({ x: contextMenu.flowX, y: contextMenu.flowY });
-              setContextMenu(undefined);
-            }}
-          >
-            Create Branch
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              onCreateEvent(paletteCategoryId, { x: contextMenu.flowX, y: contextMenu.flowY });
-              setContextMenu(undefined);
-            }}
-          >
-            Create Event
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              onCreateEvent("final", { x: contextMenu.flowX, y: contextMenu.flowY });
-              setContextMenu(undefined);
-            }}
-          >
-            Create Final Event
-          </button>
+          {contextMenu.kind === "connect-create" ? (
+            <>
+              <span className="canvas-menu-label">Create connected event</span>
+              {eventTypeOptions.map((category) => (
+                <button
+                  key={category.id}
+                  type="button"
+                  onClick={() => {
+                    if (contextMenu.sourceNodeId) {
+                      onCreateConnectedEvent(contextMenu.sourceNodeId, category.id, { x: contextMenu.flowX, y: contextMenu.flowY });
+                    }
+                    setContextMenu(undefined);
+                  }}
+                >
+                  {category.label}
+                  {category.terminal ? " (final)" : ""}
+                </button>
+              ))}
+            </>
+          ) : (
+            <>
+              <span className="canvas-menu-label">Create event</span>
+              {eventTypeOptions.map((category) => (
+                <button
+                  key={category.id}
+                  type="button"
+                  onClick={() => {
+                    onCreateEvent(category.id, { x: contextMenu.flowX, y: contextMenu.flowY });
+                    setContextMenu(undefined);
+                  }}
+                >
+                  {category.label}
+                  {category.terminal ? " (final)" : ""}
+                </button>
+              ))}
+              <span className="canvas-menu-label">Layout</span>
+              {([
+                ["branching", "Branching depth"],
+                ["timeline", "Timeline"],
+                ["branches", "Branches"],
+              ] as const).map(([mode, label]) => (
+                <button
+                  key={mode}
+                  type="button"
+                  className={canvasLayout === mode ? "active" : ""}
+                  onClick={() => {
+                    onApplyCanvasLayout(mode);
+                    setContextMenu(undefined);
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </>
+          )}
         </div>
       ) : null}
 
@@ -3600,18 +4393,27 @@ function StoryCanvas({
       ) : null}
 
       <EventAuthoringDock
-        project={project}
+        project={inspectorProject}
         nodes={nodes}
         selection={selection}
+        eventDraft={eventDraft}
+        open={eventInspectorOpen}
+        openEventIds={eventInspectorOpenEventIds}
+        expandedEventId={eventInspectorExpandedEventId}
+        onOpenChange={onEventInspectorOpenChange}
+        onOpenEventIdsChange={onEventInspectorOpenEventIdsChange}
+        onExpandedEventIdChange={onEventInspectorExpandedEventIdChange}
         onSelect={onSelect}
-        onUpdateEvent={onUpdateEvent}
+        onEventDraftModeChange={onEventDraftModeChange}
+        onUpdateEventDraft={onUpdateEventDraft}
+        onSaveEventDraft={onSaveEventDraft}
       >
         <Inspector
-          project={project}
+          project={inspectorProject}
           nodes={nodes}
           edges={edges}
           files={files}
-          selection={selection}
+          selection={inspectorSelection}
           findings={findings}
           exportOpen={exportOpen}
           exportPreviewMode={exportPreviewMode}
@@ -3619,7 +4421,6 @@ function StoryCanvas({
           onExportPreviewModeChange={onExportPreviewModeChange}
           onClose={() => onSelect(undefined)}
           onUpdateSequence={onUpdateSequence}
-          onSetEntrySequence={onSetEntrySequence}
           onUpdateBranch={onUpdateBranch}
           onCreateEventInBranch={onCreateEventInBranch}
           onUpdateEvent={onUpdateEvent}
@@ -3669,13 +4470,19 @@ export function App() {
   const [exportOpen, setExportOpen] = useState(false);
   const [exportPreviewMode, setExportPreviewMode] = useState<ExportPreviewMode>("runtime");
   const [dataOpen, setDataOpen] = useState(false);
+  const [eventInspectorOpen, setEventInspectorOpen] = useState(true);
+  const [eventInspectorOpenEventIds, setEventInspectorOpenEventIds] = useState<string[]>([]);
+  const [eventInspectorExpandedEventId, setEventInspectorExpandedEventId] = useState<string>();
   const [markdownTabs, setMarkdownTabs] = useState<MarkdownEditorTab[]>([]);
   const [activeMarkdownTabId, setActiveMarkdownTabId] = useState<string>();
+  const [eventDraft, setEventDraft] = useState<EventDraft>();
+  const [storyOutlineTab, setStoryOutlineTab] = useState<StoryOutlineTab>("sequence");
   const [canvasMode, setCanvasMode] = useState<CanvasMode>("branching");
   const [focusNodeId, setFocusNodeId] = useState<string>();
   const [undoStack, setUndoStack] = useState<BranchingProject[]>([]);
   const [redoStack, setRedoStack] = useState<BranchingProject[]>([]);
   const [discardDialog, setDiscardDialog] = useState<{ resolve: (discard: boolean) => void }>();
+  const [eventDraftDialog, setEventDraftDialog] = useState<{ nextSelection?: Selection }>();
   const [nameDialog, setNameDialog] = useState<
     | { kind: "createStory"; title: string; label: string; initialValue?: string }
     | { kind: "renameStory"; title: string; label: string; initialValue?: string }
@@ -3689,18 +4496,19 @@ export function App() {
   const [missingRecentProjects, setMissingRecentProjects] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string>();
   const [message, setMessage] = useState<string>();
-  const autoSaveTokenRef = useRef(0);
   const projectRef = useRef<BranchingProject | undefined>(undefined);
   const workspaceRef = useRef<PathBranchingWorkspace | undefined>(undefined);
   const fileStateRef = useRef<ProjectFileState>({ dirty: false });
+  const selectionRef = useRef<Selection | undefined>(undefined);
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const persistProjectRef = useRef<((options?: { manual?: boolean }) => Promise<void>) | undefined>(undefined);
   const projectRevisionRef = useRef(0);
   const savedRevisionRef = useRef(0);
 
-  const applyProject = useCallback((nextProject: BranchingProject, options: { dirty?: boolean; path?: string; universePath?: string; storyPath?: string; modifiedMs?: number } = {}) => {
+  const applyProject = useCallback((nextProject: BranchingProject, options: { dirty?: boolean; revision?: boolean; path?: string; universePath?: string; storyPath?: string; modifiedMs?: number } = {}) => {
     const normalizedProject = normalizeProject(nextProject);
     const model = buildStoryCanvasModel(normalizedProject);
-    if (options.dirty) {
+    if (options.dirty || options.revision) {
       projectRevisionRef.current += 1;
     }
     projectRef.current = normalizedProject;
@@ -3769,6 +4577,7 @@ export function App() {
       setFileState(nextFileState);
       setUndoStack([]);
       setRedoStack([]);
+      setEventDraft(undefined);
       setMarkdownTabs(savedSession.markdownTabs ?? []);
       setActiveMarkdownTabId(savedSession.activeMarkdownTabId);
       setCanonOpen(savedSession.canonOpen ?? activeProject.panels?.canonOpen ?? true);
@@ -3777,41 +4586,19 @@ export function App() {
       setStoriesWidth(clampPanelWidth(savedSession.storiesWidth));
       setExportOpen(savedSession.exportOpen ?? false);
       setDataOpen(savedSession.dataOpen ?? false);
+      setEventInspectorOpen(savedSession.eventInspectorOpen ?? true);
+      setEventInspectorOpenEventIds(savedSession.eventInspectorOpenEventIds ?? []);
+      setEventInspectorExpandedEventId(savedSession.eventInspectorExpandedEventId);
+      setStoryOutlineTab(savedSession.storyOutlineTab ?? "sequence");
       const initialSelectionId = activeProject.canvas?.activeSequenceId ?? activeProject.entrySequenceId ?? activeProject.sequences[0]?.id ?? model.nodes[0]?.id;
       setSelection(savedSession.selection ?? (initialSelectionId ? { type: "node", id: initialSelectionId } : undefined));
       setCanvasMode(savedSession.canvasMode ?? "branching");
       setFocusNodeId(savedSession.focusNodeId);
       setError(undefined);
+      setMessage(workspaceLoadWarningMessage(nextWorkspace));
     },
     [],
   );
-
-  const markProjectDirty = useCallback((nextProject: BranchingProject) => {
-    const normalizedProject = normalizeProject(nextProject);
-    projectRevisionRef.current += 1;
-    projectRef.current = normalizedProject;
-    workspaceRef.current = workspaceRef.current
-      ? {
-          ...workspaceRef.current,
-          activeProject: normalizedProject,
-        }
-      : workspaceRef.current;
-    setProject(normalizedProject);
-    setWorkspace((current) =>
-      current
-        ? {
-            ...current,
-            activeProject: normalizedProject,
-          }
-        : current,
-    );
-    setFileState((current) => {
-      const nextState = { ...current, dirty: true };
-      fileStateRef.current = nextState;
-      return nextState;
-    });
-    return normalizedProject;
-  }, []);
 
   useEffect(() => {
     projectRef.current = project;
@@ -3825,36 +4612,115 @@ export function App() {
     fileStateRef.current = fileState;
   }, [fileState]);
 
-  const updateProject = useCallback(
-    (nextProject: BranchingProject, nextSelection?: Selection) => {
-      if (project) {
-        setUndoStack((current) => [...current.slice(-49), project]);
-        setRedoStack([]);
+  useEffect(() => {
+    selectionRef.current = selection;
+  }, [selection]);
+
+  const restoreStructuralSnapshot = useCallback(
+    (snapshot: {
+      project?: BranchingProject;
+      workspace?: PathBranchingWorkspace;
+      fileState: ProjectFileState;
+      selection?: Selection;
+      undoStack: BranchingProject[];
+      redoStack: BranchingProject[];
+      revision: number;
+      savedRevision: number;
+    }) => {
+      projectRevisionRef.current = snapshot.revision;
+      savedRevisionRef.current = snapshot.savedRevision;
+      workspaceRef.current = snapshot.workspace;
+      fileStateRef.current = snapshot.fileState;
+      projectRef.current = snapshot.project;
+      setWorkspace(snapshot.workspace);
+      setFileState(snapshot.fileState);
+      setUndoStack(snapshot.undoStack);
+      setRedoStack(snapshot.redoStack);
+      setSelection(snapshot.selection);
+      if (snapshot.project) {
+        const model = buildStoryCanvasModel(snapshot.project);
+        setProject(snapshot.project);
+        setNodes(model.nodes);
+        setEdges(model.edges);
+        setFiles(model.files);
+      } else {
+        setProject(undefined);
+        setNodes([]);
+        setEdges([]);
+        setFiles([]);
       }
-      applyProject(nextProject, { dirty: true });
-      if (nextSelection) {
+    },
+    [],
+  );
+
+  const commitStructuralAction = useCallback(
+    async (label: string, result: mutations.MutationResult | BranchingProject, nextSelection?: Selection) => {
+      const currentProject = projectRef.current;
+      const currentWorkspace = workspaceRef.current;
+      const currentFileState = fileStateRef.current;
+      const previousUndoStack = undoStack;
+      const previousRedoStack = redoStack;
+      const mutationResult = "project" in result ? result : { project: result };
+
+      if (!currentProject) {
+        return;
+      }
+
+      const changed = mutationResult.project !== currentProject;
+      if (!changed) {
+        if (mutationResult.selection) {
+          setSelection(mutationResult.selection as Selection);
+        }
+        if (mutationResult.message) {
+          setMessage(mutationResult.message);
+        }
+        return;
+      }
+
+      const snapshot = {
+        project: currentProject,
+        workspace: currentWorkspace,
+        fileState: currentFileState,
+        selection: selectionRef.current,
+        undoStack: previousUndoStack,
+        redoStack: previousRedoStack,
+        revision: projectRevisionRef.current,
+        savedRevision: savedRevisionRef.current,
+      };
+
+      setUndoStack((current) => [...current.slice(-49), currentProject]);
+      setRedoStack([]);
+      applyProject(mutationResult.project, { dirty: false, revision: true });
+      if (mutationResult.selection) {
+        setSelection(mutationResult.selection as Selection);
+      } else if (nextSelection) {
         setSelection(nextSelection);
       }
-      setMessage(undefined);
+      setMessage(mutationResult.message ?? `${label}...`);
+
+      try {
+        await persistProjectRef.current?.();
+        setMessage(mutationResult.message ?? `${label} saved.`);
+      } catch (commitError) {
+        restoreStructuralSnapshot(snapshot);
+        setError(commitError instanceof Error ? commitError.message : String(commitError));
+      }
     },
-    [applyProject, project],
+    [applyProject, redoStack, restoreStructuralSnapshot, undoStack],
+  );
+
+  const updateProject = useCallback(
+    (nextProject: BranchingProject, nextSelection?: Selection) => {
+      void commitStructuralAction("Saved structural change", nextProject, nextSelection);
+    },
+    [commitStructuralAction],
   );
 
   const runMutation = useCallback(
-    (result: mutations.MutationResult) => {
-      const previousProject = projectRef.current ?? project;
-      const changed = Boolean(previousProject && result.project !== previousProject);
-      if (previousProject && changed) {
-        setUndoStack((current) => [...current.slice(-49), previousProject]);
-        setRedoStack([]);
-      }
-      applyProject(result.project, { dirty: changed });
-      if (result.selection) {
-        setSelection(result.selection as Selection);
-      }
-      setMessage(result.message);
+    (result: mutations.MutationResult, label = "Saved structural change") => {
+      void commitStructuralAction(label, result);
     },
-    [applyProject, project],
+    [commitStructuralAction],
   );
 
   const editCanonRefInBranch = useCallback((ref: CanonRef) => {
@@ -3945,11 +4811,14 @@ export function App() {
           ),
         );
         if (projectRef.current) {
-          markProjectDirty({
-            ...projectRef.current,
-            canonRefs: projectRef.current.canonRefs.map((ref) =>
-              ref.id === tab.canonRefId ? { ...ref, workingCopyPath } : ref,
-            ),
+          await commitStructuralAction("Linked Markdown working copy", {
+            project: {
+              ...projectRef.current,
+              canonRefs: projectRef.current.canonRefs.map((ref) =>
+                ref.id === tab.canonRefId ? { ...ref, workingCopyPath } : ref,
+              ),
+            },
+            message: `Saved working copy: ${workingCopyPath}.`,
           });
         }
         setMessage(`Saved working copy: ${workingCopyPath}.`);
@@ -3958,17 +4827,17 @@ export function App() {
         setMessage(saveError instanceof Error ? saveError.message : String(saveError));
       }
     },
-    [fileState.universePath, markProjectDirty, markdownTabs],
+    [commitStructuralAction, fileState.universePath, markdownTabs],
   );
 
   const confirmDiscardChanges = useCallback(async () => {
-    if (!fileState.dirty) {
+    if (!eventDraft?.dirty) {
       return true;
     }
     return new Promise<boolean>((resolve) => {
       setDiscardDialog({ resolve });
     });
-  }, [fileState.dirty]);
+  }, [eventDraft?.dirty]);
 
   const resolveDiscardDialog = useCallback(
     (discard: boolean) => {
@@ -3979,10 +4848,14 @@ export function App() {
   );
 
   const setActiveSequence = useCallback(
-    (sequenceId: string) => {
+    async (sequenceId: string) => {
       if (!project) {
         return;
       }
+      if (!(await confirmDiscardChanges())) {
+        return;
+      }
+      setEventDraft(undefined);
       updateProject(
         {
           ...project,
@@ -3996,7 +4869,7 @@ export function App() {
       setCanvasMode("branching");
       setFocusNodeId(undefined);
     },
-    [project, updateProject],
+    [confirmDiscardChanges, project, updateProject],
   );
 
   const setActiveStory = useCallback(
@@ -4009,27 +4882,11 @@ export function App() {
       }
       try {
         const opened = await openUniverseStory(fileStateRef.current.universePath, storyId);
-        const snapshot = await saveBranchingDocument({
-          project: normalizeProject({
-            ...opened.workspace.activeProject,
-            universeRootPath: opened.path,
-          }),
-          workspace: opened.workspace,
-          fileState: {
-            path: opened.workspace.activeStory?.path,
-            storyPath: opened.workspace.activeStory?.path,
-            universePath: opened.path,
-            dirty: false,
-            modifiedMs: opened.workspace.storyModifiedMs,
-            universeProfile: opened.workspace.universeProfile,
-          },
-          revision: projectRevisionRef.current,
-        });
-        applyWorkspace(snapshot.nextWorkspace, opened.path);
+        applyWorkspace(opened.workspace, opened.path);
         setSettings((current) => rememberRecentProject(current, opened.path));
         setView("workspace");
         setError(undefined);
-        setMessage(`Opened story ${snapshot.nextWorkspace.activeStory?.name ?? storyId}.`);
+        setMessage(workspaceLoadWarningMessage(opened.workspace) ?? `Opened story ${opened.workspace.activeStory?.name ?? storyId}.`);
       } catch (openError) {
         setError(openError instanceof Error ? openError.message : String(openError));
       }
@@ -4090,10 +4947,14 @@ export function App() {
       storiesWidth,
       exportOpen,
       dataOpen,
+      eventInspectorOpen,
+      eventInspectorOpenEventIds,
+      eventInspectorExpandedEventId,
       canvasMode,
       focusNodeId,
       markdownTabs: storableMarkdownTabs(markdownTabs),
       activeMarkdownTabId,
+      storyOutlineTab,
     };
     setSettings((current) => {
       const currentSession = current.workspaceSessions?.[fileState.universePath as string];
@@ -4114,6 +4975,9 @@ export function App() {
     canonWidth,
     canvasMode,
     dataOpen,
+    eventInspectorExpandedEventId,
+    eventInspectorOpenEventIds,
+    eventInspectorOpen,
     exportOpen,
     fileState.universePath,
     filesOpen,
@@ -4121,6 +4985,7 @@ export function App() {
     initialLoading,
     markdownTabs,
     selection,
+    storyOutlineTab,
     storiesWidth,
     view,
   ]);
@@ -4131,6 +4996,16 @@ export function App() {
 
   const changeThemeFamily = useCallback((family: ThemeFamily) => {
     setSettings((current) => ({ ...current, theme: themeForFamilyAndMode(family, themeById(current.theme).mode) }));
+  }, []);
+
+  const changeCanvasBackground = useCallback((updates: Partial<CanvasBackgroundSettings>) => {
+    setSettings((current) => ({
+      ...current,
+      canvasBackground: normalizeCanvasBackgroundSettings({
+        ...current.canvasBackground,
+        ...updates,
+      }),
+    }));
   }, []);
 
   const openProject = useCallback(async () => {
@@ -4146,15 +5021,34 @@ export function App() {
       setSettings((current) => rememberRecentProject(current, opened.path));
       setView("workspace");
       setError(undefined);
+      const loadWarning = workspaceLoadWarningMessage(opened.workspace);
       setMessage(
-        opened.workspace.createdDefaultStory
-          ? `Opened ${projectFileName(opened.path)}. Save to create PathBranching metadata.`
-          : `Opened ${projectFileName(opened.path)}.`,
+        loadWarning ??
+          (opened.workspace.createdDefaultStory
+          ? `Opened ${projectFileName(opened.path)}. Create a story to write PathBranching metadata.`
+          : `Opened ${projectFileName(opened.path)}.`),
       );
     } catch (openError) {
       setError(openError instanceof Error ? openError.message : String(openError));
     }
   }, [applyWorkspace, confirmDiscardChanges]);
+
+  const revealUniverse = useCallback(async () => {
+    const universePath = fileStateRef.current.universePath;
+    if (!universePath) {
+      setMessage("Open a universe before revealing its folder.");
+      return;
+    }
+    try {
+      const result = await revealUniverseFolder(universePath);
+      if (!result.ok) {
+        throw new Error(result.message ?? "Could not reveal universe folder.");
+      }
+      setMessage(`Opened ${projectFileName(universePath)} in the system file explorer.`);
+    } catch (revealError) {
+      setError(revealError instanceof Error ? revealError.message : String(revealError));
+    }
+  }, []);
 
   const persistProject = useCallback(
     (options: { manual?: boolean } = {}) => {
@@ -4226,53 +5120,144 @@ export function App() {
     [],
   );
 
-  const saveProject = useCallback(async () => {
-    try {
-      await persistProject({ manual: true });
-    } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : String(saveError));
-    }
+  useEffect(() => {
+    persistProjectRef.current = persistProject;
   }, [persistProject]);
 
-  useEffect(() => {
-    if (
-      initialLoading ||
-      !isTauriRuntime() ||
-      !project ||
-      !workspace ||
-      !fileState.universePath ||
-      !fileState.dirty
-    ) {
-      return;
+  const saveActiveEventDraft = useCallback(async () => {
+    const currentDraft = eventDraft;
+    const currentProject = projectRef.current;
+    if (!currentDraft?.dirty) {
+      setMessage("No event edits to save.");
+      return true;
+    }
+    if (!currentProject) {
+      setMessage("No event is available to save.");
+      return false;
     }
 
-    const token = autoSaveTokenRef.current + 1;
-    autoSaveTokenRef.current = token;
-    void (async () => {
-      try {
-        await persistProject();
-        if (autoSaveTokenRef.current !== token) {
-          return;
-        }
-      } catch (autoSaveError) {
-        if (autoSaveTokenRef.current !== token) {
-          return;
-        }
-        setError(autoSaveError instanceof Error ? autoSaveError.message : String(autoSaveError));
-      }
-    })();
-  }, [fileState.dirty, fileState.modifiedMs, fileState.universePath, initialLoading, persistProject, project, workspace]);
+    const snapshot = {
+      project: currentProject,
+      workspace: workspaceRef.current,
+      fileState: fileStateRef.current,
+      selection: selectionRef.current,
+      undoStack,
+      redoStack,
+      revision: projectRevisionRef.current,
+      savedRevision: savedRevisionRef.current,
+    };
 
-  const saveProjectAs = useCallback(async () => {
-    if (!project) {
-      return;
-    }
     try {
-      await saveProject();
+      setEventDraft((draft) => (draft?.eventId === currentDraft.eventId ? { ...draft, saving: true } : draft));
+      const nextProject = applyEventDraftToProject(currentProject, currentDraft);
+      applyProject(nextProject, { dirty: false, revision: true });
+      await persistProject();
+      setEventDraft({
+        ...currentDraft,
+        baseEvent: structuredClone(currentDraft.draftEvent),
+        draftEvent: structuredClone(currentDraft.draftEvent),
+        dirty: false,
+        saving: false,
+      });
+      setMessage("Saved event edits.");
+      return true;
     } catch (saveError) {
+      restoreStructuralSnapshot(snapshot);
+      setEventDraft((draft) => (draft?.eventId === currentDraft.eventId ? { ...draft, saving: false } : draft));
       setError(saveError instanceof Error ? saveError.message : String(saveError));
+      return false;
     }
-  }, [project, saveProject]);
+  }, [applyProject, eventDraft, persistProject, redoStack, restoreStructuralSnapshot, undoStack]);
+
+  const openEventInspectorForEvent = useCallback((eventId: string) => {
+    setEventInspectorOpen(true);
+    setEventInspectorOpenEventIds((current) => (current.includes(eventId) ? current : [...current, eventId].slice(-5)));
+    setEventInspectorExpandedEventId(eventId);
+  }, []);
+
+  const selectWithEventDraftGuard = useCallback(
+    (nextSelection?: Selection) => {
+      const currentProject = projectRef.current;
+      const nextEventId = currentProject ? eventIdFromSelection(currentProject, nodes, nextSelection) : undefined;
+      if (eventDraft?.dirty && nextEventId && nextEventId !== eventDraft.eventId) {
+        setEventDraftDialog({ nextSelection });
+        return;
+      }
+      setSelection(nextSelection);
+      if (nextEventId) {
+        openEventInspectorForEvent(nextEventId);
+      }
+    },
+    [eventDraft, nodes, openEventInspectorForEvent],
+  );
+
+  const resolveEventDraftDialog = useCallback(
+    async (action: "save" | "discard" | "cancel") => {
+      const nextSelection = eventDraftDialog?.nextSelection;
+      if (action === "cancel") {
+        setEventDraftDialog(undefined);
+        return;
+      }
+      if (action === "save") {
+        const saved = await saveActiveEventDraft();
+        if (!saved) {
+          return;
+        }
+      }
+      setEventDraftDialog(undefined);
+      setEventDraft(undefined);
+      setSelection(nextSelection);
+      const currentProject = projectRef.current;
+      const nextEventId = currentProject ? eventIdFromSelection(currentProject, nodes, nextSelection) : undefined;
+      if (nextEventId) {
+        openEventInspectorForEvent(nextEventId);
+      }
+    },
+    [eventDraftDialog?.nextSelection, nodes, openEventInspectorForEvent, saveActiveEventDraft],
+  );
+
+  useEffect(() => {
+    if (!project) {
+      setEventDraft(undefined);
+      return;
+    }
+    if (eventDraft?.dirty) {
+      return;
+    }
+    const ownerEventId = eventIdFromSelection(project, nodes, selection);
+    if (!ownerEventId) {
+      return;
+    }
+    const draftSelection = { type: "node" as const, id: ownerEventId };
+    const nextDraft = createEventDraftFromSelection(project, draftSelection, eventDraft?.mode ?? "components");
+    if (eventDraft?.eventId === nextDraft?.eventId && eventDraft?.mode === nextDraft?.mode) {
+      return;
+    }
+    setEventDraft(nextDraft);
+  }, [eventDraft?.dirty, eventDraft?.eventId, eventDraft?.mode, nodes, project, selection]);
+
+  const mutateEventDraft = useCallback(
+    (factory: (projectWithDraft: BranchingProject) => mutations.MutationResult) => {
+      setEventDraft((currentDraft) => {
+        const currentProject = projectRef.current;
+        if (!currentDraft || !currentProject) {
+          return currentDraft;
+        }
+        const draftProject = applyEventDraftToProject(currentProject, currentDraft);
+        const result = factory(draftProject);
+        const nextEvent = findEvent(result.project, currentDraft.eventId);
+        if (!nextEvent) {
+          return currentDraft;
+        }
+        return {
+          ...currentDraft,
+          draftEvent: structuredClone(nextEvent),
+          dirty: true,
+        };
+      });
+    },
+    [],
+  );
 
   const exportRuntime = useCallback(async (mode: ExportPreviewMode = exportPreviewMode) => {
     if (!project) {
@@ -4313,7 +5298,7 @@ export function App() {
         setSettings((current) => rememberRecentProject(current, opened.path));
         setView("workspace");
         setError(undefined);
-        setMessage(`Opened ${projectFileName(opened.path)}.`);
+        setMessage(workspaceLoadWarningMessage(opened.workspace) ?? `Opened ${projectFileName(opened.path)}.`);
       } catch (openError) {
         setMissingRecentProjects((current) => new Set(current).add(path));
         setError(openError instanceof Error ? openError.message : String(openError));
@@ -4340,22 +5325,54 @@ export function App() {
       return;
     }
     const previous = undoStack[undoStack.length - 1];
+    const snapshot = {
+      project,
+      workspace: workspaceRef.current,
+      fileState: fileStateRef.current,
+      selection: selectionRef.current,
+      undoStack,
+      redoStack,
+      revision: projectRevisionRef.current,
+      savedRevision: savedRevisionRef.current,
+    };
     setUndoStack((current) => current.slice(0, -1));
     setRedoStack((current) => [...current.slice(-49), project]);
-    applyProject(previous, { dirty: true });
-    setMessage("Undo.");
-  }, [applyProject, project, undoStack]);
+    applyProject(previous, { dirty: false, revision: true });
+    setMessage("Undo...");
+    void persistProjectRef.current?.()
+      .then(() => setMessage("Undo saved."))
+      .catch((undoError) => {
+        restoreStructuralSnapshot(snapshot);
+        setError(undoError instanceof Error ? undoError.message : String(undoError));
+      });
+  }, [applyProject, project, redoStack, restoreStructuralSnapshot, undoStack]);
 
   const redoProject = useCallback(() => {
     if (!project || redoStack.length === 0) {
       return;
     }
     const next = redoStack[redoStack.length - 1];
+    const snapshot = {
+      project,
+      workspace: workspaceRef.current,
+      fileState: fileStateRef.current,
+      selection: selectionRef.current,
+      undoStack,
+      redoStack,
+      revision: projectRevisionRef.current,
+      savedRevision: savedRevisionRef.current,
+    };
     setRedoStack((current) => current.slice(0, -1));
     setUndoStack((current) => [...current.slice(-49), project]);
-    applyProject(next, { dirty: true });
-    setMessage("Redo.");
-  }, [applyProject, project, redoStack]);
+    applyProject(next, { dirty: false, revision: true });
+    setMessage("Redo...");
+    void persistProjectRef.current?.()
+      .then(() => setMessage("Redo saved."))
+      .catch((redoError) => {
+        restoreStructuralSnapshot(snapshot);
+        setError(redoError instanceof Error ? redoError.message : String(redoError));
+      });
+  }, [applyProject, project, redoStack, restoreStructuralSnapshot, undoStack]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -4367,6 +5384,10 @@ export function App() {
         event.preventDefault();
         redoProject();
       }
+      if (shortcutMatches(event, "Mod+S")) {
+        event.preventDefault();
+        void saveActiveEventDraft();
+      }
       if (shortcutMatches(event, "Mod+O")) {
         event.preventDefault();
         void openProject();
@@ -4374,7 +5395,7 @@ export function App() {
     };
     window.addEventListener("keydown", handleKeyDown, true);
     return () => window.removeEventListener("keydown", handleKeyDown, true);
-  }, [openProject, redoProject, undoProject]);
+  }, [openProject, redoProject, saveActiveEventDraft, undoProject]);
 
   const enterFocus = useCallback((nodeId: string) => {
     setFocusNodeId(nodeId);
@@ -4412,9 +5433,6 @@ export function App() {
     }
 
     try {
-      if (currentFileState.dirty && !currentWorkspace.createdDefaultStory) {
-        await persistProject({ manual: true });
-      }
       setMessage("Creating PathBranching story...");
       const revision = projectRevisionRef.current + 1;
       const snapshot = await createBranchingStory({
@@ -4434,7 +5452,7 @@ export function App() {
     } catch (createError) {
       setError(createError instanceof Error ? createError.message : String(createError));
     }
-  }, [applyWorkspace, persistProject]);
+  }, [applyWorkspace]);
 
   const createSequence = useCallback((name?: string) => {
     if (!isTauriRuntime()) {
@@ -4629,7 +5647,9 @@ export function App() {
         return;
       }
 
-      runMutation(mutations.createBranch(currentProject, position));
+      const snap = settingsRef.current.canvasBackground;
+      const snappedPosition = position ? snapCanvasPoint(position, snap.snapToGrid, snap.gridSize) : undefined;
+      runMutation(mutations.createBranch(currentProject, snappedPosition));
     },
     [runMutation],
   );
@@ -4646,7 +5666,9 @@ export function App() {
         return;
       }
 
-      runMutation(mutations.createEvent(currentProject, type, position, branchId));
+      const snap = settingsRef.current.canvasBackground;
+      const snappedPosition = position ? snapCanvasPoint(position, snap.snapToGrid, snap.gridSize) : undefined;
+      runMutation(mutations.createEvent(currentProject, type, snappedPosition, branchId));
     },
     [runMutation],
   );
@@ -4658,22 +5680,146 @@ export function App() {
     [createEvent],
   );
 
+  const createConnectedEvent = useCallback(
+    (sourceNodeId: string, type: EventType, position: { x: number; y: number }) => {
+      if (!isTauriRuntime()) {
+        setMessage("Preview web: no guarda en universo. Abre PathBranching con Tauri para crear eventos persistentes.");
+        return;
+      }
+
+      const currentProject = projectRef.current;
+      if (!currentProject || workspaceRef.current?.createdDefaultStory) {
+        setMessage("Create a PathBranching story before adding events.");
+        return;
+      }
+
+      const sourceNode = nodes.find((node) => node.id === sourceNodeId);
+      if (!sourceNode) {
+        setMessage("Connection source could not be resolved.");
+        return;
+      }
+
+      const sourceKind = sourceNode.data.kind;
+      const branchId = sourceKind === "branch" ? nodeStoryId(sourceNode) : undefined;
+      const snap = settingsRef.current.canvasBackground;
+      const snappedPosition = snapCanvasPoint(position, snap.snapToGrid, snap.gridSize);
+      const created = mutations.createEvent(currentProject, type, snappedPosition, branchId);
+      const targetEventId =
+        created.selection?.type === "node"
+          ? created.selection.id
+          : created.project.events.find((event) => !currentProject.events.some((previousEvent) => previousEvent.id === event.id))?.id;
+
+      if (!targetEventId || created.project === currentProject) {
+        setMessage(created.message ?? "Could not create a connected event.");
+        return;
+      }
+
+      let nextProject = created.project;
+      const sequenceId = activeSequenceId(nextProject);
+
+      if (sourceKind === "start") {
+        const sourceSequenceId =
+          typeof sourceNode.data.details?.sequenceId === "string" ? sourceNode.data.details.sequenceId : nodeStoryId(sourceNode);
+        if (!sourceSequenceId) {
+          setMessage("Start node source could not be resolved.");
+          return;
+        }
+        nextProject = {
+          ...nextProject,
+          sequences: nextProject.sequences.map((sequence) =>
+            sequence.id === sourceSequenceId
+              ? { ...sequence, entryEventId: targetEventId, eventIds: withValue(sequence.eventIds, targetEventId) }
+              : sequence,
+          ),
+        };
+        void commitStructuralAction(
+          "Created connected event",
+          {
+            project: nextProject,
+            selection: { type: "edge", id: `edge:entry:${sourceNode.id}:${targetEventId}` },
+            message: "Created connected event.",
+          },
+        );
+        return;
+      }
+
+      if (sourceKind === "branch") {
+        if (!branchId || !sequenceId) {
+          setMessage("Branch connection could not be resolved.");
+          return;
+        }
+        nextProject = {
+          ...nextProject,
+          sequences: nextProject.sequences.map((sequence) =>
+            sequence.id === sequenceId
+              ? {
+                  ...sequence,
+                  eventIds: withValue(sequence.eventIds, targetEventId),
+                  branchIds: withValue(sequence.branchIds, branchId),
+                }
+              : sequence,
+          ),
+          branches: nextProject.branches.map((branch) =>
+            branch.id === branchId ? { ...branch, eventIds: withValue(branch.eventIds, targetEventId) } : branch,
+          ),
+          events: nextProject.events.map((event) => (event.id === targetEventId ? { ...event, branchRef: branchId } : event)),
+        };
+        void commitStructuralAction("Created event in branch", {
+          project: nextProject,
+          selection: { type: "node", id: targetEventId },
+          message: "Created event in branch.",
+        });
+        return;
+      }
+
+      const sourceEventId = ownerEventIdForNode(sourceNode);
+      const sourceEvent = sourceEventId ? findEvent(nextProject, sourceEventId) : undefined;
+      if (!sourceEventId || !sourceEvent) {
+        setMessage("Only events and outcomes can create runtime transitions.");
+        return;
+      }
+
+      if (mutations.isTerminalEventType(nextProject, sourceEvent.type)) {
+        setMessage("Terminal events cannot create outgoing transitions.");
+        return;
+      }
+
+      const transitionId = transitionFrom(sourceNode.id, targetEventId, sourceEvent.transitions);
+      const transition: Transition = {
+        id: transitionId,
+        from: sourceNode.data.kind === "outcome" ? sourceNode.id : sourceEventId,
+        to: targetEventId,
+        label: sourceNode.data.kind === "outcome" ? "outcome transition" : "transition",
+        source: "graph",
+      };
+
+      nextProject = {
+        ...nextProject,
+        sequences: sequenceId
+          ? nextProject.sequences.map((sequence) =>
+              sequence.id === sequenceId ? { ...sequence, eventIds: withValue(sequence.eventIds, targetEventId) } : sequence,
+            )
+          : nextProject.sequences,
+        events: nextProject.events.map((event) =>
+          event.id === sourceEventId ? { ...event, transitions: [...(event.transitions ?? []), transition] } : event,
+        ),
+      };
+
+      void commitStructuralAction("Created connected event", {
+        project: nextProject,
+        selection: { type: "edge", id: `edge:transition:${transitionId}` },
+        message: "Created connected event.",
+      });
+    },
+    [commitStructuralAction, nodes],
+  );
+
   const updateSequence = useCallback(
     (id: string, updates: Partial<Sequence>) => {
       if (!project) {
         return;
       }
       runMutation(mutations.updateSequence(project, id, updates));
-    },
-    [project, runMutation],
-  );
-
-  const setEntrySequence = useCallback(
-    (id: string) => {
-      if (!project) {
-        return;
-      }
-      runMutation(mutations.setEntrySequence(project, id));
     },
     [project, runMutation],
   );
@@ -4688,14 +5834,28 @@ export function App() {
     [project, runMutation],
   );
 
+  const assignEventBranch = useCallback(
+    (eventId: string, branchId?: string) => {
+      if (!project) {
+        return;
+      }
+      runMutation({ project: assignEventToBranch(project, eventId, branchId) }, "Updated event branch");
+    },
+    [project, runMutation],
+  );
+
   const updateEvent = useCallback(
     (id: string, updates: Partial<EventNode>) => {
       if (!project) {
         return;
       }
+      if (eventDraft?.eventId === id) {
+        setEventDraft((draft) => updateEventDraft(draft, updates));
+        return;
+      }
       runMutation(mutations.updateEvent(project, id, updates));
     },
-    [project, runMutation],
+    [eventDraft?.eventId, project, runMutation],
   );
 
   const createDecision = useCallback(
@@ -4703,9 +5863,13 @@ export function App() {
       if (!project) {
         return;
       }
+      if (eventDraft?.eventId === eventId) {
+        mutateEventDraft((draftProject) => mutations.createDecision(draftProject, eventId));
+        return;
+      }
       runMutation(mutations.createDecision(project, eventId));
     },
-    [project, runMutation],
+    [eventDraft?.eventId, mutateEventDraft, project, runMutation],
   );
 
   const updateDecision = useCallback(
@@ -4713,9 +5877,13 @@ export function App() {
       if (!project) {
         return;
       }
+      if (eventDraft?.eventId === eventId) {
+        mutateEventDraft((draftProject) => mutations.updateDecision(draftProject, eventId, decisionId, updates));
+        return;
+      }
       runMutation(mutations.updateDecision(project, eventId, decisionId, updates));
     },
-    [project, runMutation],
+    [eventDraft?.eventId, mutateEventDraft, project, runMutation],
   );
 
   const deleteDecision = useCallback(
@@ -4723,9 +5891,13 @@ export function App() {
       if (!project) {
         return;
       }
+      if (eventDraft?.eventId === eventId) {
+        mutateEventDraft((draftProject) => mutations.deleteDecision(draftProject, eventId, decisionId));
+        return;
+      }
       runMutation(mutations.deleteDecision(project, eventId, decisionId));
     },
-    [project, runMutation],
+    [eventDraft?.eventId, mutateEventDraft, project, runMutation],
   );
 
   const createOutcome = useCallback(
@@ -4733,9 +5905,13 @@ export function App() {
       if (!project) {
         return;
       }
+      if (eventDraft?.eventId === eventId) {
+        mutateEventDraft((draftProject) => mutations.createOutcome(draftProject, eventId, decisionId));
+        return;
+      }
       runMutation(mutations.createOutcome(project, eventId, decisionId));
     },
-    [project, runMutation],
+    [eventDraft?.eventId, mutateEventDraft, project, runMutation],
   );
 
   const updateOutcome = useCallback(
@@ -4743,9 +5919,13 @@ export function App() {
       if (!project) {
         return;
       }
+      if (eventDraft?.eventId === eventId) {
+        mutateEventDraft((draftProject) => mutations.updateOutcome(draftProject, eventId, decisionId, outcomeId, updates));
+        return;
+      }
       runMutation(mutations.updateOutcome(project, eventId, decisionId, outcomeId, updates));
     },
-    [project, runMutation],
+    [eventDraft?.eventId, mutateEventDraft, project, runMutation],
   );
 
   const deleteOutcome = useCallback(
@@ -4753,9 +5933,13 @@ export function App() {
       if (!project) {
         return;
       }
+      if (eventDraft?.eventId === eventId) {
+        mutateEventDraft((draftProject) => mutations.deleteOutcome(draftProject, eventId, decisionId, outcomeId));
+        return;
+      }
       runMutation(mutations.deleteOutcome(project, eventId, decisionId, outcomeId));
     },
-    [project, runMutation],
+    [eventDraft?.eventId, mutateEventDraft, project, runMutation],
   );
 
   const updateTransition = useCallback(
@@ -4763,9 +5947,13 @@ export function App() {
       if (!project) {
         return;
       }
+      if (eventDraft?.draftEvent.transitions?.some((transition) => transition.id === transitionId)) {
+        mutateEventDraft((draftProject) => mutations.updateTransition(draftProject, transitionId, updates));
+        return;
+      }
       runMutation(mutations.updateTransition(project, transitionId, updates));
     },
-    [project, runMutation],
+    [eventDraft?.draftEvent.transitions, mutateEventDraft, project, runMutation],
   );
 
   const deleteTransition = useCallback(
@@ -4773,9 +5961,13 @@ export function App() {
       if (!project) {
         return;
       }
+      if (eventDraft?.draftEvent.transitions?.some((transition) => transition.id === transitionId)) {
+        mutateEventDraft((draftProject) => mutations.deleteTransition(draftProject, transitionId));
+        return;
+      }
       runMutation(mutations.deleteTransition(project, transitionId));
     },
-    [project, runMutation],
+    [eventDraft?.draftEvent.transitions, mutateEventDraft, project, runMutation],
   );
 
   const createCanonSuggestion = useCallback(
@@ -4824,9 +6016,9 @@ export function App() {
       if (!project) {
         return;
       }
-      updateProject({ ...project, eventCategories });
+      void commitStructuralAction("Updated event categories", { ...project, eventCategories });
     },
-    [project, updateProject],
+    [commitStructuralAction, project],
   );
 
   const deleteDataObject = useCallback(
@@ -4843,13 +6035,10 @@ export function App() {
     (changes: NodeChange<StoryCanvasNode>[]) => {
       setNodes((currentNodes) => {
         const nextNodes = applyNodeChanges(changes, currentNodes);
-        if (projectRef.current) {
-          markProjectDirty(updateProjectCanvas(projectRef.current, nextNodes));
-        }
         return nextNodes;
       });
     },
-    [markProjectDirty],
+    [],
   );
 
   const handleEdgesChange = useCallback((changes: EdgeChange<StoryCanvasEdge>[]) => {
@@ -4973,52 +6162,16 @@ export function App() {
       if (!eventId || !sequenceId) {
         return;
       }
-      const branchNodes = nodes.filter((item) => item.data.kind === "branch");
-      const absolute = node.parentId
-        ? {
-            x: (nodes.find((item) => item.id === node.parentId)?.position.x ?? 0) + node.position.x,
-            y: (nodes.find((item) => item.id === node.parentId)?.position.y ?? 0) + node.position.y,
-          }
-        : node.position;
-      const center = {
-        x: absolute.x + Number(node.width ?? node.measured?.width ?? 230) / 2,
-        y: absolute.y + Number(node.height ?? node.measured?.height ?? 118) / 2,
+      const snap = settingsRef.current.canvasBackground;
+      const nextNode = {
+        ...node,
+        position: snapCanvasPoint(node.position, snap.snapToGrid, snap.gridSize),
       };
-      const targetBranch = branchNodes.find((branchNode) => isPointInside(branchNode, center.x, center.y));
-      const targetBranchId = targetBranch?.id;
-      const currentEvent = findEvent(project, eventId);
-
-      if (!currentEvent || (currentEvent.branchRef ?? undefined) === targetBranchId) {
-        return;
-      }
-
-      updateProject(
-        {
-          ...project,
-          sequences: project.sequences.map((sequence) =>
-            sequence.id === sequenceId
-              ? {
-                  ...sequence,
-                  eventIds: withValue(sequence.eventIds, eventId),
-                  branchIds: targetBranchId ? withValue(sequence.branchIds, targetBranchId) : sequence.branchIds,
-                }
-              : sequence,
-          ),
-          branches: project.branches.map((branch) => {
-            if (branch.id === targetBranchId) {
-              return { ...branch, eventIds: withValue(branch.eventIds, eventId) };
-            }
-            if (currentEvent.branchRef && branch.id === currentEvent.branchRef) {
-              return { ...branch, eventIds: withoutValue(branch.eventIds, eventId) };
-            }
-            return branch;
-          }),
-          events: project.events.map((event) => (event.id === eventId ? { ...event, branchRef: targetBranchId } : event)),
-        },
-        { type: "node", id: eventId },
-      );
+      const nextNodes = nodes.map((item) => (item.id === node.id ? nextNode : item));
+      const canvasProject = updateProjectCanvas(project, nextNodes);
+      void commitStructuralAction("Moved event", canvasProject, { type: "node", id: eventId });
     },
-    [nodes, project, updateProject],
+    [commitStructuralAction, nodes, project],
   );
 
   const updateEdgeLabel = useCallback(
@@ -5035,6 +6188,10 @@ export function App() {
         );
         return;
       }
+      if (eventDraft?.draftEvent.transitions?.some((transition) => transition.id === transitionId)) {
+        mutateEventDraft((draftProject) => mutations.updateTransition(draftProject, transitionId, { label }));
+        return;
+      }
       updateProject({
         ...project,
         events: project.events.map((event) => ({
@@ -5045,20 +6202,35 @@ export function App() {
         })),
       });
     },
-    [project, updateProject],
+    [eventDraft?.draftEvent.transitions, mutateEventDraft, project, updateProject],
   );
 
   const resetLayout = useCallback(() => {
     if (!project) {
       return;
     }
-    const resetProject = { ...project, canvas: { activeSequenceId: activeSequenceId(project) } };
-    const model = buildStoryCanvasModel(resetProject);
-    markProjectDirty(resetProject);
-    setNodes(model.nodes);
-    setEdges(model.edges);
-    setFiles(model.files);
-  }, [markProjectDirty, project]);
+    const layoutProject = applyCanvasLayoutToProject(project, settings.canvasLayout, {
+      snapToGrid: settings.canvasBackground.snapToGrid,
+      gridSize: settings.canvasBackground.gridSize,
+    });
+    void commitStructuralAction(`Applied ${settings.canvasLayout} layout`, layoutProject);
+  }, [commitStructuralAction, project, settings.canvasBackground.gridSize, settings.canvasBackground.snapToGrid, settings.canvasLayout]);
+
+  const applyCanvasLayout = useCallback(
+    (mode: CanvasLayoutMode) => {
+      const normalizedMode = normalizeCanvasLayoutMode(mode);
+      setSettings((current) => ({ ...current, canvasLayout: normalizedMode }));
+      if (!project) {
+        return;
+      }
+      const layoutProject = applyCanvasLayoutToProject(project, normalizedMode, {
+        snapToGrid: settings.canvasBackground.snapToGrid,
+        gridSize: settings.canvasBackground.gridSize,
+      });
+      void commitStructuralAction(`Applied ${normalizedMode} layout`, layoutProject);
+    },
+    [commitStructuralAction, project, settings.canvasBackground.gridSize, settings.canvasBackground.snapToGrid],
+  );
 
   const deleteSelection = useCallback(
     (targetSelection: Selection) => {
@@ -5133,6 +6305,35 @@ export function App() {
     [project, updateProject],
   );
 
+  useEffect(() => {
+    const handleDeleteKey = (event: KeyboardEvent) => {
+      if (event.key !== "Delete" && event.key !== "Backspace") {
+        return;
+      }
+      const target = event.target;
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement ||
+        (target instanceof HTMLElement && target.isContentEditable)
+      ) {
+        return;
+      }
+
+      const currentProject = projectRef.current;
+      const currentSelection = selectionRef.current;
+      if (!currentProject || currentSelection?.type !== "node" || !findEvent(currentProject, currentSelection.id)) {
+        return;
+      }
+
+      event.preventDefault();
+      deleteSelection(currentSelection);
+    };
+
+    window.addEventListener("keydown", handleDeleteKey, true);
+    return () => window.removeEventListener("keydown", handleDeleteKey, true);
+  }, [deleteSelection]);
+
   const createKnowledgeObject = useCallback(() => {
     if (!project) {
       return;
@@ -5140,12 +6341,9 @@ export function App() {
 
     const canonRefId = selection?.type === "canon" ? selection.id : undefined;
     const result = mutations.createKnowledgeObject(project, canonRefId);
-    applyProject(result.project, { dirty: true });
     setDataOpen(true);
-    if (result.selection) {
-      setSelection(result.selection as Selection);
-    }
-  }, [applyProject, project, selection]);
+    runMutation(result, "Created knowledge object");
+  }, [project, runMutation, selection]);
 
   const createDataObject = useCallback(
     (classId: string) => {
@@ -5155,35 +6353,19 @@ export function App() {
 
       const canonRefId = selection?.type === "canon" ? selection.id : undefined;
       const result = mutations.createDataObject(project, classId, canonRefId);
-      applyProject(result.project, { dirty: result.project !== project });
       setDataOpen(true);
-      if (result.selection) {
-        setSelection(result.selection as Selection);
-      }
-      setMessage(result.message);
+      runMutation(result, "Created data object");
     },
-    [applyProject, project, selection],
+    [project, runMutation, selection],
   );
 
   const toggleCanon = useCallback(() => {
-    setCanonOpen((open) => {
-      const nextOpen = !open;
-      if (projectRef.current) {
-        markProjectDirty({ ...projectRef.current, panels: { ...projectRef.current.panels, canonOpen: nextOpen } });
-      }
-      return nextOpen;
-    });
-  }, [markProjectDirty]);
+    setCanonOpen((open) => !open);
+  }, []);
 
   const toggleFiles = useCallback(() => {
-    setFilesOpen((open) => {
-      const nextOpen = !open;
-      if (projectRef.current) {
-        markProjectDirty({ ...projectRef.current, panels: { ...projectRef.current.panels, filesOpen: nextOpen } });
-      }
-      return nextOpen;
-    });
-  }, [markProjectDirty]);
+    setFilesOpen((open) => !open);
+  }, []);
 
   useEffect(() => {
     if (!isTauriRuntime()) {
@@ -5199,10 +6381,10 @@ export function App() {
           void openProject();
           break;
         case "pb:file:save":
-          setMessage("Autosave is active; Ctrl/Cmd+S is disabled for now.");
+          void saveActiveEventDraft();
           break;
         case "pb:file:save-as":
-          void saveProjectAs();
+          void saveActiveEventDraft();
           break;
         case "pb:file:export-runtime":
           void exportRuntime("runtime");
@@ -5286,8 +6468,7 @@ export function App() {
     openProject,
     redoProject,
     resetLayout,
-    saveProject,
-    saveProjectAs,
+    saveActiveEventDraft,
     toggleCanon,
     toggleFiles,
     toggleTheme,
@@ -5304,32 +6485,32 @@ export function App() {
 
       const eventPrefix = "file:event:";
       if (id.startsWith(eventPrefix)) {
-        setSelection({ type: "node", id: id.slice(eventPrefix.length) });
+        selectWithEventDraftGuard({ type: "node", id: id.slice(eventPrefix.length) });
         return;
       }
 
       const branchPrefix = "file:branch:";
       if (id.startsWith(branchPrefix)) {
-        setSelection({ type: "node", id: id.slice(branchPrefix.length) });
+        selectWithEventDraftGuard({ type: "node", id: id.slice(branchPrefix.length) });
         return;
       }
 
       const dataPrefix = "file:data-object:";
       if (id.startsWith(dataPrefix)) {
-        setSelection({ type: "dataObject", id: id.slice(dataPrefix.length) });
+        selectWithEventDraftGuard({ type: "dataObject", id: id.slice(dataPrefix.length) });
         setDataOpen(true);
         return;
       }
 
       const suggestionPrefix = "file:canon-suggestion:";
       if (id.startsWith(suggestionPrefix)) {
-        setSelection({ type: "canonSuggestion", id: id.slice(suggestionPrefix.length) });
+        selectWithEventDraftGuard({ type: "canonSuggestion", id: id.slice(suggestionPrefix.length) });
         return;
       }
 
-      setSelection({ type: "file", id });
+      selectWithEventDraftGuard({ type: "file", id });
     },
-    [setActiveSequence],
+    [selectWithEventDraftGuard, setActiveSequence],
   );
 
   const resizeCanon = useCallback((width: number) => {
@@ -5348,6 +6529,7 @@ export function App() {
       findings={findings}
       theme={settings.theme}
       onUpdateEventCategories={updateEventCategories}
+      onCanvasBackgroundChange={changeCanvasBackground}
       onThemeChange={changeTheme}
       onToggleTheme={toggleTheme}
       onOpenUniverse={openProject}
@@ -5360,6 +6542,12 @@ export function App() {
   const appDialogs = (
     <>
       <DiscardChangesDialog open={Boolean(discardDialog)} onDiscard={() => resolveDiscardDialog(true)} onCancel={() => resolveDiscardDialog(false)} />
+      <EventDraftChangesDialog
+        open={Boolean(eventDraftDialog)}
+        onSave={() => void resolveEventDraftDialog("save")}
+        onDiscard={() => void resolveEventDraftDialog("discard")}
+        onCancel={() => void resolveEventDraftDialog("cancel")}
+      />
       <NamePromptDialog
         open={Boolean(nameDialog)}
         title={nameDialog?.title ?? ""}
@@ -5387,25 +6575,16 @@ export function App() {
             fileState={fileState}
             findings={[]}
             exportOpen={exportOpen}
-            dataOpen={dataOpen}
             theme={settings.theme}
             onOpenSettings={() => setShowSettings(true)}
+            onRevealUniverse={revealUniverse}
             onToggleTheme={toggleTheme}
-            onOpenProject={openProject}
-            onSaveProject={saveProject}
-            onSaveProjectAs={saveProjectAs}
             onExportRuntime={exportRuntime}
             onHome={() => setView("home")}
             onUndo={undoProject}
             onRedo={redoProject}
             canUndo={undoStack.length > 0}
             canRedo={redoStack.length > 0}
-            onCreateSequence={requestCreateSequence}
-            onValidate={() => setSelection(undefined)}
-            onToggleExport={() => setExportOpen((open) => !open)}
-            onToggleData={() => setDataOpen((open) => !open)}
-            onCreateDataObject={createKnowledgeObject}
-            onResetLayout={resetLayout}
           />
           {webPreviewBanner}
           <div className="error-state">{error}</div>
@@ -5424,25 +6603,16 @@ export function App() {
             fileState={fileState}
             findings={[]}
             exportOpen={exportOpen}
-            dataOpen={dataOpen}
             theme={settings.theme}
             onOpenSettings={() => setShowSettings(true)}
+            onRevealUniverse={revealUniverse}
             onToggleTheme={toggleTheme}
-            onOpenProject={openProject}
-            onSaveProject={saveProject}
-            onSaveProjectAs={saveProjectAs}
             onExportRuntime={exportRuntime}
             onHome={() => setView("home")}
             onUndo={undoProject}
             onRedo={redoProject}
             canUndo={undoStack.length > 0}
             canRedo={redoStack.length > 0}
-            onCreateSequence={requestCreateSequence}
-            onValidate={() => setSelection(undefined)}
-            onToggleExport={() => setExportOpen((open) => !open)}
-            onToggleData={() => setDataOpen((open) => !open)}
-            onCreateDataObject={createKnowledgeObject}
-            onResetLayout={resetLayout}
           />
           {webPreviewBanner}
           <div className="loading-state">
@@ -5472,8 +6642,6 @@ export function App() {
           onOpenProject={openProject}
           onOpenRecentProject={openRecentProject}
           onRemoveRecentProject={removeRecentProject}
-          onSaveProject={saveProject}
-          onSaveProjectAs={saveProjectAs}
           onExportRuntime={exportRuntime}
         />
         {webPreviewBanner}
@@ -5491,25 +6659,16 @@ export function App() {
         fileState={fileState}
         findings={findings}
         exportOpen={exportOpen}
-        dataOpen={dataOpen}
         theme={settings.theme}
         onOpenSettings={() => setShowSettings(true)}
+        onRevealUniverse={revealUniverse}
         onToggleTheme={toggleTheme}
-        onOpenProject={openProject}
-        onSaveProject={saveProject}
-        onSaveProjectAs={saveProjectAs}
         onExportRuntime={exportRuntime}
         onHome={() => setView("home")}
         onUndo={undoProject}
         onRedo={redoProject}
         canUndo={undoStack.length > 0}
         canRedo={redoStack.length > 0}
-        onCreateSequence={requestCreateSequence}
-        onValidate={() => setSelection(undefined)}
-        onToggleExport={() => setExportOpen((open) => !open)}
-        onToggleData={() => setDataOpen((open) => !open)}
-        onCreateDataObject={createKnowledgeObject}
-        onResetLayout={resetLayout}
       />
         {webPreviewBanner}
 
@@ -5527,7 +6686,7 @@ export function App() {
           onResize={resizeCanon}
           onResetWidth={() => setCanonWidth(DEFAULT_PANEL_WIDTH)}
           onResizeStateChange={setPanelResizing}
-          onSelect={(id) => setSelection({ type: "canon", id })}
+          onSelect={(id) => selectWithEventDraftGuard({ type: "canon", id })}
         />
         <FilesPanel
           project={project}
@@ -5549,7 +6708,15 @@ export function App() {
           onCreateSequence={requestCreateSequence}
           onRenameSequence={requestRenameSequence}
           onDeleteSequence={requestDeleteSequence}
+          onUpdateSequence={updateSequence}
+          onCreateBranch={() => createBranch()}
+          onUpdateBranch={updateBranch}
+          onDeleteBranch={(id) => deleteSelection({ type: "node", id })}
+          onCreateEventInBranch={createEventInBranch}
+          onAssignEventToBranch={assignEventBranch}
           onSelect={handleFileSelect}
+          activeOutlineTab={storyOutlineTab}
+          onOutlineTabChange={setStoryOutlineTab}
         />
         <StoryCanvas
           project={project}
@@ -5564,21 +6731,27 @@ export function App() {
           exportOpen={exportOpen}
           exportPreviewMode={exportPreviewMode}
           dataOpen={dataOpen}
+          canvasLayout={settings.canvasLayout}
           markdownTabs={markdownTabs}
           activeMarkdownTabId={activeMarkdownTabId}
+          eventDraft={eventDraft}
+          eventInspectorOpen={eventInspectorOpen}
+          eventInspectorOpenEventIds={eventInspectorOpenEventIds}
+          eventInspectorExpandedEventId={eventInspectorExpandedEventId}
+          canvasBackground={settings.canvasBackground}
           onNodesChange={handleNodesChange}
           onEdgesChange={handleEdgesChange}
           onConnect={handleConnect}
           onNodeDragStop={handleNodeDragStop}
-          onSelect={setSelection}
+          onSelect={selectWithEventDraftGuard}
           onEnterFocus={enterFocus}
           onExitFocus={exitFocus}
           onExportPreviewModeChange={setExportPreviewMode}
           onToggleData={() => setDataOpen((open) => !open)}
-          onCreateBranch={createBranch}
+          onApplyCanvasLayout={applyCanvasLayout}
           onCreateEvent={createEvent}
+          onCreateConnectedEvent={createConnectedEvent}
           onUpdateSequence={updateSequence}
-          onSetEntrySequence={setEntrySequence}
           onUpdateBranch={updateBranch}
           onCreateEventInBranch={createEventInBranch}
           onUpdateEvent={updateEvent}
@@ -5605,6 +6778,12 @@ export function App() {
           onChangeMarkdownContent={changeMarkdownContent}
           onChangeMarkdownFormat={changeMarkdownFormat}
           onSaveMarkdownTab={saveMarkdownTab}
+          onEventInspectorOpenChange={setEventInspectorOpen}
+          onEventInspectorOpenEventIdsChange={setEventInspectorOpenEventIds}
+          onEventInspectorExpandedEventIdChange={setEventInspectorExpandedEventId}
+          onEventDraftModeChange={(mode) => setEventDraft((draft) => setEventDraftMode(draft, mode))}
+          onUpdateEventDraft={(updates) => setEventDraft((draft) => updateEventDraft(draft, updates))}
+          onSaveEventDraft={() => void saveActiveEventDraft()}
         />
         </div>
       </div>

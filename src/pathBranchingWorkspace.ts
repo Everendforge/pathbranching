@@ -51,6 +51,7 @@ export type PathBranchingWorkspace = {
   activeProject: BranchingProject;
   storyModifiedMs?: number;
   createdDefaultStory: boolean;
+  loadWarnings?: string[];
 };
 
 function slugify(value: string): string {
@@ -115,29 +116,41 @@ export function authoringCanvasPath(storyId: string): string {
   return `${storyDirectory(storyId)}/authoring/canvas.json`;
 }
 
-function parseManifest(files: UniverseFile[]): PathBranchingManifest | undefined {
+function parseManifest(files: UniverseFile[], loadWarnings: string[]): PathBranchingManifest | undefined {
   const manifestFile = files.find((file) => file.relativePath === pathBranchingMetadataPaths.manifest);
   if (!manifestFile) return undefined;
 
-  const parsed = JSON.parse(manifestFile.content) as { version?: unknown; activeStoryId?: unknown; stories?: unknown };
+  let parsed: { version?: unknown; activeStoryId?: unknown; stories?: unknown };
+  try {
+    parsed = JSON.parse(manifestFile.content) as { version?: unknown; activeStoryId?: unknown; stories?: unknown };
+  } catch (error) {
+    loadWarnings.push(
+      `Could not parse ${pathBranchingMetadataPaths.manifest}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return undefined;
+  }
   const stories = Array.isArray(parsed.stories) ? parsed.stories : [];
+  const normalizedStories = stories
+    .filter((story): story is PathBranchingStoryManifestEntry => {
+      return (
+        typeof story === "object" &&
+        story !== null &&
+        "id" in story &&
+        "name" in story &&
+        "path" in story &&
+        typeof story.id === "string" &&
+        typeof story.name === "string" &&
+        typeof story.path === "string"
+      );
+    })
+    .map((story) => ({ ...story }));
+  if (stories.length && normalizedStories.length !== stories.length) {
+    loadWarnings.push(`Ignored ${stories.length - normalizedStories.length} invalid PathBranching manifest story entries.`);
+  }
   return {
     version: parsed.version === "0.2" ? "0.2" : "0.1",
     activeStoryId: typeof parsed.activeStoryId === "string" ? parsed.activeStoryId : undefined,
-    stories: stories
-      .filter((story): story is PathBranchingStoryManifestEntry => {
-        return (
-          typeof story === "object" &&
-          story !== null &&
-          "id" in story &&
-          "name" in story &&
-          "path" in story &&
-          typeof story.id === "string" &&
-          typeof story.name === "string" &&
-          typeof story.path === "string"
-        );
-      })
-      .map((story) => ({ ...story })),
+    stories: normalizedStories,
   };
 }
 
@@ -165,11 +178,11 @@ function parseUniverseProfile(files: UniverseFile[]): UniverseProfile | undefine
   }
 }
 
-function createDefaultProject(files: UniverseFile[], canonIndex: WorldNotionBridgeIndex, storyId: string): BranchingProject {
+function createDefaultProject(files: UniverseFile[], canonIndex: WorldNotionBridgeIndex, storyId: string, name = "Branching Story"): BranchingProject {
   return normalizeProject(
     createEmptyBranchingProjectFromWorldNotionIndex(canonIndex, {
       projectId: `pathbranching:${storyId}`,
-      name: "Branching Story",
+      name,
       vaultRelativePath: ".",
     }),
   );
@@ -338,9 +351,11 @@ function mergeCanonRefs(canonIndex: WorldNotionBridgeIndex, storyProject: Branch
 export function loadPathBranchingWorkspace(files: UniverseFile[]): PathBranchingWorkspace {
   const canonIndex = indexWorldNotionVaultFiles(files);
   const universeProfile = parseUniverseProfile(files);
-  const parsedManifest = parseManifest(files);
+  const loadWarnings: string[] = [];
+  const parsedManifest = parseManifest(files, loadWarnings);
   const fallbackStoryId = defaultStoryId(files);
   const now = new Date().toISOString();
+  const hasPersistedManifest = Boolean(parsedManifest?.stories.length);
   const manifest =
     parsedManifest && parsedManifest.stories.length
       ? parsedManifest
@@ -363,7 +378,10 @@ export function loadPathBranchingWorkspace(files: UniverseFile[]): PathBranching
     manifest.stories[0];
   const loadedStory =
     activeStory ? parseModularStoryProject(files, activeStory, activeStory.id) ?? parseLegacyStoryProject(files, activeStory, activeStory.id) : undefined;
-  const activeProject = loadedStory?.project ?? createDefaultProject(files, canonIndex, activeStory?.id ?? fallbackStoryId);
+  if (hasPersistedManifest && activeStory && !loadedStory) {
+    loadWarnings.push(`Could not load PathBranching story "${activeStory.name}" from ${activeStory.path}.`);
+  }
+  const activeProject = loadedStory?.project ?? createDefaultProject(files, canonIndex, activeStory?.id ?? fallbackStoryId, activeStory?.name);
 
   return {
     manifest: {
@@ -379,7 +397,8 @@ export function loadPathBranchingWorkspace(files: UniverseFile[]): PathBranching
       canonRefs: mergeCanonRefs(canonIndex, activeProject),
     }),
     storyModifiedMs: loadedStory?.modifiedMs,
-    createdDefaultStory: !parsedManifest || !loadedStory,
+    createdDefaultStory: !hasPersistedManifest,
+    loadWarnings: loadWarnings.length ? loadWarnings : undefined,
   };
 }
 

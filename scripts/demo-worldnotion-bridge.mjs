@@ -46,6 +46,7 @@ console.log(JSON.stringify({
   entityCount: index.entities.length,
   canonRefCount: index.canonRefs.length,
   typeCounts: index.typeCounts,
+  propertiesConfigLoaded: Boolean(index.propertiesConfig),
   findings: index.findings,
   projectPreview: {
     projectId: project.projectId,

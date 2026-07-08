@@ -1,4 +1,5 @@
 import type { BranchingProject, DataClassDefinition, EventCategoryDefinition } from "./domain.js";
+import { normalizeBranchMembership } from "./storyOutlineModel.js";
 
 export function projectFileName(path: string | undefined) {
   if (!path) {
@@ -114,7 +115,7 @@ export function normalizeProject(project: BranchingProject): BranchingProject {
   const entrySequenceId = project.entrySequenceId ?? project.sequences[0]?.id;
   const activeSequenceId = project.canvas?.activeSequenceId ?? entrySequenceId ?? project.sequences[0]?.id;
 
-  return {
+  return normalizeBranchMembership({
     ...project,
     specVersion: project.specVersion ?? "0.1",
     dataClasses: normalizeDataClasses(project),
@@ -139,7 +140,7 @@ export function normalizeProject(project: BranchingProject): BranchingProject {
     scripts: project.scripts ?? [],
     externalFunctions: project.externalFunctions ?? [],
     variables: project.variables ?? {},
-  };
+  });
 }
 
 export function serializeProject(project: BranchingProject) {

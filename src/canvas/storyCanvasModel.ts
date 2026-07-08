@@ -80,6 +80,34 @@ const BRANCH_WIDTH = 390;
 const BRANCH_PADDING_TOP = 82;
 const BRANCH_PADDING_X = 22;
 const BRANCH_EVENT_GAP = 144;
+const BRANCH_COLORS = ["#4f8cff", "#2da66f", "#c7832f", "#b062d6", "#d45d78", "#19a7a1", "#8d93ff", "#7ca83a"];
+const EVENT_TYPE_COLORS: Record<string, string> = {
+  normal: "#4f8cff",
+  exploration: "#2da66f",
+  final: "#d45d78",
+};
+
+function hashString(value: string) {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash << 5) - hash + value.charCodeAt(index);
+    hash |= 0;
+  }
+  return Math.abs(hash);
+}
+
+function paletteColor(id: string, palette: string[]) {
+  return palette[hashString(id) % palette.length] ?? palette[0];
+}
+
+function eventTypeColor(project: BranchingProject, eventNode: EventNode) {
+  const category = project.eventCategories?.find((item) => item.id === eventNode.type);
+  return category?.color ?? EVENT_TYPE_COLORS[eventNode.type] ?? paletteColor(eventNode.type, BRANCH_COLORS);
+}
+
+function branchColor(branchId: string | undefined | null) {
+  return branchId ? paletteColor(branchId, BRANCH_COLORS) : undefined;
+}
 
 function positionFor(project: BranchingProject, id: string, x: number, y: number) {
   return project.canvas?.nodes?.[id]?.position ?? { x, y };
@@ -116,6 +144,9 @@ function pushNode(
       storyObjectId: id,
       badges,
       details,
+      accentColor: typeof details.accentColor === "string" ? details.accentColor : undefined,
+      branchColor: typeof details.branchColor === "string" ? details.branchColor : undefined,
+      minimapColor: typeof details.minimapColor === "string" ? details.minimapColor : undefined,
       collapsed: persisted?.collapsed,
       isContainer: options.isContainer,
     },
@@ -200,11 +231,11 @@ function branchesForSequence(project: BranchingProject, sequenceId: string | und
 function eventBadges(project: BranchingProject, eventNode: EventNode) {
   const category = project.eventCategories?.find((item) => item.id === eventNode.type);
   const terminal = eventNode.type === "final" || Boolean(category?.terminal);
+  const canonRefCount = eventNode.canonRefs?.length ?? 0;
   return [
-    category?.label ?? eventNode.type,
     ...(terminal ? ["terminal"] : []),
-    `${eventNode.canonRefs?.length ?? 0} refs`,
-    eventNode.script ? "ink" : "no script",
+    ...(canonRefCount > 0 ? [`${canonRefCount} refs`] : []),
+    ...(eventNode.script ? ["ink"] : []),
     ...(eventNode.decisions?.length ? [`${eventNode.decisions.length} decisions`] : []),
     ...(eventNode.unlocks?.length ? ["unlocks"] : []),
     ...logicBadges(eventNode.availability, eventNode.ruleSets?.length ?? 0),
@@ -390,10 +421,8 @@ export function buildStoryCanvasModel(project: BranchingProject): StoryCanvasMod
   const activeSequenceId = sequence?.id;
   const activeEventIds = new Set(sequence?.eventIds ?? []);
   const activeBranches = branchesForSequence(project, activeSequenceId);
-  const activeBranchIds = new Set(activeBranches.map((branch) => branch.id));
   const activeEvents = project.events.filter((eventNode) => activeEventIds.has(eventNode.id));
   const eventIndexInSequence = new Map((sequence?.eventIds ?? []).map((eventId, index) => [eventId, index]));
-  const looseEvents = activeEvents.filter((eventNode) => !eventNode.branchRef || !activeBranchIds.has(eventNode.branchRef));
   const cursor: LayoutCursor = {
     sequenceY: 80,
     branchY: 80,
@@ -408,31 +437,13 @@ export function buildStoryCanvasModel(project: BranchingProject): StoryCanvasMod
     pushNode(
       project,
       nodes,
-      sequence.id,
-      "sequence",
-      sequence.name,
-      sequence.characterRef ? `character ${sequence.characterRef}` : "sequence",
-      80,
-      cursor.sequenceY,
-      [
-        "sequence",
-        `${sequence.eventIds.length} events`,
-        ...logicBadges(sequence.availability, sequence.ruleSets?.length ?? 0),
-        ...dataUseBadges(project, sequence.availability),
-      ],
-      { sequence },
-    );
-
-    pushNode(
-      project,
-      nodes,
       startNodeId,
       "start",
-      "Start",
-      sequence.name,
-      340,
+      sequence.name || "Start",
+      undefined,
+      80,
       cursor.sequenceY,
-      ["entry", sequence.entryEventId],
+      [],
       { sequenceId: sequence.id },
     );
 
@@ -442,39 +453,11 @@ export function buildStoryCanvasModel(project: BranchingProject): StoryCanvasMod
     cursor.sequenceY += 190;
   }
 
-  activeBranches.forEach((branch, branchIndex) => {
-    const height = branchHeight(branch);
-    pushNode(
-      project,
-      nodes,
-      branch.id,
-      "branch",
-      branch.title,
-      branch.description ?? "branch",
-      620,
-      cursor.branchY + branchIndex * 330,
-      ["branch", ...logicBadges(branch.availability, branch.ruleSets?.length ?? 0), ...dataUseBadges(project, branch.availability)],
-      {
-        branch,
-      },
-      { width: BRANCH_WIDTH, height, isContainer: true },
-    );
-    branch.eventIds.forEach((eventId) => {
-      if (activeEventIds.has(eventId)) {
-        edges.push(edge(`edge:contains:${branch.id}:${eventId}`, branch.id, eventId, "contains", "event"));
-      }
-    });
-  });
-
   activeEvents.forEach((eventNode) => {
     const sequenceIndex = eventIndexInSequence.get(eventNode.id) ?? 0;
     const branch = eventNode.branchRef ? activeBranches.find((item) => item.id === eventNode.branchRef) : undefined;
-    const branchEventIndex = branch?.eventIds.findIndex((eventId) => eventId === eventNode.id) ?? -1;
-    const looseIndex = looseEvents.findIndex((item) => item.id === eventNode.id);
-    const eventX = branch ? BRANCH_PADDING_X : activeBranches.length > 0 ? 1080 : 620;
-    const eventY = branch
-      ? BRANCH_PADDING_TOP + Math.max(0, branchEventIndex) * BRANCH_EVENT_GAP
-      : cursor.eventY + Math.max(0, looseIndex >= 0 ? looseIndex : sequenceIndex) * 220;
+    const eventX = 360;
+    const eventY = cursor.eventY + sequenceIndex * 220;
     pushNode(
       project,
       nodes,
@@ -487,10 +470,13 @@ export function buildStoryCanvasModel(project: BranchingProject): StoryCanvasMod
       eventBadges(project, eventNode),
       {
         event: eventNode,
+        branch,
         category: project.eventCategories?.find((category) => category.id === eventNode.type),
         terminal: eventNode.type === "final" || Boolean(project.eventCategories?.some((category) => category.id === eventNode.type && category.terminal)),
+        accentColor: eventTypeColor(project, eventNode),
+        branchColor: branchColor(eventNode.branchRef),
+        minimapColor: branchColor(eventNode.branchRef) ?? eventTypeColor(project, eventNode),
       },
-      branch ? { parentId: branch.id } : undefined,
     );
 
     eventNode.transitions?.forEach((transition) => {
@@ -506,7 +492,7 @@ export function buildStoryCanvasModel(project: BranchingProject): StoryCanvasMod
       );
     });
 
-    const supportBaseY = branch ? cursor.eventY + sequenceIndex * 220 : eventY;
+    const supportBaseY = eventY;
     cursor.decisionY = supportBaseY;
     cursor.outcomeY = supportBaseY;
     cursor.supportY = supportBaseY + 160;

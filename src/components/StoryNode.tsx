@@ -1,20 +1,34 @@
 import { Handle, Position, type NodeProps, type NodeTypes } from "@xyflow/react";
+import type { CSSProperties } from "react";
 import type { StoryCanvasNode, StoryCanvasNodeData } from "../canvas/storyCanvasModel.js";
 
 function badgeText(value: string) {
   return value.length > 22 ? `${value.slice(0, 19)}...` : value;
 }
 
+function objectString(value: unknown, key: string) {
+  if (!value || typeof value !== "object") return undefined;
+  const nested = (value as Record<string, unknown>)[key];
+  return typeof nested === "string" ? nested : undefined;
+}
+
 function StoryNode({ data, selected }: NodeProps<StoryCanvasNode>) {
   const nodeData = data as StoryCanvasNodeData;
+  const isEvent = nodeData.kind === "event";
   const isFinalEvent = nodeData.kind === "event" && nodeData.badges.includes("terminal");
   const focusClass = typeof nodeData.focusState === "string" ? ` focus-${nodeData.focusState}` : "";
   const canReceive = nodeData.kind !== "start" && nodeData.kind !== "sequence";
   const canSource = nodeData.kind === "start" || (nodeData.kind !== "sequence" && !isFinalEvent);
+  const eventTypeLabel = objectString(nodeData.details?.category, "label") ?? nodeData.subtitle ?? "Event";
+  const branchLabel = objectString(nodeData.details?.branch, "title");
+  const colorStyle = {
+    "--node-accent": typeof nodeData.accentColor === "string" ? nodeData.accentColor : undefined,
+    "--node-branch": typeof nodeData.branchColor === "string" ? nodeData.branchColor : undefined,
+  } as CSSProperties;
 
   if (nodeData.isContainer) {
     return (
-      <div className={`story-node branch-container${focusClass} ${selected ? "selected" : ""}`}>
+      <div className={`story-node branch-container${focusClass} ${selected ? "selected" : ""}`} style={colorStyle}>
         {canReceive ? <Handle type="target" position={Position.Left} /> : null}
         <div className="node-kind">{nodeData.kind}</div>
         <div className="node-title">{nodeData.title}</div>
@@ -31,12 +45,32 @@ function StoryNode({ data, selected }: NodeProps<StoryCanvasNode>) {
     );
   }
 
+  if (nodeData.kind === "start") {
+    return (
+      <div className={`story-node start${focusClass}${selected ? " selected" : ""}`} style={colorStyle}>
+        <span className="node-start-icon" aria-hidden="true" />
+        <div className="node-start-title">{nodeData.title}</div>
+        {canSource ? <Handle type="source" position={Position.Right} /> : null}
+      </div>
+    );
+  }
+
   return (
-    <div className={`story-node ${nodeData.kind}${focusClass}${isFinalEvent ? " terminal" : ""}${selected ? " selected" : ""}`}>
+    <div
+      className={`story-node ${nodeData.kind}${focusClass}${isFinalEvent ? " terminal" : ""}${selected ? " selected" : ""}`}
+      style={colorStyle}
+    >
       {canReceive ? <Handle type="target" position={Position.Left} /> : null}
-      <div className="node-kind">{nodeData.kind}</div>
+      {isEvent ? (
+        <div className="node-color-tags" aria-label="Event tags">
+          <span className="node-color-tag type">{badgeText(eventTypeLabel)}</span>
+          {branchLabel ? <span className="node-color-tag branch">{badgeText(branchLabel)}</span> : null}
+        </div>
+      ) : (
+        <div className="node-kind">{nodeData.kind}</div>
+      )}
       <div className="node-title">{nodeData.title}</div>
-      {nodeData.subtitle ? <div className="node-subtitle">{nodeData.subtitle}</div> : null}
+      {!isEvent && nodeData.subtitle ? <div className="node-subtitle">{nodeData.subtitle}</div> : null}
       {nodeData.badges.length > 0 ? (
         <div className="node-badges">
           {nodeData.badges.slice(0, 4).map((badge) => (

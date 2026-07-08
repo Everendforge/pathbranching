@@ -2,6 +2,7 @@ use serde::Serialize;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::UNIX_EPOCH;
 use tauri::menu::{
     Menu, MenuItem, PredefinedMenuItem, Submenu, HELP_SUBMENU_ID, WINDOW_SUBMENU_ID,
@@ -67,13 +68,7 @@ fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         true,
         &[
             &menu_item(app, "pb:file:open", "Open Universe...", Some("CmdOrCtrl+O"))?,
-            &menu_item(app, "pb:file:save", "Save", None)?,
-            &menu_item(
-                app,
-                "pb:file:save-as",
-                "Save Into Universe...",
-                None,
-            )?,
+            &menu_item(app, "pb:file:save", "Save Event Edits", Some("CmdOrCtrl+S"))?,
             &PredefinedMenuItem::separator(app)?,
             &menu_item(
                 app,
@@ -226,6 +221,42 @@ fn write_text_file(path: &Path, content: &str) -> WriteResult {
     }
 }
 
+fn open_in_system(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Err(format!("Path does not exist: {}", path.display()));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("explorer")
+            .arg(path)
+            .spawn()
+            .map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(path)
+            .spawn()
+            .map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        Command::new("xdg-open")
+            .arg(path)
+            .spawn()
+            .map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    #[allow(unreachable_code)]
+    Err("Opening folders is not supported on this platform.".to_string())
+}
+
 fn relative_path(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
         .unwrap_or(path)
@@ -259,6 +290,30 @@ fn should_read_universe_file(path: &Path) -> bool {
     )
 }
 
+fn should_walk_universe_dir(root: &Path, path: &Path) -> bool {
+    let relative = relative_path(root, path);
+    if relative == "." {
+        return true;
+    }
+    if relative == ".everend" {
+        return true;
+    }
+    if relative.starts_with(".everend/.pathbranching") {
+        return true;
+    }
+    if relative.starts_with(".everend/templates") {
+        return true;
+    }
+    if relative.starts_with(".everend/settings") {
+        return true;
+    }
+
+    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    !name.starts_with('.')
+}
+
 fn walk_universe(
     root: &Path,
     current: &Path,
@@ -290,7 +345,7 @@ fn walk_universe(
         };
         let path = entry.path();
         if path.is_dir() {
-            if entry.file_name().to_string_lossy().starts_with('.') && entry.file_name() != ".everend" {
+            if !should_walk_universe_dir(root, &path) {
                 continue;
             }
             directories.push(relative_path(root, &path));
@@ -437,6 +492,21 @@ fn read_project_file(path: String) -> Result<ProjectFilePayload, String> {
 }
 
 #[tauri::command]
+fn reveal_universe(path: String) -> Result<WriteResult, String> {
+    let path_ref = Path::new(&path);
+    if !path_ref.is_dir() {
+        return Err(format!("Universe path is not a directory: {}", path_ref.display()));
+    }
+    open_in_system(path_ref)?;
+    Ok(WriteResult {
+        ok: true,
+        path,
+        modified_ms: None,
+        message: None,
+    })
+}
+
+#[tauri::command]
 async fn save_project_as_dialog(
     app: tauri::AppHandle,
     content: String,
@@ -497,8 +567,133 @@ pub fn run() {
             read_project_file,
             save_project_file,
             save_project_as_dialog,
+            reveal_universe,
             export_runtime_dialog,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Everend PathBranching");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH as STD_UNIX_EPOCH};
+
+    fn temp_universe() -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(STD_UNIX_EPOCH)
+            .expect("system clock should be after Unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "pathbranching-read-universe-test-{}-{}",
+            std::process::id(),
+            suffix
+        ));
+        fs::create_dir_all(&path).expect("temp universe should be created");
+        path
+    }
+
+    fn write_fixture(root: &Path, relative: &str, content: &str) {
+        let path = root.join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("fixture parent should be created");
+        }
+        fs::write(path, content).expect("fixture file should be written");
+    }
+
+    fn read_paths(root: &Path) -> Vec<String> {
+        read_universe(root.to_path_buf())
+            .expect("universe should be readable")
+            .files
+            .into_iter()
+            .map(|file| file.relative_path)
+            .collect()
+    }
+
+    #[test]
+    fn read_universe_includes_pathbranching_metadata() {
+        let root = temp_universe();
+        write_fixture(&root, ".everend/universe.json", r#"{"name":"Test Universe"}"#);
+        write_fixture(
+            &root,
+            ".everend/.pathbranching/manifest.json",
+            r#"{"version":"0.2","activeStoryId":"story-a","stories":[{"id":"story-a","name":"Story A","path":".everend/.pathbranching/stories/story-a/story.json"}]}"#,
+        );
+        write_fixture(
+            &root,
+            ".everend/.pathbranching/stories/story-a/story.json",
+            r#"{"storageVersion":"0.2","storyId":"story-a","sequenceIds":["sequence-a"]}"#,
+        );
+        write_fixture(
+            &root,
+            ".everend/.pathbranching/stories/story-a/sequences/sequence-a/sequence.json",
+            r#"{"storageVersion":"0.2","sequence":{"id":"sequence-a","name":"Sequence A","entryEventId":"event-a","eventIds":["event-a"],"branchIds":["branch-a"]}}"#,
+        );
+        write_fixture(
+            &root,
+            ".everend/.pathbranching/stories/story-a/sequences/sequence-a/events/event-a.json",
+            r#"{"storageVersion":"0.2","event":{"id":"event-a","name":"Event A","type":"normal","text":{"format":"plain","content":"Hello"},"canonRefs":[],"transitions":[]}}"#,
+        );
+        write_fixture(
+            &root,
+            ".everend/.pathbranching/stories/story-a/sequences/sequence-a/branches/branch-a.json",
+            r#"{"storageVersion":"0.2","branch":{"id":"branch-a","title":"Branch A","eventIds":["event-a"]}}"#,
+        );
+        write_fixture(
+            &root,
+            ".everend/.pathbranching/stories/story-a/authoring/canvas.json",
+            r#"{"storageVersion":"0.2","storyId":"story-a","canvas":{"activeSequenceId":"sequence-a"}}"#,
+        );
+        write_fixture(
+            &root,
+            ".everend/.pathbranching/working-copies/lore-origin.md",
+            "# Working copy\n",
+        );
+
+        let paths = read_paths(&root);
+        fs::remove_dir_all(&root).ok();
+
+        assert!(paths.contains(&".everend/universe.json".to_string()));
+        assert!(paths.contains(&".everend/.pathbranching/manifest.json".to_string()));
+        assert!(paths.contains(&".everend/.pathbranching/stories/story-a/story.json".to_string()));
+        assert!(paths.contains(
+            &".everend/.pathbranching/stories/story-a/sequences/sequence-a/sequence.json"
+                .to_string()
+        ));
+        assert!(paths.contains(
+            &".everend/.pathbranching/stories/story-a/sequences/sequence-a/events/event-a.json"
+                .to_string()
+        ));
+        assert!(paths.contains(
+            &".everend/.pathbranching/stories/story-a/sequences/sequence-a/branches/branch-a.json"
+                .to_string()
+        ));
+        assert!(paths.contains(
+            &".everend/.pathbranching/stories/story-a/authoring/canvas.json".to_string()
+        ));
+        assert!(paths.contains(
+            &".everend/.pathbranching/working-copies/lore-origin.md".to_string()
+        ));
+    }
+
+    #[test]
+    fn read_universe_ignores_unapproved_hidden_directories() {
+        let root = temp_universe();
+        write_fixture(&root, "Lore/Origin.md", "# Origin\n");
+        write_fixture(&root, ".git/config.json", r#"{"private":true}"#);
+        write_fixture(&root, ".cache/cache.json", r#"{"private":true}"#);
+        write_fixture(&root, ".hidden/data.json", r#"{"private":true}"#);
+        write_fixture(&root, ".everend/.secret/data.json", r#"{"private":true}"#);
+        write_fixture(&root, ".everend/.pathbranching/manifest.json", r#"{"stories":[]}"#);
+
+        let paths = read_paths(&root);
+        fs::remove_dir_all(&root).ok();
+
+        assert!(paths.contains(&"Lore/Origin.md".to_string()));
+        assert!(paths.contains(&".everend/.pathbranching/manifest.json".to_string()));
+        assert!(!paths.iter().any(|path| path.starts_with(".git/")));
+        assert!(!paths.iter().any(|path| path.starts_with(".cache/")));
+        assert!(!paths.iter().any(|path| path.starts_with(".hidden/")));
+        assert!(!paths.iter().any(|path| path.starts_with(".everend/.secret/")));
+    }
 }

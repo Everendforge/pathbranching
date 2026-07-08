@@ -5,6 +5,11 @@ export type CanonRef = {
   preview?: string;
   tags?: string[];
   status?: string;
+  aliases?: string[];
+  parentId?: string;
+  childrenIds?: string[];
+  properties?: Record<string, unknown>;
+  frontmatter?: Record<string, unknown>;
   favorite?: boolean;
   folderDescription?: boolean;
   missingIdentity?: boolean;
@@ -466,6 +471,8 @@ export type ValidationFinding = {
     | "missing_data_class"
     | "missing_data_object"
     | "missing_required_field"
+    | "invalid_frontmatter"
+    | "invalid_worldnotion_properties"
     | "invalid_condition"
     | "invalid_rule_set";
   severity: ValidationSeverity;
