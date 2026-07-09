@@ -13,6 +13,7 @@ export type InspectorTab = {
   id: string;
   selection: Selection;
   title: string;
+  mode?: "normal" | "debug";
 };
 
 export type CanvasMode = "branching" | "focus";

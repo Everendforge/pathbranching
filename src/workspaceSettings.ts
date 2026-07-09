@@ -150,6 +150,7 @@ export type AppSettings = {
   workspaceSessions?: Record<string, PathBranchingWorkspaceSession>;
   inspectorTabCloseSelectsNext: boolean;
   collapseInspectorTabOnCanvasClick: boolean;
+  inspectorDebugEnabled: boolean;
 };
 
 export function normalizeCanvasBackgroundSettings(
@@ -310,6 +311,10 @@ export function loadSettings(): AppSettings {
         typeof parsed.collapseInspectorTabOnCanvasClick === "boolean"
           ? parsed.collapseInspectorTabOnCanvasClick
           : true,
+      inspectorDebugEnabled:
+        typeof parsed.inspectorDebugEnabled === "boolean"
+          ? parsed.inspectorDebugEnabled
+          : false,
     };
   } catch {
     return {
@@ -323,6 +328,7 @@ export function loadSettings(): AppSettings {
       workspaceSessions: {},
       inspectorTabCloseSelectsNext: false,
       collapseInspectorTabOnCanvasClick: true,
+      inspectorDebugEnabled: false,
     };
   }
 }
@@ -459,7 +465,14 @@ function sessionInspectorTabs(value: unknown): InspectorTab[] {
       return [];
     }
     seen.add(tab.id);
-    return [{ id: tab.id, title: tab.title, selection: tab.selection }];
+    return [
+      {
+        id: tab.id,
+        title: tab.title,
+        selection: tab.selection,
+        mode: tab.mode === "debug" ? "debug" : "normal",
+      },
+    ];
   });
 }
 

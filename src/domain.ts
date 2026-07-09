@@ -286,6 +286,7 @@ export type EventNode = {
   id: string;
   legacyId?: string;
   name: string;
+  description?: string;
   type: EventType;
   parentEventId?: string;
   childEventIds?: string[];

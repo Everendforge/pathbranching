@@ -1,5 +1,5 @@
 import { FileImage, FileText, Film, FolderUp, Music, Search } from "lucide-react";
-import { useDeferredValue, useMemo, useState } from "react";
+import { useDeferredValue, useMemo, useState, type MouseEvent as ReactMouseEvent } from "react";
 import type { AssetKind, BranchingProject, ProjectAsset } from "../domain.js";
 import { WorkspaceSidePanel } from "./WorkspaceSidePanel.js";
 
@@ -29,7 +29,7 @@ export function AssetsPanel({
   project: BranchingProject;
   collapsed: boolean;
   onCollapsedChange: (collapsed: boolean) => void;
-  onContextMenu: (event: React.MouseEvent<HTMLElement>) => void;
+  onContextMenu: (event: ReactMouseEvent<HTMLElement>) => void;
   onImport: () => void;
 }) {
   const [query, setQuery] = useState("");

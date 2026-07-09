@@ -23,6 +23,11 @@ import { changeSetPath, createCanonChangeSet } from "./canonChanges.js";
 import { CanonWorkingCopyEditor } from "./components/CanonWorkingCopyEditor.js";
 import { DataDrawer } from "./components/DataDrawer.js";
 import { ExplorerPanel } from "./components/ExplorerPanel.js";
+import { ReferencePicker } from "./components/ReferencePicker.js";
+import { AssetsPanel } from "./components/AssetsPanel.js";
+import { LogicPanel } from "./components/LogicPanel.js";
+import { ExportPanel } from "./components/ExportPanel.js";
+import { ConnectPanel } from "./components/ConnectPanel.js";
 import { MarkdownEditorDock } from "./components/MarkdownEditorDock.js";
 import { nodeTypes } from "./components/StoryNode.js";
 import { Topbar } from "./components/Topbar.js";
@@ -73,6 +78,7 @@ import {
   Split,
   Sun,
   Pencil,
+  Power,
   Trash2,
   X,
 } from "lucide-react";
@@ -173,6 +179,8 @@ import {
   projectFileName,
   revealUniverseFolder,
   exportTextDialog,
+  importUniverseAssets,
+  indexCanonAssets,
   saveWorkingCopy,
   saveUniverseTextFile,
   verifyDesktopBridge,
@@ -213,6 +221,9 @@ import {
 } from "./storyOutlineModel.js";
 import {
   COLLAPSED_RAIL_WIDTH,
+  DEFAULT_WORKSPACE_PANEL_COLLAPSED,
+  DEFAULT_WORKSPACE_PANEL_VISIBILITY,
+  WORKSPACE_PANEL_IDS,
   DEFAULT_EXPLORER_WIDTH,
   DEFAULT_PANEL_WIDTH,
   NEW_SEQUENCE_SELECT_VALUE,
@@ -233,6 +244,8 @@ import {
   type NodeColorSettings,
   type PathBranchingWorkspaceSession,
   type WorldNotionBridgeSettings,
+  type WorkspacePanelId,
+  type WorkspacePanelState,
 } from "./workspaceSettings.js";
 import { validateProject } from "./validate.js";
 import {
@@ -257,6 +270,37 @@ function groupCanon(project: BranchingProject) {
     {},
   );
 }
+
+type FloatingBounds = Pick<DOMRect, "left" | "top" | "right" | "bottom">;
+
+function clampFloatingMenuPosition(
+  x: number,
+  y: number,
+  bounds: FloatingBounds,
+  width = 220,
+  height = 220,
+) {
+  const gutter = 8;
+  const maxX = Math.max(bounds.left + gutter, bounds.right - width - gutter);
+  const maxY = Math.max(bounds.top + gutter, bounds.bottom - height - gutter);
+  return {
+    x: Math.min(Math.max(x, bounds.left + gutter), maxX),
+    y: Math.min(Math.max(y, bounds.top + gutter), maxY),
+  };
+}
+
+function viewportBounds(): FloatingBounds {
+  return { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight };
+}
+
+const WORKSPACE_PANEL_LABELS: Record<WorkspacePanelId, string> = {
+  explorer: "Explorer",
+  outline: "Story Outline",
+  assets: "Assets",
+  logic: "Logic",
+  export: "Export",
+  connect: "Connect",
+};
 
 type CanonTreeNode = {
   kind: "folder" | "ref";
@@ -2255,6 +2299,7 @@ function PathBranchingSettingsModal({
   onToggleTheme,
   onInspectorTabCloseSelectsNextChange,
   onCollapseInspectorTabOnCanvasClickChange,
+  onInspectorDebugEnabledChange,
   onConnectBridge,
   onVerifyBridge,
   onDisconnectBridge,
@@ -2277,6 +2322,7 @@ function PathBranchingSettingsModal({
   onToggleTheme: () => void;
   onInspectorTabCloseSelectsNextChange: (value: boolean) => void;
   onCollapseInspectorTabOnCanvasClickChange: (value: boolean) => void;
+  onInspectorDebugEnabledChange: (value: boolean) => void;
   onConnectBridge: () => void;
   onVerifyBridge: () => void;
   onDisconnectBridge: () => void;
@@ -2672,6 +2718,16 @@ function PathBranchingSettingsModal({
                     />
                   </label>
                   <label>
+                    <span>Inspector Debug</span>
+                    <input
+                      type="checkbox"
+                      checked={settings.inspectorDebugEnabled}
+                      onChange={(event) =>
+                        onInspectorDebugEnabledChange(event.target.checked)
+                      }
+                    />
+                  </label>
+                  <label>
                     <span>Canvas circles</span>
                     <input
                       type="checkbox"
@@ -2824,6 +2880,7 @@ function PanelShell({
   onResize,
   onResetWidth,
   onResizeStateChange,
+  onContextMenu,
   children,
 }: {
   title: string;
@@ -2834,6 +2891,7 @@ function PanelShell({
   onResize?: (width: number) => void;
   onResetWidth?: () => void;
   onResizeStateChange?: (resizing: boolean) => void;
+  onContextMenu?: (event: ReactMouseEvent<HTMLElement>) => void;
   children: ReactNode;
 }) {
   const startResize = (event: ReactPointerEvent<HTMLButtonElement>) => {
@@ -2862,7 +2920,7 @@ function PanelShell({
 
   if (!open) {
     return (
-      <aside className="side-rail">
+      <aside className="side-rail" onContextMenu={onContextMenu}>
         <button type="button" title={`Open ${title}`} onClick={onToggle}>
           <span>{railLabel}</span>
         </button>
@@ -2871,7 +2929,7 @@ function PanelShell({
   }
 
   return (
-    <aside className="side-panel">
+    <aside className="side-panel" onContextMenu={onContextMenu}>
       <div className="panel-title">
         <div>
           <strong>{title}</strong>
@@ -3582,6 +3640,7 @@ function FilesPanel({
   activeOutlineTab,
   onOutlineTabChange,
   onNavigatePathNode,
+  onContextMenu,
 }: {
   project: BranchingProject;
   files: PathBranchingFileItem[];
@@ -3591,6 +3650,7 @@ function FilesPanel({
   open: boolean;
   selectedId?: string;
   onNavigatePathNode: (node: PathTreeNode) => void;
+  onContextMenu?: (event: ReactMouseEvent<HTMLElement>) => void;
   onToggle: () => void;
   onResize: (width: number) => void;
   onResetWidth: () => void;
@@ -3632,6 +3692,7 @@ function FilesPanel({
       onResize={onResize}
       onResetWidth={onResetWidth}
       onResizeStateChange={onResizeStateChange}
+      onContextMenu={onContextMenu}
     >
       <div className="stories-sequence-toolbar story-management-toolbar">
         <label>
@@ -3917,6 +3978,29 @@ function inspectorTabIcon(tab: InspectorTab) {
   return FilePlus2;
 }
 
+function DebugInspector({
+  project,
+  nodes,
+  selection,
+}: {
+  project: BranchingProject;
+  nodes: StoryCanvasNode[];
+  selection: Selection;
+}) {
+  const node = selection.type === "node" ? nodes.find((item) => item.id === selection.id) : undefined;
+  const payload = {
+    selection,
+    node,
+    event: selection.type === "node" ? project.events.find((item) => item.id === selection.id) : undefined,
+    canon: selection.type === "canon" ? project.canonRefs.find((item) => item.id === selection.id) : undefined,
+    localEntity: selection.type === "explorerEntity" ? project.localExplorerEntities?.find((item) => item.id === selection.id) : undefined,
+    dataObject: selection.type === "dataObject" ? project.projectDataObjects?.find((item) => item.id === selection.id) : undefined,
+    workingCopy: selection.type === "canon" ? project.canonWorkingCopies?.find((item) => item.canonRefId === selection.id) : undefined,
+    changeSets: selection.type === "canon" ? project.canonChangeSets?.filter((item) => item.target.entityId === selection.id) : undefined,
+  };
+  return <section className="inspector-section debug-inspector"><h2>Debug</h2><pre>{JSON.stringify(payload, null, 2)}</pre></section>;
+}
+
 function EventAuthoringDock({
   project,
   nodes,
@@ -3944,6 +4028,7 @@ function EventAuthoringDock({
   inspectorMaximized,
   onOpenInspectorTab,
   onCloseInspectorTab,
+  onDisableInspectorDebug,
   onToggleInspectorMaximized,
   children,
 }: {
@@ -3973,10 +4058,12 @@ function EventAuthoringDock({
   inspectorMaximized: boolean;
   onOpenInspectorTab: (id: string) => void;
   onCloseInspectorTab: (id: string) => void;
+  onDisableInspectorDebug: () => void;
   onToggleInspectorMaximized: () => void;
   children: ReactNode;
 }) {
   const markdownTextAreaRef = useRef<HTMLTextAreaElement | null>(null);
+  const tabContextMenuRef = useRef<HTMLDivElement | null>(null);
   const manuallyCollapsedEventIdRef = useRef<string | undefined>(undefined);
   const manuallyClosedEventIdRef = useRef<string | undefined>(undefined);
   const [selectedTabGroupId, setSelectedTabGroupId] = useState("");
@@ -4179,9 +4266,26 @@ function EventAuthoringDock({
     [eventInspector.expandedEventId, onCollapseEvent],
   );
 
+  const openTabCloseMenu = useCallback(
+    (contextEvent: ReactMouseEvent<HTMLButtonElement>, eventId: string) => {
+      contextEvent.preventDefault();
+      contextEvent.stopPropagation();
+      setTabContextMenu({
+        eventId,
+        ...clampFloatingMenuPosition(
+          contextEvent.clientX,
+          contextEvent.clientY,
+          viewportBounds(),
+        ),
+      });
+    },
+    [],
+  );
+
   useEffect(() => {
     if (!tabContextMenu) return;
-    function handlePointerDown() {
+    function handlePointerDown(event: PointerEvent) {
+      if (tabContextMenuRef.current?.contains(event.target as Node)) return;
       setTabContextMenu(undefined);
     }
     function handleKeyDown(event: KeyboardEvent) {
@@ -4267,10 +4371,12 @@ function EventAuthoringDock({
                       <button type="button" title={expanded ? "Minimize inspector" : "Expand inspector"} onClick={() => onOpenInspectorTab(tab.id)}>
                         {expanded ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
                       </button>
-                      <button type="button" title="Close inspector" onClick={() => onCloseInspectorTab(tab.id)}><X size={14} /></button>
+                      {tab.mode === "debug" ? (
+                        <button type="button" title="Disable Inspector Debug" onClick={onDisableInspectorDebug}><Power size={14} /></button>
+                      ) : <button type="button" title="Close inspector" onClick={() => onCloseInspectorTab(tab.id)}><X size={14} /></button>}
                     </div>
                   </div>
-                  {expanded ? <div className="event-inspector-body"><div className="event-inspector-body-scroll">{isValidElement(children) ? cloneElement(children as ReactElement<{ selection?: Selection }>, { selection: tab.selection }) : children}</div></div> : null}
+                  {expanded ? <div className="event-inspector-body"><div className="event-inspector-body-scroll">{tab.mode === "debug" ? <DebugInspector project={project} nodes={nodes} selection={tab.selection} /> : isValidElement(children) ? cloneElement(children as ReactElement<{ selection?: Selection }>, { selection: tab.selection }) : children}</div></div> : null}
                 </section>
               );
             })}
@@ -4344,10 +4450,12 @@ function EventAuthoringDock({
                   </button>
                   <div className="event-editor-actions">
                     <button type="button" title={expanded ? "Minimize inspector" : "Expand inspector"} onClick={() => onOpenInspectorTab(tab.id)}>{expanded ? <ChevronDown size={14} /> : <ChevronUp size={14} />}</button>
-                    <button type="button" title="Close inspector" onClick={() => onCloseInspectorTab(tab.id)}><X size={14} /></button>
+                    {tab.mode === "debug" ? (
+                      <button type="button" title="Disable Inspector Debug" onClick={onDisableInspectorDebug}><Power size={14} /></button>
+                    ) : <button type="button" title="Close inspector" onClick={() => onCloseInspectorTab(tab.id)}><X size={14} /></button>}
                   </div>
                 </div>
-                {expanded ? <div className="event-inspector-body"><div className="event-inspector-body-scroll">{isValidElement(children) ? cloneElement(children as ReactElement<{ selection?: Selection }>, { selection: tab.selection }) : children}</div></div> : null}
+                {expanded ? <div className="event-inspector-body"><div className="event-inspector-body-scroll">{tab.mode === "debug" ? <DebugInspector project={project} nodes={nodes} selection={tab.selection} /> : isValidElement(children) ? cloneElement(children as ReactElement<{ selection?: Selection }>, { selection: tab.selection }) : children}</div></div> : null}
               </section>
             );
           })}
@@ -4367,17 +4475,7 @@ function EventAuthoringDock({
               >
                 <div className="event-editor-header">
                   {isExpanded ? (
-                    <div
-                      className="event-header-title"
-                      onContextMenu={(contextEvent) => {
-                        contextEvent.preventDefault();
-                        setTabContextMenu({
-                          eventId: event.id,
-                          x: contextEvent.clientX,
-                          y: contextEvent.clientY,
-                        });
-                      }}
-                    >
+                    <div className="event-header-title">
                       <strong title={cardEvent.name ?? "No event selected"}>
                         <GitBranch
                           className="event-header-icon"
@@ -4400,14 +4498,6 @@ function EventAuthoringDock({
                       type="button"
                       className="event-minimized-title"
                       onClick={() => toggleInspector(event.id)}
-                      onContextMenu={(contextEvent) => {
-                        contextEvent.preventDefault();
-                        setTabContextMenu({
-                          eventId: event.id,
-                          x: contextEvent.clientX,
-                          y: contextEvent.clientY,
-                        });
-                      }}
                       title={`Open ${event.name}`}
                     >
                       <strong>
@@ -4496,6 +4586,9 @@ function EventAuthoringDock({
                           : "Close inspector"
                       }
                       onClick={() => closeInspector(event.id)}
+                      onContextMenu={(contextEvent) =>
+                        openTabCloseMenu(contextEvent, event.id)
+                      }
                     >
                       <X size={14} />
                     </button>
@@ -4607,6 +4700,7 @@ function EventAuthoringDock({
       </div>
       {tabContextMenu ? (
         <div
+          ref={tabContextMenuRef}
           className="canvas-menu tab-context-menu"
           style={{ left: tabContextMenu.x, top: tabContextMenu.y }}
         >
@@ -4915,6 +5009,11 @@ function Inspector({
   const canonRefIds = project.canonRefs.map((canonRef) => canonRef.id);
   const eventCategories = project.eventCategories ?? [];
   const dataObjects = project.projectDataObjects ?? [];
+  const eventSequence = event ? findSequence(project, event.id) : undefined;
+  const eventBranches = eventSequence
+    ? branchesForSequence(project, eventSequence.id)
+    : project.branches;
+  const outgoingTransitions = event?.transitions ?? [];
   const inspectorIdentity = (() => {
     if (event)
       return {
@@ -5192,6 +5291,18 @@ function Inspector({
                 />
               </label>
               <label className="field-label">
+                Description
+                <textarea
+                  rows={3}
+                  value={event.description ?? ""}
+                  onChange={(inputEvent) =>
+                    onUpdateEvent(event.id, {
+                      description: inputEvent.target.value || undefined,
+                    })
+                  }
+                />
+              </label>
+              <label className="field-label">
                 Category
                 <select
                   value={event.type}
@@ -5207,20 +5318,74 @@ function Inspector({
                   ))}
                 </select>
               </label>
-              <dl>
-                <div>
-                  <dt>ID</dt>
-                  <dd>{event.id}</dd>
-                </div>
-                <div>
-                  <dt>Branch</dt>
-                  <dd>{event.branchRef ?? "none"}</dd>
-                </div>
-                <div>
-                  <dt>Engine Target</dt>
-                  <dd>{project.engineTargets?.unity?.adapter ?? "none"}</dd>
-                </div>
-              </dl>
+            </section>
+
+            <section className="inspector-section">
+              <h2>Connections</h2>
+              <ReferencePicker
+                label="Branch"
+                options={eventBranches.map((branch) => ({
+                  id: branch.id,
+                  label: branch.title,
+                  detail: branch.description,
+                }))}
+                value={event.branchRef ? [event.branchRef] : []}
+                onChange={(ids) =>
+                  onUpdateEvent(event.id, { branchRef: ids[0] ?? null })
+                }
+              />
+              <ReferencePicker
+                label="Script"
+                options={project.scripts.map((script) => ({
+                  id: script.id,
+                  label: script.entrySection ?? script.sourcePath ?? script.id,
+                  detail: script.format,
+                }))}
+                value={event.script?.id ? [event.script.id] : []}
+                onChange={(ids) =>
+                  onUpdateEvent(event.id, {
+                    script: project.scripts.find((script) => script.id === ids[0]),
+                  })
+                }
+              />
+              <ReferencePicker
+                label="Connected events"
+                multiple
+                options={project.events
+                  .filter((candidate) => candidate.id !== event.id)
+                  .map((candidate) => ({ id: candidate.id, label: candidate.name }))}
+                value={outgoingTransitions.map((transition) => transition.to)}
+                onChange={(ids) => {
+                  const currentIds = new Set(outgoingTransitions.map((item) => item.to));
+                  const removed = outgoingTransitions.filter((item) => !ids.includes(item.to));
+                  if (
+                    removed.some(
+                      (item) =>
+                        item.conditions ||
+                        (item.consequences?.length ?? 0) > 0 ||
+                        item.label ||
+                        item.function,
+                    ) &&
+                    !window.confirm("Removing this event connection will also remove its configured transition. Continue?")
+                  ) {
+                    return;
+                  }
+                  const additions = ids
+                    .filter((id) => !currentIds.has(id))
+                    .map((to) => ({
+                      id: `transition:${event.id}:${to}`,
+                      from: event.id,
+                      to,
+                      source: "graph" as const,
+                    }));
+                  onUpdateEvent(event.id, {
+                    transitions: [
+                      ...outgoingTransitions.filter((item) => ids.includes(item.to)),
+                      ...additions,
+                    ],
+                  });
+                }}
+              />
             </section>
 
             <CanonRefsPicker
@@ -5236,63 +5401,6 @@ function Inspector({
                 onCreateCanonSuggestion(canonRefId, { eventId: event.id })
               }
             />
-
-            <section className="inspector-section">
-              <h2>Script</h2>
-              <label className="field-label">
-                Ink Source
-                <input
-                  value={event.script?.sourcePath ?? ""}
-                  placeholder="Assets/Ink/scene.ink"
-                  onChange={(inputEvent) => {
-                    const value = inputEvent.target.value;
-                    onUpdateEvent(event.id, {
-                      script: value
-                        ? {
-                            id: event.script?.id ?? `script:${event.id}`,
-                            format: event.script?.format ?? "ink",
-                            sourcePath: value,
-                            compiledPath: event.script?.compiledPath,
-                            entrySection: event.script?.entrySection,
-                          }
-                        : undefined,
-                    });
-                  }}
-                />
-              </label>
-              <label className="field-label">
-                Ink Entry
-                <input
-                  value={event.script?.entrySection ?? ""}
-                  placeholder="opening_signal"
-                  onChange={(inputEvent) =>
-                    onUpdateEvent(event.id, {
-                      script: {
-                        id: event.script?.id ?? `script:${event.id}`,
-                        format: event.script?.format ?? "ink",
-                        sourcePath: event.script?.sourcePath,
-                        compiledPath: event.script?.compiledPath,
-                        entrySection: inputEvent.target.value || undefined,
-                      },
-                    })
-                  }
-                />
-              </label>
-              <dl>
-                <div>
-                  <dt>Source</dt>
-                  <dd>{event.script?.sourcePath ?? "none"}</dd>
-                </div>
-                <div>
-                  <dt>Compiled</dt>
-                  <dd>{event.script?.compiledPath ?? "none"}</dd>
-                </div>
-                <div>
-                  <dt>Entry</dt>
-                  <dd>{event.script?.entrySection ?? "none"}</dd>
-                </div>
-              </dl>
-            </section>
 
             <section className="inspector-section">
               <h2>Unlocks</h2>
@@ -5373,29 +5481,6 @@ function Inspector({
                 >
                   Add Decision
                 </button>
-              </div>
-            </section>
-            <section className="inspector-section">
-              <h2>Transitions</h2>
-              <div className="stack-list">
-                {(event.transitions ?? []).map((transition) => (
-                  <div className="mini-card" key={transition.id}>
-                    <strong>{transition.label ?? transition.id}</strong>
-                    <span>
-                      {transition.from} {"->"} {transition.to}
-                    </span>
-                    <button
-                      type="button"
-                      className="danger"
-                      onClick={() => onDeleteTransition(transition.id)}
-                    >
-                      Delete Transition
-                    </button>
-                  </div>
-                ))}
-                {(event.transitions ?? []).length === 0 ? (
-                  <span className="empty-line">No outgoing transitions.</span>
-                ) : null}
               </div>
             </section>
             <LogicSection
@@ -6854,6 +6939,7 @@ function StoryCanvas({
   onSaveEventDraft,
   onOpenInspectorTab,
   onCloseInspectorTab,
+  onDisableInspectorDebug,
   onToggleInspectorMaximized,
 }: {
   project: BranchingProject;
@@ -7000,6 +7086,7 @@ function StoryCanvas({
   onSaveEventDraft: () => void;
   onOpenInspectorTab: (id: string) => void;
   onCloseInspectorTab: (id: string) => void;
+  onDisableInspectorDebug: () => void;
   onToggleInspectorMaximized: () => void;
 }) {
   const shellRef = useRef<HTMLElement | null>(null);
@@ -7115,8 +7202,17 @@ function StoryCanvas({
       });
       setContextMenu({
         kind: "create",
-        x: event.clientX - (shellRect?.left ?? 0),
-        y: event.clientY - (shellRect?.top ?? 0),
+        ...clampFloatingMenuPosition(
+          event.clientX - (shellRect?.left ?? 0),
+          event.clientY - (shellRect?.top ?? 0),
+          {
+            left: 0,
+            top: 0,
+            right: shellRect?.width ?? window.innerWidth,
+            bottom: shellRect?.height ?? window.innerHeight,
+          },
+          410,
+        ),
         flowX: flowPosition.x,
         flowY: flowPosition.y,
       });
@@ -7147,8 +7243,17 @@ function StoryCanvas({
       setContextMenu({
         kind: "connect-create",
         sourceNodeId: connectionState.fromNode.id,
-        x: point.clientX - (shellRect?.left ?? 0),
-        y: point.clientY - (shellRect?.top ?? 0),
+        ...clampFloatingMenuPosition(
+          point.clientX - (shellRect?.left ?? 0),
+          point.clientY - (shellRect?.top ?? 0),
+          {
+            left: 0,
+            top: 0,
+            right: shellRect?.width ?? window.innerWidth,
+            bottom: shellRect?.height ?? window.innerHeight,
+          },
+          410,
+        ),
         flowX: flowPosition.x,
         flowY: flowPosition.y,
       });
@@ -7469,6 +7574,7 @@ function StoryCanvas({
         inspectorMaximized={inspectorMaximized}
         onOpenInspectorTab={onOpenInspectorTab}
         onCloseInspectorTab={onCloseInspectorTab}
+        onDisableInspectorDebug={onDisableInspectorDebug}
         onToggleInspectorMaximized={onToggleInspectorMaximized}
       >
         <Inspector
@@ -7529,6 +7635,7 @@ export function App() {
     () => loadSettings().lastView ?? "home",
   );
   const settingsRef = useRef(settings);
+  const appShellRef = useRef<HTMLDivElement | null>(null);
   const [initialLoading, setInitialLoading] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
   const [workspace, setWorkspace] = useState<PathBranchingWorkspace>();
@@ -7542,6 +7649,12 @@ export function App() {
   const [selection, setSelection] = useState<Selection>();
   const [canonOpen, setCanonOpen] = useState(true);
   const [filesOpen, setFilesOpen] = useState(true);
+  const [panelVisibility, setPanelVisibility] = useState<WorkspacePanelState>(
+    DEFAULT_WORKSPACE_PANEL_VISIBILITY,
+  );
+  const [panelCollapsed, setPanelCollapsed] = useState<WorkspacePanelState>(
+    DEFAULT_WORKSPACE_PANEL_COLLAPSED,
+  );
   const [canonWidth, setCanonWidth] = useState(DEFAULT_EXPLORER_WIDTH);
   const [storiesWidth, setStoriesWidth] = useState(DEFAULT_PANEL_WIDTH);
   const [panelResizing, setPanelResizing] = useState(false);
@@ -7617,6 +7730,10 @@ export function App() {
   >(new Set());
   const [error, setError] = useState<string>();
   const [message, setMessage] = useState<string>();
+  const [panelContextMenu, setPanelContextMenu] = useState<{
+    x: number;
+    y: number;
+  }>();
   const projectRef = useRef<BranchingProject | undefined>(undefined);
   const workspaceRef = useRef<PathBranchingWorkspace | undefined>(undefined);
   const fileStateRef = useRef<ProjectFileState>({ dirty: false });
@@ -7627,6 +7744,34 @@ export function App() {
   >(undefined);
   const projectRevisionRef = useRef(0);
   const savedRevisionRef = useRef(0);
+
+  useEffect(() => {
+    if (!settings.inspectorDebugEnabled || !selection || !project) {
+      setInspectorTabs((current) =>
+        current.filter((tab) => tab.mode !== "debug"),
+      );
+      return;
+    }
+    const debugTab: InspectorTab = {
+      id: "debug:active",
+      title: "Debug",
+      selection,
+      mode: "debug",
+    };
+    setInspectorTabs((current) => [
+      ...current.filter((tab) => tab.mode !== "debug"),
+      debugTab,
+    ]);
+    if (!eventInspector.expandedEventId && !expandedInspectorTabId) {
+      setExpandedInspectorTabId(debugTab.id);
+    }
+  }, [
+    eventInspector.expandedEventId,
+    expandedInspectorTabId,
+    project,
+    selection,
+    settings.inspectorDebugEnabled,
+  ]);
 
   const applyProject = useCallback(
     (
@@ -7750,6 +7895,16 @@ export function App() {
       setFilesOpen(
         savedSession.filesOpen ?? activeProject.panels?.filesOpen ?? true,
       );
+      setPanelVisibility({
+        ...DEFAULT_WORKSPACE_PANEL_VISIBILITY,
+        ...savedSession.panelVisibility,
+      });
+      setPanelCollapsed({
+        ...DEFAULT_WORKSPACE_PANEL_COLLAPSED,
+        explorer: !(savedSession.canonOpen ?? activeProject.panels?.canonOpen ?? true),
+        outline: !(savedSession.filesOpen ?? activeProject.panels?.filesOpen ?? true),
+        ...savedSession.panelCollapsed,
+      });
       setCanonWidth(clampExplorerWidth(savedSession.canonWidth));
       setStoriesWidth(clampPanelWidth(savedSession.storiesWidth));
       setExportOpen(savedSession.exportOpen ?? false);
@@ -8687,6 +8842,8 @@ export function App() {
       markdownTabs: storableMarkdownTabs(markdownTabs),
       activeMarkdownTabId,
       storyOutlineTab,
+      panelVisibility,
+      panelCollapsed,
     };
     setSettings((current) => {
       const currentSession =
@@ -8717,6 +8874,8 @@ export function App() {
     focusNodeId,
     initialLoading,
     markdownTabs,
+    panelCollapsed,
+    panelVisibility,
     selection,
     storyOutlineTab,
     storiesWidth,
@@ -8766,6 +8925,10 @@ export function App() {
     },
     [],
   );
+
+  const changeInspectorDebugEnabled = useCallback((value: boolean) => {
+    setSettings((current) => ({ ...current, inspectorDebugEnabled: value }));
+  }, []);
 
   const changeNodeColors = useCallback(
     (updates: Partial<NodeColorSettings>) => {
@@ -9366,6 +9529,58 @@ export function App() {
     },
     [],
   );
+
+  const importAssets = useCallback(async () => {
+    if (!fileState.universePath) {
+      setMessage("Open a universe before importing assets.");
+      return;
+    }
+    try {
+      const imported = await importUniverseAssets(fileState.universePath);
+      if (imported.length === 0) return;
+      const current = projectRef.current;
+      if (!current) return;
+      await commitStructuralAction("Imported UnCanon assets", {
+        project: {
+          ...current,
+          assets: [
+            ...(current.assets ?? []).filter((asset) => asset.origin === "canon"),
+            ...(current.assets ?? []).filter((asset) => asset.origin === "uncanon"),
+            ...imported.map((asset) => ({
+              ...asset,
+              id: `asset:${crypto.randomUUID()}`,
+              origin: "uncanon" as const,
+              importedAt: new Date().toISOString(),
+            })),
+          ],
+        },
+        message: `Imported ${imported.length} UnCanon asset${imported.length === 1 ? "" : "s"}.`,
+      });
+    } catch (assetError) {
+      setError(assetError instanceof Error ? assetError.message : String(assetError));
+    }
+  }, [commitStructuralAction, fileState.universePath]);
+
+  useEffect(() => {
+    if (!desktopRuntime || !fileState.universePath) return;
+    let cancelled = false;
+    void indexCanonAssets(fileState.universePath).then((canonAssets) => {
+      if (cancelled || !projectRef.current) return;
+      const current = projectRef.current;
+      const nextAssets = [
+        ...canonAssets.map((asset) => ({
+          ...asset,
+          id: `canon-asset:${asset.path}`,
+          origin: "canon" as const,
+        })),
+        ...(current.assets ?? []).filter((asset) => asset.origin === "uncanon"),
+      ];
+      const next = normalizeProject({ ...current, assets: nextAssets });
+      projectRef.current = next;
+      setProject(next);
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [desktopRuntime, fileState.universePath]);
 
   const exportRuntime = useCallback(
     async (mode: ExportPreviewMode = exportPreviewMode) => {
@@ -11235,10 +11450,37 @@ export function App() {
 
   const toggleCanon = useCallback(() => {
     setCanonOpen((open) => !open);
+    setPanelCollapsed((current) => ({ ...current, explorer: !current.explorer }));
   }, []);
 
   const toggleFiles = useCallback(() => {
     setFilesOpen((open) => !open);
+    setPanelCollapsed((current) => ({ ...current, outline: !current.outline }));
+  }, []);
+
+  const setPanelCollapsedState = useCallback(
+    (panel: WorkspacePanelId, collapsed: boolean) => {
+      setPanelCollapsed((current) => ({ ...current, [panel]: collapsed }));
+      if (panel === "explorer") setCanonOpen(!collapsed);
+      if (panel === "outline") setFilesOpen(!collapsed);
+    },
+    [],
+  );
+
+  const togglePanelVisibility = useCallback((panel: WorkspacePanelId) => {
+    setPanelVisibility((current) => {
+      const visible = !current[panel];
+      if (visible) setPanelCollapsed((collapsed) => ({ ...collapsed, [panel]: false }));
+      return { ...current, [panel]: visible };
+    });
+  }, []);
+
+  const openPanelContextMenu = useCallback((event: ReactMouseEvent<HTMLElement>) => {
+    event.preventDefault();
+    const bounds = appShellRef.current?.getBoundingClientRect() ?? viewportBounds();
+    setPanelContextMenu(
+      clampFloatingMenuPosition(event.clientX, event.clientY, bounds, 205, 250),
+    );
   }, []);
 
   useEffect(() => {
@@ -11282,16 +11524,25 @@ export function App() {
           setView("workspace");
           break;
         case "pb:view:toggle-canon":
-          toggleCanon();
+        case "pb:view:toggle-explorer":
+          togglePanelVisibility("explorer");
           break;
         case "pb:view:toggle-files":
-          toggleFiles();
+        case "pb:view:toggle-outline":
+          togglePanelVisibility("outline");
           break;
         case "pb:view:toggle-data":
-          setDataOpen((open) => !open);
+        case "pb:view:toggle-assets":
+          togglePanelVisibility("assets");
+          break;
+        case "pb:view:toggle-logic":
+          togglePanelVisibility("logic");
           break;
         case "pb:view:toggle-export":
-          setExportOpen((open) => !open);
+          togglePanelVisibility("export");
+          break;
+        case "pb:view:toggle-connect":
+          togglePanelVisibility("connect");
           break;
         case "pb:view:reset-layout":
           resetLayout();
@@ -11368,6 +11619,7 @@ export function App() {
     settings.worldnotionBridge.connected,
     toggleCanon,
     toggleFiles,
+    togglePanelVisibility,
     toggleTheme,
     undoProject,
   ]);
@@ -11443,9 +11695,10 @@ export function App() {
       onThemeChange={changeTheme}
       onToggleTheme={toggleTheme}
       onInspectorTabCloseSelectsNextChange={changeInspectorTabCloseSelectsNext}
-      onCollapseInspectorTabOnCanvasClickChange={
-        changeCollapseInspectorTabOnCanvasClick
-      }
+          onCollapseInspectorTabOnCanvasClickChange={
+            changeCollapseInspectorTabOnCanvasClick
+          }
+          onInspectorDebugEnabledChange={changeInspectorDebugEnabled}
       onConnectBridge={connectBridge}
       onVerifyBridge={verifyBridge}
       onDisconnectBridge={disconnectBridge}
@@ -11587,7 +11840,7 @@ export function App() {
 
   return (
     <>
-      <div className="app-shell">
+      <div className="app-shell" ref={appShellRef}>
         <Topbar
           project={project}
           fileState={fileState}
@@ -11602,21 +11855,31 @@ export function App() {
           onRedo={redoProject}
           canUndo={undoStack.length > 0}
           canRedo={redoStack.length > 0}
+          panelVisibility={panelVisibility}
+          onTogglePanelVisibility={togglePanelVisibility}
         />
         {webPreviewBanner}
 
         <div
           className={`workspace ${panelResizing ? "resizing" : ""}`}
           style={{
-            gridTemplateColumns: `${canonOpen ? canonWidth : COLLAPSED_RAIL_WIDTH}px ${filesOpen ? storiesWidth : COLLAPSED_RAIL_WIDTH}px minmax(0, 1fr)`,
+            gridTemplateColumns: [
+              panelVisibility.explorer ? `${panelCollapsed.explorer ? COLLAPSED_RAIL_WIDTH : canonWidth}px` : "",
+              panelVisibility.outline ? `${panelCollapsed.outline ? COLLAPSED_RAIL_WIDTH : storiesWidth}px` : "",
+              panelVisibility.assets ? `${panelCollapsed.assets ? COLLAPSED_RAIL_WIDTH : DEFAULT_PANEL_WIDTH}px` : "",
+              panelVisibility.logic ? `${panelCollapsed.logic ? COLLAPSED_RAIL_WIDTH : DEFAULT_PANEL_WIDTH}px` : "",
+              "minmax(0, 1fr)",
+              panelVisibility.export ? `${panelCollapsed.export ? COLLAPSED_RAIL_WIDTH : DEFAULT_PANEL_WIDTH}px` : "",
+              panelVisibility.connect ? `${panelCollapsed.connect ? COLLAPSED_RAIL_WIDTH : DEFAULT_PANEL_WIDTH}px` : "",
+            ].filter(Boolean).join(" "),
           }}
         >
-          <ExplorerPanel
+          {panelVisibility.explorer ? <ExplorerPanel
             project={project}
             propertiesConfig={workspace?.canonIndex.propertiesConfig}
-            open={canonOpen}
+            open={!panelCollapsed.explorer}
             selected={selection}
-            onToggle={toggleCanon}
+            onToggle={() => setPanelCollapsedState("explorer", !panelCollapsed.explorer)}
             onSelect={selectWithEventDraftGuard}
             onCreateEntity={createExplorerEntity}
             onDeleteEntity={deleteLocalExplorerEntity}
@@ -11625,16 +11888,17 @@ export function App() {
             onResize={resizeCanon}
             onResetWidth={() => setCanonWidth(DEFAULT_EXPLORER_WIDTH)}
             onResizeStateChange={setPanelResizing}
-          />
-          <FilesPanel
+            onContextMenu={openPanelContextMenu}
+          /> : null}
+          {panelVisibility.outline ? <FilesPanel
             project={project}
             files={files}
             stories={workspace?.manifest.stories ?? []}
             activeStoryId={workspace?.activeStory?.id}
             storyName={workspace?.activeStory?.name}
-            open={filesOpen}
+            open={!panelCollapsed.outline}
             selectedId={storyExplorerSelectionId(project, selection)}
-            onToggle={toggleFiles}
+            onToggle={() => setPanelCollapsedState("outline", !panelCollapsed.outline)}
             onResize={resizeStories}
             onResetWidth={() => setStoriesWidth(DEFAULT_PANEL_WIDTH)}
             onResizeStateChange={setPanelResizing}
@@ -11656,7 +11920,22 @@ export function App() {
             activeOutlineTab={storyOutlineTab}
             onOutlineTabChange={setStoryOutlineTab}
             onNavigatePathNode={navigatePathTreeNode}
-          />
+            onContextMenu={openPanelContextMenu}
+          /> : null}
+          {panelVisibility.assets ? <AssetsPanel
+            project={project}
+            collapsed={panelCollapsed.assets}
+            onCollapsedChange={(collapsed) => setPanelCollapsedState("assets", collapsed)}
+            onContextMenu={openPanelContextMenu}
+            onImport={() => void importAssets()}
+          /> : null}
+          {panelVisibility.logic ? <LogicPanel
+            project={project}
+            collapsed={panelCollapsed.logic}
+            onCollapsedChange={(collapsed) => setPanelCollapsedState("logic", collapsed)}
+            onContextMenu={openPanelContextMenu}
+            onUpdate={(nextProject) => updateProject(nextProject)}
+          /> : null}
           <StoryCanvas
             project={project}
             propertiesConfig={workspace?.canonIndex.propertiesConfig}
@@ -11755,9 +12034,46 @@ export function App() {
             onSaveEventDraft={() => void saveActiveEventDraft()}
             onOpenInspectorTab={openInspectorTab}
             onCloseInspectorTab={closeInspectorTab}
+            onDisableInspectorDebug={() => changeInspectorDebugEnabled(false)}
             onToggleInspectorMaximized={() => setInspectorMaximized((current) => !current)}
           />
+          {panelVisibility.export ? <ExportPanel
+            project={project}
+            collapsed={panelCollapsed.export}
+            onCollapsedChange={(collapsed) => setPanelCollapsedState("export", collapsed)}
+            onContextMenu={openPanelContextMenu}
+            onExport={(mode) => void exportRuntime(mode)}
+          /> : null}
+          {panelVisibility.connect ? <ConnectPanel
+            collapsed={panelCollapsed.connect}
+            onCollapsedChange={(collapsed) => setPanelCollapsedState("connect", collapsed)}
+            onContextMenu={openPanelContextMenu}
+          /> : null}
         </div>
+        {panelContextMenu ? (
+          <div
+            className="panel-picker panel-context-menu"
+            role="menu"
+            style={{ left: panelContextMenu.x, top: panelContextMenu.y }}
+            onMouseLeave={() => setPanelContextMenu(undefined)}
+          >
+            <strong>Panels</strong>
+            {WORKSPACE_PANEL_IDS.map((panel) => (
+              <button
+                key={panel}
+                type="button"
+                role="menuitemcheckbox"
+                aria-checked={panelVisibility[panel]}
+                onClick={() => {
+                  togglePanelVisibility(panel);
+                  setPanelContextMenu(undefined);
+                }}
+              >
+                {panelVisibility[panel] ? "✓" : ""} {WORKSPACE_PANEL_LABELS[panel]}
+              </button>
+            ))}
+          </div>
+        ) : null}
       </div>
       {settingsModal}
       {appDialogs}

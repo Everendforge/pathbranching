@@ -11,6 +11,12 @@ const session = normalizeWorkspaceSession({
       title: "Mara",
       selection: { type: "canon", id: "character:mara" },
     },
+    {
+      id: "debug:active",
+      title: "Debug",
+      mode: "debug",
+      selection: { type: "node", id: "event:opening" },
+    },
   ],
   inspectorExpandedTabId: "canon:character:mara",
   inspectorMaximized: true,
@@ -34,6 +40,7 @@ const session = normalizeWorkspaceSession({
 
 assert.deepEqual(session.eventInspectorOpenEventIds, ["event:opening"]);
 assert.equal(session.inspectorTabs?.[0]?.selection.type, "canon");
+assert.equal(session.inspectorTabs?.[1]?.mode, "debug");
 assert.equal(session.inspectorExpandedTabId, "canon:character:mara");
 assert.equal(session.inspectorMaximized, true);
 assert.equal(session.eventInspectorTabGroups?.[0]?.inspectorTabs?.[0]?.title, "Signal Token");

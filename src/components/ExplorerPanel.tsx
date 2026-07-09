@@ -17,6 +17,7 @@ import {
   useMemo,
   useState,
   type ComponentType,
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import type { Selection } from "../appTypes.js";
@@ -159,6 +160,7 @@ export function ExplorerPanel({
   onResize,
   onResetWidth,
   onResizeStateChange,
+  onContextMenu,
 }: {
   project: BranchingProject;
   propertiesConfig?: Record<string, unknown>;
@@ -173,6 +175,7 @@ export function ExplorerPanel({
   onResize: (width: number) => void;
   onResetWidth: () => void;
   onResizeStateChange: (resizing: boolean) => void;
+  onContextMenu?: (event: ReactMouseEvent<HTMLElement>) => void;
 }) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<"all" | "canon" | "local" | "data">(
@@ -254,7 +257,7 @@ export function ExplorerPanel({
 
   if (!open) {
     return (
-      <aside className="side-rail">
+      <aside className="side-rail" onContextMenu={onContextMenu}>
         <button type="button" title="Open Explorer" onClick={onToggle}>
           <span>Explorer</span>
         </button>
@@ -263,7 +266,7 @@ export function ExplorerPanel({
   }
 
   return (
-    <aside className="side-panel explorer-panel">
+    <aside className="side-panel explorer-panel" onContextMenu={onContextMenu}>
       <div className="panel-title">
         <strong>Explorer</strong>
         <button type="button" title="Collapse Explorer" onClick={onToggle}>

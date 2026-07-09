@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { BranchingProject, RuntimePackage } from "./domain.js";
+import type { BranchingProject, ProjectAsset, RuntimePackage } from "./domain.js";
 import {
   loadPathBranchingWorkspace,
   pathBranchingMetadataPaths,
@@ -58,6 +58,18 @@ export type BridgeStatus = {
   runtime: string;
   message: string;
 };
+
+export type ImportedAsset = Omit<ProjectAsset, "id" | "origin" | "importedAt">;
+
+export async function importUniverseAssets(universePath: string): Promise<ImportedAsset[]> {
+  assertDesktopRuntime("Importing assets");
+  return invoke<ImportedAsset[]>("import_universe_assets", { universePath });
+}
+
+export async function indexCanonAssets(universePath: string): Promise<ImportedAsset[]> {
+  assertDesktopRuntime("Indexing Canon assets");
+  return invoke<ImportedAsset[]>("index_canon_assets", { universePath });
+}
 
 function assertDesktopRuntime(action: string) {
   if (!isTauriRuntime()) {

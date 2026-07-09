@@ -2,6 +2,8 @@ import type {
   BranchingProject,
   DataClassDefinition,
   EventCategoryDefinition,
+  LogicVariable,
+  LogicVariableGroup,
 } from "./domain.js";
 import { normalizeBranchMembership } from "./storyOutlineModel.js";
 
@@ -187,6 +189,9 @@ export function normalizeProject(project: BranchingProject): BranchingProject {
           ? { kind: "sequence" as const, id: activeSequenceId }
           : undefined;
 
+  const logicVariableGroups = normalizeLogicGroups(project.logicVariableGroups);
+  const logicVariables = normalizeLogicVariables(project, logicVariableGroups);
+
   return normalizeBranchMembership({
     ...project,
     specVersion: project.specVersion ?? "0.1",
@@ -199,27 +204,8 @@ export function normalizeProject(project: BranchingProject): BranchingProject {
     localExplorerTypes: project.localExplorerTypes ?? [],
     localExplorerProperties: project.localExplorerProperties ?? [],
     assets: project.assets ?? [],
-    logicVariableGroups:
-      project.logicVariableGroups ?? [{ id: "ungrouped", name: "Unassigned", order: 0 }],
-    logicVariables:
-      project.logicVariables ??
-      Object.entries(project.variables ?? {}).map(([name, value]) => ({
-        id: `variable:${name}`,
-        name,
-        type: Array.isArray(value)
-          ? "list"
-          : typeof value === "number"
-            ? "number"
-            : typeof value === "boolean"
-              ? "boolean"
-              : "text",
-        value: Array.isArray(value)
-          ? value.filter((item): item is string => typeof item === "string")
-          : typeof value === "string" || typeof value === "number" || typeof value === "boolean"
-            ? value
-            : String(value),
-        groupId: "ungrouped",
-      })),
+    logicVariableGroups,
+    logicVariables,
     projectionRules: project.projectionRules ?? [],
     graphModules: project.graphModules ?? [],
     panels: {
@@ -245,7 +231,34 @@ export function normalizeProject(project: BranchingProject): BranchingProject {
     })),
     scripts: project.scripts ?? [],
     externalFunctions: project.externalFunctions ?? [],
-    variables: project.variables ?? {},
+    variables: Object.fromEntries(logicVariables.map((variable) => [variable.name, variable.value])),
+  });
+}
+
+function normalizeLogicGroups(groups: LogicVariableGroup[] | undefined): LogicVariableGroup[] {
+  const source = groups?.length ? groups : [{ id: "ungrouped", name: "Unassigned", order: 0 }];
+  const byId = new Map(source.filter((group) => group.id).map((group) => [group.id, group]));
+  if (!byId.has("ungrouped")) byId.set("ungrouped", { id: "ungrouped", name: "Unassigned", order: -1 });
+  return Array.from(byId.values()).sort((a, b) => a.order - b.order).map((group, order) => ({ ...group, name: group.name.trim() || "Untitled group", order }));
+}
+
+function normalizeLogicVariables(project: BranchingProject, groups: LogicVariableGroup[]): LogicVariable[] {
+  const legacy = Object.entries(project.variables ?? {}).map(([name, value]) => ({
+    id: `variable:${name}`, name,
+    type: Array.isArray(value) ? "list" as const : typeof value === "number" ? "number" as const : typeof value === "boolean" ? "boolean" as const : "text" as const,
+    value: Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : typeof value === "string" || typeof value === "number" || typeof value === "boolean" ? value : String(value),
+    groupId: "ungrouped",
+  }));
+  const seen = new Set<string>();
+  return (project.logicVariables ?? legacy).map((variable, index) => {
+    const baseName = variable.name.trim() || `variable_${index + 1}`;
+    let name = baseName;
+    let suffix = 2;
+    while (seen.has(name)) name = `${baseName}_${suffix++}`;
+    seen.add(name);
+    const type = ["text", "number", "boolean", "list", "canonRef"].includes(variable.type) ? variable.type : "text";
+    const value = type === "list" ? (Array.isArray(variable.value) ? variable.value.map(String) : []) : type === "number" ? (typeof variable.value === "number" && Number.isFinite(variable.value) ? variable.value : Number(variable.value) || 0) : type === "boolean" ? (typeof variable.value === "boolean" ? variable.value : variable.value === "true") : String(variable.value ?? "");
+    return { ...variable, id: variable.id || `variable:${name}`, name, type, value, groupId: groups.some((group) => group.id === variable.groupId) ? variable.groupId : "ungrouped" } as LogicVariable;
   });
 }
 

@@ -8,12 +8,18 @@ import {
   Sun,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { Check, Eye } from "lucide-react";
 import forgeLogoOnDark from "../assets/everend-forge-logo-on-dark.png";
 import forgeLogoOnLight from "../assets/everend-forge-logo-on-light.png";
 import type { BranchingProject } from "../domain.js";
 import { projectFileName, type ProjectFileState } from "../projectPersistence.js";
 import { isDarkTheme, themeById, type ThemeId } from "../themes.js";
 import { UniverseIconFrame } from "./UniverseIconFrame.js";
+import type { WorkspacePanelId, WorkspacePanelState } from "../workspaceSettings.js";
+
+const panelLabels: Record<WorkspacePanelId, string> = {
+  explorer: "Explorer", outline: "Story Outline", assets: "Assets", logic: "Logic", export: "Export", connect: "Connect",
+};
 
 const EVEREND_FORGE_GITHUB_URL = "https://github.com/Everendforge/everend-forge";
 const BUY_SUITE_URL = "https://everendforge.com/buy-suite";
@@ -51,6 +57,8 @@ export function Topbar({
   onRedo,
   canUndo,
   canRedo,
+  panelVisibility,
+  onTogglePanelVisibility,
 }: {
   project?: BranchingProject;
   fileState?: ProjectFileState;
@@ -65,11 +73,15 @@ export function Topbar({
   onRedo: () => void;
   canUndo: boolean;
   canRedo: boolean;
+  panelVisibility?: WorkspacePanelState;
+  onTogglePanelVisibility?: (panel: WorkspacePanelId) => void;
 }) {
   const universeName = universeDisplayName(project, fileState);
   const universePath = universeDisplayPath(fileState);
   const [forgeMenuOpen, setForgeMenuOpen] = useState(false);
+  const [viewMenuOpen, setViewMenuOpen] = useState(false);
   const forgeMenuRef = useRef<HTMLDivElement | null>(null);
+  const viewMenuRef = useRef<HTMLDivElement | null>(null);
 
   const openExternalUrl = (url: string) => {
     window.open(url, "_blank", "noopener,noreferrer");
@@ -77,15 +89,22 @@ export function Topbar({
   };
 
   useEffect(() => {
-    if (!forgeMenuOpen) return;
+    if (!forgeMenuOpen && !viewMenuOpen) return;
 
     function handlePointerDown(event: PointerEvent) {
-      if (forgeMenuRef.current?.contains(event.target as Node)) return;
+      if (
+        forgeMenuRef.current?.contains(event.target as Node) ||
+        viewMenuRef.current?.contains(event.target as Node)
+      ) return;
       setForgeMenuOpen(false);
+      setViewMenuOpen(false);
     }
 
     function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") setForgeMenuOpen(false);
+      if (event.key === "Escape") {
+        setForgeMenuOpen(false);
+        setViewMenuOpen(false);
+      }
     }
 
     document.addEventListener("pointerdown", handlePointerDown);
@@ -94,7 +113,7 @@ export function Topbar({
       document.removeEventListener("pointerdown", handlePointerDown);
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [forgeMenuOpen]);
+  }, [forgeMenuOpen, viewMenuOpen]);
 
   return (
     <header className="topbar dock-top-bar pathbranching-topbar" aria-label="Workspace controls">
@@ -163,6 +182,17 @@ export function Topbar({
         </div>
 
         <div className="dock-command-group" aria-label="Panels">
+          {panelVisibility && onTogglePanelVisibility ? <div ref={viewMenuRef} className="topbar-view-menu">
+            <button type="button" title="View panels" onClick={() => setViewMenuOpen((open) => !open)} aria-expanded={viewMenuOpen}>
+              <Eye size={14} /><span>View</span>
+            </button>
+            {viewMenuOpen ? <div className="panel-picker" role="menu">
+              <strong>Panels</strong>
+              {(Object.keys(panelLabels) as WorkspacePanelId[]).map((panel) => <button key={panel} type="button" role="menuitemcheckbox" aria-checked={panelVisibility[panel]} onClick={() => onTogglePanelVisibility(panel)}>
+                <Check size={14} className={panelVisibility[panel] ? "visible" : "hidden"} /> {panelLabels[panel]}
+              </button>)}
+            </div> : null}
+          </div> : null}
           <button type="button" title="Export current story" className={exportOpen ? "active" : ""} onClick={onExportRuntime}>
             <Download size={14} />
             <span>Export</span>

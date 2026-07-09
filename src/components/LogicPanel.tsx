@@ -1,4 +1,5 @@
 import { ChevronDown, ChevronUp, Plus, Trash2 } from "lucide-react";
+import type { MouseEvent as ReactMouseEvent } from "react";
 import type { BranchingProject, LogicVariable, LogicVariableGroup, LogicVariableType } from "../domain.js";
 import { WorkspaceSidePanel } from "./WorkspaceSidePanel.js";
 
@@ -6,14 +7,14 @@ const types: LogicVariableType[] = ["text", "number", "boolean", "list", "canonR
 
 export function LogicPanel({ project, collapsed, onCollapsedChange, onContextMenu, onUpdate }: {
   project: BranchingProject; collapsed: boolean; onCollapsedChange: (collapsed: boolean) => void;
-  onContextMenu: (event: React.MouseEvent<HTMLElement>) => void; onUpdate: (project: BranchingProject) => void;
+  onContextMenu: (event: ReactMouseEvent<HTMLElement>) => void; onUpdate: (project: BranchingProject) => void;
 }) {
   const groups = [...(project.logicVariableGroups ?? [])].sort((a, b) => a.order - b.order);
   const updateGroups = (next: LogicVariableGroup[]) => onUpdate({ ...project, logicVariableGroups: next });
   const updateVariables = (next: LogicVariable[]) => onUpdate({ ...project, logicVariables: next });
   const addGroup = () => updateGroups([...groups, { id: `group:${crypto.randomUUID()}`, name: `Group ${groups.length + 1}`, order: groups.length }]);
   const addVariable = (groupId: string) => updateVariables([...(project.logicVariables ?? []), { id: `variable:${crypto.randomUUID()}`, name: `variable_${(project.logicVariables?.length ?? 0) + 1}`, type: "text", value: "", groupId }]);
-  const projectVariableValue = (variable: LogicVariable) => variable.type === "list" ? variable.value.join(", ") : String(variable.value);
+  const projectVariableValue = (variable: LogicVariable) => variable.type === "list" && Array.isArray(variable.value) ? variable.value.join(", ") : String(variable.value);
   const updateVariable = (id: string, changes: Partial<LogicVariable>) => updateVariables((project.logicVariables ?? []).map((variable) => variable.id === id ? { ...variable, ...changes } : variable));
 
   return <WorkspaceSidePanel title="Logic" side="left" collapsed={collapsed} onCollapsedChange={onCollapsedChange} onContextMenu={onContextMenu}>

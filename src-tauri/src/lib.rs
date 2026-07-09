@@ -60,6 +60,16 @@ struct BridgeStatus {
     message: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AssetMetadata {
+    name: String,
+    path: String,
+    kind: String,
+    extension: Option<String>,
+    size: Option<u64>,
+}
+
 fn menu_item(
     app: &tauri::AppHandle,
     id: &str,
@@ -142,21 +152,27 @@ fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &PredefinedMenuItem::separator(app)?,
             &menu_item(
                 app,
-                "pb:view:toggle-canon",
-                "Toggle Canon Panel",
+                "pb:view:toggle-explorer",
+                "Toggle Explorer Panel",
                 Some("CmdOrCtrl+Shift+C"),
             )?,
             &menu_item(
                 app,
-                "pb:view:toggle-files",
-                "Toggle Files Panel",
+                "pb:view:toggle-outline",
+                "Toggle Story Outline Panel",
                 Some("CmdOrCtrl+Shift+F"),
             )?,
             &menu_item(
                 app,
-                "pb:view:toggle-data",
-                "Toggle Data Panel",
+                "pb:view:toggle-assets",
+                "Toggle Assets Panel",
                 Some("CmdOrCtrl+Shift+D"),
+            )?,
+            &menu_item(
+                app,
+                "pb:view:toggle-logic",
+                "Toggle Logic Panel",
+                Some("CmdOrCtrl+Shift+L"),
             )?,
             &menu_item(
                 app,
@@ -164,6 +180,7 @@ fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 "Toggle Export Panel",
                 Some("CmdOrCtrl+Shift+E"),
             )?,
+            &menu_item(app, "pb:view:toggle-connect", "Toggle Connect Panel", None)?,
             &PredefinedMenuItem::separator(app)?,
             &style_menu,
             &PredefinedMenuItem::separator(app)?,
@@ -315,11 +332,49 @@ fn should_walk_universe_dir(root: &Path, path: &Path) -> bool {
     if relative.starts_with(".everend/settings") {
         return true;
     }
+    if relative.starts_with(".everend/assets") {
+        return true;
+    }
 
     let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
         return false;
     };
     !name.starts_with('.')
+}
+
+fn asset_kind(path: &Path) -> &'static str {
+    let extension = path.extension().and_then(|value| value.to_str()).unwrap_or("").to_ascii_lowercase();
+    match extension.as_str() {
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "avif" => "image",
+        "mp4" | "mov" | "webm" | "mkv" | "avi" => "video",
+        "mp3" | "wav" | "ogg" | "m4a" | "flac" | "aac" => "audio",
+        "md" | "markdown" | "txt" | "pdf" | "doc" | "docx" | "rtf" | "odt" => "document",
+        _ => "other",
+    }
+}
+
+fn asset_metadata(root: &Path, path: &Path) -> AssetMetadata {
+    AssetMetadata {
+        name: path.file_name().and_then(|value| value.to_str()).unwrap_or("asset").to_string(),
+        path: relative_path(root, path),
+        kind: asset_kind(path).to_string(),
+        extension: path.extension().and_then(|value| value.to_str()).map(|value| value.to_ascii_lowercase()),
+        size: fs::metadata(path).ok().map(|metadata| metadata.len()),
+    }
+}
+
+fn walk_canon_assets(root: &Path, current: &Path, assets: &mut Vec<AssetMetadata>) {
+    let Ok(entries) = fs::read_dir(current) else { return; };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let relative = relative_path(root, &path);
+        if relative.starts_with(".everend") { continue; }
+        if path.is_dir() {
+            walk_canon_assets(root, &path, assets);
+        } else {
+            assets.push(asset_metadata(root, &path));
+        }
+    }
 }
 
 fn walk_universe(
@@ -422,6 +477,56 @@ async fn open_universe_dialog(app: tauri::AppHandle) -> Result<Option<UniverseRe
 #[tauri::command]
 fn read_universe_folder(path: String) -> Result<UniverseReadResult, String> {
     read_universe(PathBuf::from(path))
+}
+
+#[tauri::command]
+fn index_canon_assets(universe_path: String) -> Result<Vec<AssetMetadata>, String> {
+    let root = PathBuf::from(universe_path);
+    if !root.is_dir() {
+        return Err("Universe path must be an existing directory.".to_string());
+    }
+    let mut assets = Vec::new();
+    walk_canon_assets(&root, &root, &mut assets);
+    assets.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(assets)
+}
+
+#[tauri::command]
+async fn import_universe_assets(
+    app: tauri::AppHandle,
+    universe_path: String,
+) -> Result<Vec<AssetMetadata>, String> {
+    let root = PathBuf::from(universe_path);
+    if !root.is_dir() {
+        return Err("Universe path must be an existing directory.".to_string());
+    }
+    let Some(files) = app.dialog().file().blocking_pick_files() else {
+        return Ok(Vec::new());
+    };
+    let mut imported = Vec::new();
+    for file in files {
+        let source = file.into_path().map_err(|error| error.to_string())?;
+        if !source.is_file() { continue; }
+        let file_name = source.file_name().ok_or_else(|| "Imported files need a file name.".to_string())?;
+        let kind = asset_kind(&source);
+        let target_dir = root.join(".everend").join("assets").join(kind);
+        fs::create_dir_all(&target_dir).map_err(|error| error.to_string())?;
+        let stem = source.file_stem().and_then(|value| value.to_str()).unwrap_or("asset");
+        let extension = source.extension().and_then(|value| value.to_str());
+        let mut target = target_dir.join(file_name);
+        let mut suffix = 1_u32;
+        while target.exists() {
+            let name = match extension {
+                Some(extension) => format!("{}-{}.{}", stem, suffix, extension),
+                None => format!("{}-{}", stem, suffix),
+            };
+            target = target_dir.join(name);
+            suffix += 1;
+        }
+        fs::copy(&source, &target).map_err(|error| error.to_string())?;
+        imported.push(asset_metadata(&root, &target));
+    }
+    Ok(imported)
 }
 
 #[tauri::command]
@@ -580,6 +685,8 @@ pub fn run() {
             bridge_status,
             open_universe_dialog,
             read_universe_folder,
+            index_canon_assets,
+            import_universe_assets,
             save_universe_text_file,
             open_project_dialog,
             read_project_file,
