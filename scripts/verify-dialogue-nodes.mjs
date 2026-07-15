@@ -15,9 +15,12 @@ import {
   deleteDialogueBeat,
   detachDialogueMembers,
   groupDialogueMembers,
+  updateEventDialogueBeat,
 } from "../lib/projectMutations.js";
 import { customLocaleId, localeDisplayName, normalizeLocalizationCatalog, normalizeLocaleNames, updateLocalizedEntry } from "../lib/localization.js";
 import { buildStoryCanvasModel } from "../lib/canvas/storyCanvasModel.js";
+import { UNKNOWN_SPEAKER_REF } from "../lib/speakerRoles.js";
+import { exportRuntimePackage } from "../lib/exportRuntime.js";
 
 const eventId = "event:dialogue-regression";
 const project = normalizeProject({
@@ -118,6 +121,22 @@ assert.ok(
   validateProject(invalidSpeakerProject).some((finding) => finding.code === "invalid_speaker_presence"),
   "Expected a Speech Beat speaker missing from the event to be rejected.",
 );
+const unknownSpeakerProject = normalizeProject({
+  ...invalidSpeakerProject,
+  scriptDocuments: (invalidSpeakerProject.scriptDocuments ?? []).map((script) => ({
+    ...script,
+    blocks: script.blocks.map((block) => ({ ...block, characterRef: UNKNOWN_SPEAKER_REF })),
+  })),
+});
+assert.equal(
+  validateProject(unknownSpeakerProject).filter((finding) => finding.code === "missing_canon_ref" || finding.code === "invalid_speaker_presence").length,
+  0,
+  "Expected the generic unknown speaker to avoid canon and event-presence validation.",
+);
+assert.ok(
+  buildStoryCanvasModel(unknownSpeakerProject, { scope: { kind: "event", id: eventId } }).nodes.some((node) => node.data.subtitle === "???"),
+  "Expected the canvas to label the generic unknown speaker as ???.",
+);
 const invalidTriggerProject = normalizeProject({
   ...groupedProject,
   events: groupedProject.events.map((event) => event.id === eventId ? {
@@ -137,6 +156,40 @@ assert.equal(groupedProject.events[0].decisions[0].dialogueId, undefined, "Detac
 const triggerCanvas = buildStoryCanvasModel(groupedProject, { scope: { kind: "event", id: eventId } });
 assert.ok(triggerCanvas.nodes.some((node) => node.id === triggerNodeId && node.data.title === "Dialogue Trigger"), "Expected the trigger to render independently from Dialogue containers.");
 assert.ok(triggerCanvas.edges.some((edge) => edge.source === triggerNodeId && edge.target === `decision:${eventId}:${groupedDecisionId}`), "Expected the trigger connection to render on the event subcanvas.");
+
+const sceneBeatId = groupedProject.events[0].dialogueBeats[0].id;
+groupedProject = updateEventDialogueBeat(groupedProject, eventId, sceneBeatId, {
+  sceneImage: { id: "scene-image:one", assetId: "asset:scene-one" },
+}).project;
+groupedProject = normalizeProject({
+  ...groupedProject,
+  assets: [
+    { id: "asset:scene-one", name: "one.png", path: ".everend/assets/image/one.png", kind: "image", origin: "uncanon", extension: "png" },
+    { id: "asset:scene-two", name: "two.jpg", path: ".everend/assets/image/two.jpg", kind: "image", origin: "uncanon", extension: "jpg" },
+  ],
+});
+assert.equal(groupedProject.events[0].dialogueBeats.find((beat) => beat.id === sceneBeatId)?.sceneImage?.assetId, "asset:scene-one", "Expected one scene image to persist on the speech beat.");
+const sceneRuntimeBeat = exportRuntimePackage(groupedProject).nodes.find((node) => node.id === `beat:${eventId}:${sceneBeatId}`);
+assert.equal(sceneRuntimeBeat?.sceneImage?.path, ".everend/assets/image/one.png", "Expected runtime export to retain the relative scene-image path.");
+const missingSceneImageProject = updateEventDialogueBeat(groupedProject, eventId, sceneBeatId, { sceneImage: { id: "scene-image:missing", assetId: "asset:missing" } }).project;
+assert.ok(validateProject(missingSceneImageProject).some((finding) => finding.code === "missing_scene_image"), "Expected a missing scene-image asset to fail validation.");
+const invalidSceneImageProject = normalizeProject({
+  ...groupedProject,
+  assets: [...groupedProject.assets, { id: "asset:audio", name: "audio.mp3", path: ".everend/assets/audio/audio.mp3", kind: "audio", origin: "uncanon" }],
+  events: groupedProject.events.map((event) => event.id === eventId ? {
+    ...event,
+    dialogueBeats: event.dialogueBeats.map((beat) => beat.id === sceneBeatId ? { ...beat, sceneImage: { id: "scene-image:audio", assetId: "asset:audio" } } : beat),
+  } : event),
+});
+assert.ok(validateProject(invalidSceneImageProject).some((finding) => finding.code === "invalid_scene_image"), "Expected a non-image scene asset to fail validation.");
+const migratedSceneImageProject = normalizeProject({
+  ...groupedProject,
+  events: groupedProject.events.map((event) => event.id === eventId ? {
+    ...event,
+    dialogueBeats: event.dialogueBeats.map((beat) => beat.id === sceneBeatId ? { ...beat, sceneImage: undefined, sceneImages: [{ id: "scene-image:legacy", assetId: "asset:scene-two" }] } : beat),
+  } : event),
+});
+assert.equal(migratedSceneImageProject.events[0].dialogueBeats.find((beat) => beat.id === sceneBeatId)?.sceneImage?.assetId, "asset:scene-two", "Expected legacy scene-image sequences to migrate to one image.");
 
 let localizedProject = normalizeLocalizationCatalog(groupedProject, "es-PE");
 const localizedBlock = localizedProject.scriptDocuments.flatMap((script) => script.blocks).find(Boolean);

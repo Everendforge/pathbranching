@@ -67,6 +67,11 @@ export async function importUniverseAssets(universePath: string): Promise<Import
   return invoke<ImportedAsset[]>("import_universe_assets", { universePath });
 }
 
+export async function importSceneImages(universePath: string): Promise<ImportedAsset[]> {
+  assertDesktopRuntime("Importing scene images");
+  return invoke<ImportedAsset[]>("import_scene_images", { universePath });
+}
+
 export async function indexCanonAssets(universePath: string): Promise<ImportedAsset[]> {
   assertDesktopRuntime("Indexing Canon assets");
   return invoke<ImportedAsset[]>("index_canon_assets", { universePath });

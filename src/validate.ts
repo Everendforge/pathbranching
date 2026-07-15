@@ -3,6 +3,8 @@ import { conditionInputsFromConsequences, walkConditions } from "./logic.js";
 import { ruleSetPhasesByOwner, type RuleBindingOwnerKind } from "./ruleLibrary.js";
 import { mappingsForCanonRef } from "./integrationConfig.js";
 import { propertySupportsDialogueTrigger } from "./explorerSchema.js";
+import { isGenericSpeakerRef } from "./speakerRoles.js";
+import { canonVariantsForRef } from "./worldnotionVariants.js";
 
 function finding(
   code: ValidationFinding["code"],
@@ -464,6 +466,9 @@ export function validateProject(project: BranchingProject): ValidationFinding[] 
     event.canonRefs?.forEach((canonRef) => {
       validateCanonRef(findings, canonIds, event.id, canonRef, `Event "${event.id}"`);
     });
+    if (event.locationRef) {
+      validateCanonRef(findings, canonIds, event.id, event.locationRef, `Event "${event.id}" location`);
+    }
 
     const presentEntityIds = event.presentEntityRefs ?? event.canonRefs ?? [];
     presentEntityIds.forEach((canonRef) => {
@@ -553,8 +558,18 @@ export function validateProject(project: BranchingProject): ValidationFinding[] 
         );
       }
       const characterRef = block?.characterRef ?? block?.speakerRef;
-      if (characterRef) {
+      if (characterRef && !isGenericSpeakerRef(characterRef)) {
         validateCanonRef(findings, canonIds, beat.id, characterRef, `Dialogue beat "${beat.id}" character`);
+        const selectedVariantId = block?.characterVariantId;
+        const canonRef = project.canonRefs.find((ref) => ref.id === characterRef);
+        if (selectedVariantId && canonRef && !canonVariantsForRef(canonRef).some((variant) => variant.id === selectedVariantId)) {
+          findings.push(
+            finding("invalid_character_variant", "warning", `Dialogue beat "${beat.id}" selects missing variant "${selectedVariantId}" for "${characterRef}".`, {
+              id: beat.id,
+              ref: selectedVariantId,
+            }),
+          );
+        }
         const presentEntityIds = event.presentEntityRefs ?? event.canonRefs ?? [];
         const hasPresenceConfiguration = event.presentEntityRefs !== undefined || event.canonRefs !== undefined;
         if (hasPresenceConfiguration && !presentEntityIds.includes(characterRef)) {
@@ -566,6 +581,31 @@ export function validateProject(project: BranchingProject): ValidationFinding[] 
           );
         }
       }
+      if (beat.kind !== "speech" && (beat.sceneImage || (beat.sceneImages?.length ?? 0) > 0)) {
+        findings.push(
+          finding("invalid_scene_image", "error", `Only speech beats can reference scene images; beat "${beat.id}" is a direction beat.`, {
+            id: beat.id,
+          }),
+        );
+      }
+      (beat.kind === "speech" && beat.sceneImage ? [beat.sceneImage] : []).forEach((sceneImage) => {
+        const asset = project.assets?.find((candidate) => candidate.id === sceneImage.assetId);
+        if (!asset) {
+          findings.push(
+            finding("missing_scene_image", "error", `Dialogue beat "${beat.id}" references missing scene image asset "${sceneImage.assetId}".`, {
+              id: beat.id,
+              ref: sceneImage.assetId,
+            }),
+          );
+        } else if (asset.kind !== "image") {
+          findings.push(
+            finding("invalid_scene_image", "error", `Dialogue beat "${beat.id}" references non-image asset "${sceneImage.assetId}".`, {
+              id: beat.id,
+              ref: sceneImage.assetId,
+            }),
+          );
+        }
+      });
       validateConditionRefs(findings, projectRefs, canonIds, beat.id, `Dialogue beat "${beat.id}" display condition`, beat.displayCondition);
       validateRuleSets(findings, projectRefs, canonIds, beat.id, `Dialogue beat "${beat.id}"`, beat.ruleSets);
     };

@@ -1,7 +1,10 @@
-import { Handle, Position, type NodeProps, type NodeTypes } from "@xyflow/react";
-import { useEffect, useState, type CSSProperties, type ChangeEvent, type MouseEvent, type PointerEvent } from "react";
+import { Handle, NodeToolbar, Position, type NodeProps, type NodeTypes } from "@xyflow/react";
+import { useEffect, useRef, useState, type CSSProperties, type MouseEvent, type PointerEvent } from "react";
+import { BookOpen, CircleHelp, ImagePlus, Trash2, UserRound } from "lucide-react";
 import type { StoryCanvasNode, StoryCanvasNodeData } from "../canvas/storyCanvasModel.js";
-import { localeDisplayName, type LocaleNames } from "../localization.js";
+import type { SceneImageAttachment } from "../domain.js";
+import type { LocaleNames } from "../localization.js";
+import { UNKNOWN_SPEAKER_REF, speakerLabel } from "../speakerRoles.js";
 
 function badgeText(value: string) {
   return value.length > 22 ? `${value.slice(0, 19)}...` : value;
@@ -26,13 +29,31 @@ function isDecisionOption(value: unknown): value is DecisionOption {
 
 type BeatQuickEditor = {
   values: Record<string, string>;
+  directorNote?: string;
+  sceneImage?: SceneImageAttachment & { name: string; url?: string };
+  imageAssets?: Array<{ id: string; name: string }>;
+  directorNoteOpen?: boolean;
+  sceneImageOpen?: boolean;
   primaryLocale: string;
+  activeLocale?: string;
   languages: string[];
   localeNames?: LocaleNames;
   characterRef?: string;
-  speakerOptions: Array<{ id: string; label: string; portraitUrl?: string }>;
+  characterVariantId?: string;
+  textCounter?: { count: number; unit: "words" | "characters"; target: number };
+  speakerOptions: Array<{
+    id: string;
+    label: string;
+    portraitUrl?: string;
+    variants: Array<{ id: string; label: string; portraitUrl?: string }>;
+  }>;
   onTextUpdate: (locale: string, value: string) => void;
+  onDirectorNoteUpdate?: (value: string) => void;
+  onSceneImageUpdate?: (assetId?: string) => void;
+  onImportSceneImage?: () => void;
+  onAuxiliaryPanelChange?: (panel: "directorNote" | "sceneImage", open: boolean) => void;
   onCharacterUpdate: (characterRef?: string) => void;
+  onCharacterVariantUpdate?: (variantId: string) => void;
 };
 
 function isBeatQuickEditor(value: unknown): value is BeatQuickEditor {
@@ -104,20 +125,31 @@ function isEndAdder(value: unknown): value is EndAdder {
   );
 }
 
-function stopCanvasInteraction(event: MouseEvent<HTMLElement> | PointerEvent<HTMLElement> | ChangeEvent<HTMLSelectElement> | ChangeEvent<HTMLTextAreaElement>) {
+function stopCanvasInteraction(event: { stopPropagation: () => void }) {
   event.stopPropagation();
 }
 
-function StoryNode({ data, selected }: NodeProps<StoryCanvasNode>) {
+function StoryNode({ id, data, selected }: NodeProps<StoryCanvasNode>) {
   const nodeData = data as StoryCanvasNodeData;
-  const [beatLanguage, setBeatLanguage] = useState("");
+  const [openBeatMenu, setOpenBeatMenu] = useState(false);
   const quickEditor = isBeatQuickEditor(nodeData.details?.quickEditor)
     ? nodeData.details.quickEditor
     : undefined;
-  const draftLocale = beatLanguage || quickEditor?.primaryLocale || "und";
+  const draftLocale = quickEditor?.activeLocale ?? quickEditor?.primaryLocale ?? "und";
   const draftExternalText = quickEditor?.values[draftLocale] ?? "";
-  const [draftText, setDraftText] = useState(draftExternalText);
-  useEffect(() => setDraftText(draftExternalText), [draftExternalText, draftLocale]);
+  const directorNote = quickEditor?.directorNote ?? "";
+  const sceneImage = quickEditor?.sceneImage;
+  const imageAssets = quickEditor?.imageAssets ?? [];
+  const directorNoteOpen = quickEditor?.directorNoteOpen ?? false;
+  const sceneImagesOpen = quickEditor?.sceneImageOpen ?? false;
+  const setAuxiliaryPanelOpen = (panel: "directorNote" | "sceneImage", open: boolean) =>
+    quickEditor?.onAuxiliaryPanelChange?.(panel, open);
+  const beatContentRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const element = beatContentRef.current;
+    if (!element || document.activeElement === element || element.textContent === draftExternalText) return;
+    element.textContent = draftExternalText;
+  }, [draftExternalText, draftLocale]);
   const isEvent = nodeData.kind === "event";
   const isFinalEvent = nodeData.kind === "event" && nodeData.badges.includes("terminal");
   const boundaryDirection =
@@ -130,6 +162,10 @@ function StoryNode({ data, selected }: NodeProps<StoryCanvasNode>) {
   const inspectorFocusClass =
     typeof nodeData.inspectorState === "string"
       ? ` inspector-${nodeData.inspectorState}`
+      : "";
+  const sequenceEntryClass =
+    nodeData.details?.sequenceEntry || nodeData.details?.sequenceEntryEventId
+      ? " sequence-entry-puzzle"
       : "";
   const canReceive = boundaryDirection
     ? boundaryDirection === "output"
@@ -167,7 +203,7 @@ function StoryNode({ data, selected }: NodeProps<StoryCanvasNode>) {
 
   if (nodeData.kind === "start") {
     return (
-      <div className={`story-node start${focusClass}${inspectorFocusClass}${selected ? " selected" : ""}`} style={colorStyle}>
+      <div className={`story-node start${sequenceEntryClass}${focusClass}${inspectorFocusClass}${selected ? " selected" : ""}`} style={colorStyle}>
         <span className="node-start-icon" aria-hidden="true" />
         <div className="node-start-title">{nodeData.title}</div>
         {canSource ? <Handle type="source" position={Position.Right} /> : null}
@@ -278,50 +314,52 @@ function StoryNode({ data, selected }: NodeProps<StoryCanvasNode>) {
           {nodeData.subtitle ? <div className="node-subtitle">{nodeData.subtitle}</div> : null}
         </div>
         {boundaryDirection === "output" && routeEditor ? (
-          <div className="node-boundary-actions nodrag nopan">
-            <select
-              aria-label="Route destination"
-              value={routeEditor.selectedTargetId ?? ""}
-              onPointerDown={stopCanvasInteraction}
-              onMouseDown={stopCanvasInteraction}
-              onChange={(event) => {
-                stopCanvasInteraction(event);
-                if (event.target.value) routeEditor.onTargetChange(event.target.value);
-              }}
-            >
-              <option value="">Choose existing event…</option>
-              {routeEditor.targets.map((target) => (
-                <option key={target.id} value={target.id}>{target.label}</option>
-              ))}
-            </select>
-            <button
-              type="button"
-              onPointerDown={stopCanvasInteraction}
-              onMouseDown={stopCanvasInteraction}
-              onClick={(event) => {
-                stopCanvasInteraction(event);
-                routeEditor.onCreateTarget();
-              }}
-            >
-              New event
-            </button>
-            {routeEditor.onDeleteEnd ? (
+          <NodeToolbar nodeId={id} isVisible={selected} position={Position.Bottom} offset={14}>
+            <div className="canvas-node-toolbar node-boundary-actions nodrag nopan">
+              <select
+                aria-label="Route destination"
+                value={routeEditor.selectedTargetId ?? ""}
+                onPointerDown={stopCanvasInteraction}
+                onMouseDown={stopCanvasInteraction}
+                onChange={(event) => {
+                  stopCanvasInteraction(event);
+                  if (event.target.value) routeEditor.onTargetChange(event.target.value);
+                }}
+              >
+                <option value="">Choose existing event…</option>
+                {routeEditor.targets.map((target) => (
+                  <option key={target.id} value={target.id}>{target.label}</option>
+                ))}
+              </select>
               <button
                 type="button"
-                className="boundary-delete-end"
-                aria-label="Delete End"
-                title="Delete End"
                 onPointerDown={stopCanvasInteraction}
                 onMouseDown={stopCanvasInteraction}
                 onClick={(event) => {
                   stopCanvasInteraction(event);
-                  routeEditor.onDeleteEnd?.();
+                  routeEditor.onCreateTarget();
                 }}
               >
-                ×
+                New event
               </button>
-            ) : null}
-          </div>
+              {routeEditor.onDeleteEnd ? (
+                <button
+                  type="button"
+                  className="boundary-delete-end"
+                  aria-label="Delete End"
+                  title="Delete End"
+                  onPointerDown={stopCanvasInteraction}
+                  onMouseDown={stopCanvasInteraction}
+                  onClick={(event) => {
+                    stopCanvasInteraction(event);
+                    routeEditor.onDeleteEnd?.();
+                  }}
+                >
+                  ×
+                </button>
+              ) : null}
+            </div>
+          </NodeToolbar>
         ) : null}
         {canSource ? <Handle type="source" position={Position.Right} /> : null}
       </div>
@@ -383,43 +421,262 @@ function StoryNode({ data, selected }: NodeProps<StoryCanvasNode>) {
       speakerRef?: string;
     } | undefined;
     const primaryLocale = quickEditor?.primaryLocale ?? "und";
-    const selectedLocale = beatLanguage || primaryLocale;
+    const selectedLocale = quickEditor?.activeLocale ?? primaryLocale;
     const speakerRef = quickEditor?.characterRef ?? block?.speakerRef;
     const speakerOptions = quickEditor?.speakerOptions ?? [];
-    const speakerPortraitUrl = speakerOptions.find((speaker) => speaker.id === speakerRef)?.portraitUrl;
-    const languageOptions = quickEditor?.languages ?? [primaryLocale];
-    const languageLabel = (code: string) => `${localeDisplayName(code, quickEditor?.localeNames)}${code === primaryLocale ? " · Primary" : ""}`;
+    const selectedSpeaker = speakerOptions.find((speaker) => speaker.id === speakerRef);
+    const selectedVariantId = selectedSpeaker?.variants.some(
+      (variant) => variant.id === quickEditor?.characterVariantId,
+    )
+      ? quickEditor?.characterVariantId
+      : "base";
+    const selectedVariant = selectedSpeaker?.variants.find(
+      (variant) => variant.id === selectedVariantId,
+    );
+    const speakerPortraitUrl = selectedVariant?.portraitUrl ?? selectedSpeaker?.portraitUrl;
+    const speakerDisplayName = speakerLabel(speakerRef, selectedSpeaker?.label);
     const isSpeech = nodeData.kind === "speechBeat";
+    const textCounter = isSpeech ? quickEditor?.textCounter : undefined;
+    const portraitFallback = !speakerRef
+      ? <BookOpen size={25} aria-hidden="true" />
+      : speakerRef === UNKNOWN_SPEAKER_REF
+        ? <CircleHelp size={25} aria-hidden="true" />
+        : <UserRound size={25} aria-hidden="true" />;
     return (
       <div
-        className={`story-node speech-beat-node${focusClass}${inspectorFocusClass}${selected ? " selected" : ""}`}
+        className={`story-node speech-beat-node inline-editor${focusClass}${inspectorFocusClass}${selected ? " selected" : ""}`}
         style={colorStyle}
       >
         {canReceive ? <Handle type="target" position={Position.Left} /> : null}
-        {isSpeech ? <label className="speech-beat-character">
-          <span className="speech-beat-label">Character</span>
-          <div className="speech-beat-speaker-row">
-            {speakerPortraitUrl ? <img className="speech-beat-portrait" src={speakerPortraitUrl} alt="" /> : null}
-            <select className="nodrag nopan speech-beat-speaker" aria-label="Character" value={speakerRef ?? ""} onPointerDown={stopCanvasInteraction} onMouseDown={stopCanvasInteraction} onChange={(event) => {
-              stopCanvasInteraction(event);
-              quickEditor?.onCharacterUpdate(event.target.value || undefined);
-            }}>
-              <option value="">Narrador</option>
-              {speakerOptions.map((speaker) => <option key={speaker.id} value={speaker.id}>{speaker.label}</option>)}
-            </select>
+        {isSpeech && quickEditor?.onDirectorNoteUpdate ? (
+          <div className={`speech-beat-director-tools nodrag nopan${directorNoteOpen ? " open" : ""}`}>
+            <span className="speech-beat-director-pocket" aria-hidden="true" />
+            <button
+              type="button"
+              className={`speech-beat-director-toggle${directorNote.trim() ? " has-note" : ""}`}
+              aria-label={directorNote.trim() ? "Edit director note" : "Add director note"}
+              aria-expanded={directorNoteOpen}
+              title={directorNote.trim() ? "Edit director note" : "Add director note"}
+              onPointerDown={stopCanvasInteraction}
+              onClick={(event) => {
+                stopCanvasInteraction(event);
+                setAuxiliaryPanelOpen("directorNote", !directorNoteOpen);
+              }}
+            >
+              {directorNote.trim() ? "✎" : "+"}
+            </button>
+            {directorNoteOpen ? (
+              <div className="speech-beat-director-panel">
+                <div className="speech-beat-director-panel-header">
+                  <label htmlFor={`${id}-director-note`}>Director note</label>
+                  <button
+                    type="button"
+                    className="speech-beat-director-minimize"
+                    aria-label="Minimize director note"
+                    title="Minimize director note"
+                    onPointerDown={stopCanvasInteraction}
+                    onClick={(event) => {
+                      stopCanvasInteraction(event);
+                      setAuxiliaryPanelOpen("directorNote", false);
+                    }}
+                  >
+                    −
+                  </button>
+                </div>
+                <textarea
+                  id={`${id}-director-note`}
+                  className="nodrag nopan"
+                  rows={3}
+                  value={directorNote}
+                  placeholder="Add a note for direction, mood, timing…"
+                  onPointerDown={stopCanvasInteraction}
+                  onKeyDown={(event) => {
+                    event.stopPropagation();
+                    if (event.key === "Escape") setAuxiliaryPanelOpen("directorNote", false);
+                  }}
+                  onChange={(event) => quickEditor.onDirectorNoteUpdate?.(event.target.value)}
+                />
+              </div>
+            ) : null}
           </div>
-        </label> : null}
-        <label className="speech-beat-dialogue">
-          <span className="speech-beat-label">{isSpeech ? "Dialogue" : "Stage direction"}</span>
-          <select className="nodrag nopan speech-beat-language" aria-label="Dialogue language" value={selectedLocale} onPointerDown={stopCanvasInteraction} onMouseDown={stopCanvasInteraction} onChange={(event) => { stopCanvasInteraction(event); setBeatLanguage(event.target.value); }}>
-            {languageOptions.map((code) => <option key={code} value={code}>{languageLabel(code)}</option>)}
-          </select>
-          <textarea className="nodrag nopan speech-beat-content" aria-label={isSpeech ? "Dialogue text" : "Stage direction text"} placeholder={isSpeech ? "Write dialogue…" : "Write stage direction…"} value={draftText} rows={3} onPointerDown={stopCanvasInteraction} onMouseDown={stopCanvasInteraction} onKeyDown={(event) => event.stopPropagation()} onChange={(event) => {
-            stopCanvasInteraction(event);
-            setDraftText(event.target.value);
-            quickEditor?.onTextUpdate(selectedLocale, event.target.value);
-          }} />
-        </label>
+        ) : null}
+        <div className={`speech-beat-inline${isSpeech ? "" : " direction"}`}>
+          {isSpeech ? <div className="speech-beat-character">
+            <div className="speech-beat-drag-surface" title="Drag to move">
+              {speakerPortraitUrl ? <img className="speech-beat-avatar" src={speakerPortraitUrl} alt="" /> : <span className="speech-beat-avatar-fallback">{portraitFallback}</span>}
+            </div>
+            <div className="speech-beat-menu-anchor nodrag nopan" onPointerDown={stopCanvasInteraction}>
+              <button
+                type="button"
+                className="speech-beat-menu-trigger speech-beat-speaker"
+                aria-label="Character"
+                aria-haspopup="listbox"
+                aria-expanded={openBeatMenu}
+                onClick={(event) => {
+                  stopCanvasInteraction(event);
+                  setOpenBeatMenu((open) => !open);
+                }}
+              >
+                <span>{speakerDisplayName}</span>
+                <span className="speech-beat-menu-chevron" aria-hidden="true">⌄</span>
+              </button>
+              {openBeatMenu ? <div className="speech-beat-menu" role="listbox" aria-label="Character">
+                <button type="button" role="option" aria-selected={!speakerRef} onClick={(event) => {
+                  stopCanvasInteraction(event);
+                  quickEditor?.onCharacterUpdate(undefined);
+                  setOpenBeatMenu(false);
+                }}>Narrator</button>
+                <button type="button" role="option" aria-selected={speakerRef === UNKNOWN_SPEAKER_REF} onClick={(event) => {
+                  stopCanvasInteraction(event);
+                  quickEditor?.onCharacterUpdate(UNKNOWN_SPEAKER_REF);
+                  setOpenBeatMenu(false);
+                }}>???</button>
+                {speakerOptions.map((speaker) => <button key={speaker.id} type="button" role="option" aria-selected={speaker.id === speakerRef} onClick={(event) => {
+                  stopCanvasInteraction(event);
+                  quickEditor?.onCharacterUpdate(speaker.id);
+                  setOpenBeatMenu(false);
+                }}>
+                  {speaker.portraitUrl ? <img className="speech-beat-menu-portrait" src={speaker.portraitUrl} alt="" /> : null}
+                  <span>{speaker.label}</span>
+                </button>)}
+              </div> : null}
+            </div>
+            {selectedSpeaker && selectedSpeaker.variants.length > 1 ? (
+              <label className="speech-beat-variant nodrag nopan">
+                <span>Variant</span>
+                <select
+                  value={selectedVariantId}
+                  onPointerDown={stopCanvasInteraction}
+                  onChange={(event) => quickEditor?.onCharacterVariantUpdate?.(event.target.value)}
+                >
+                  {selectedSpeaker.variants.map((variant) => (
+                    <option key={variant.id} value={variant.id}>
+                      {variant.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
+          </div> : null}
+          <div
+            className={`speech-beat-dialogue nodrag nopan${textCounter ? " has-counter" : ""}`}
+            onPointerDown={stopCanvasInteraction}
+            onClick={stopCanvasInteraction}
+            onDoubleClick={stopCanvasInteraction}
+          >
+            <div
+              ref={beatContentRef}
+              className="speech-beat-content"
+              role="textbox"
+              aria-label={isSpeech ? "Dialogue text" : "Stage direction text"}
+              aria-multiline="true"
+              contentEditable
+              suppressContentEditableWarning
+              data-placeholder={isSpeech ? "Write dialogue…" : "Write stage direction…"}
+              onFocus={() => setOpenBeatMenu(false)}
+              onKeyDown={(event) => {
+                event.stopPropagation();
+                if (event.key === "Escape") {
+                  event.currentTarget.blur();
+                  setOpenBeatMenu(false);
+                }
+              }}
+              onInput={(event) => {
+                stopCanvasInteraction(event);
+                const nextText = event.currentTarget.textContent ?? "";
+                quickEditor?.onTextUpdate(selectedLocale, nextText);
+              }}
+            />
+            {textCounter ? (
+              <output className={`speech-beat-text-counter${textCounter.count > textCounter.target ? " over" : ""}`}>
+                {textCounter.count} / {textCounter.target} {textCounter.unit === "words" ? "words" : "characters"}
+              </output>
+            ) : null}
+          </div>
+        </div>
+        {isSpeech && quickEditor?.onImportSceneImage ? (
+          <div className={`speech-beat-scene-image-tools nodrag nopan${sceneImagesOpen ? " open" : ""}`}>
+            <span className="speech-beat-scene-image-pocket" aria-hidden="true" />
+            <button
+              type="button"
+              className={`speech-beat-scene-image-toggle${sceneImage ? " has-images" : ""}`}
+              aria-label={sceneImage ? "Edit scene image" : "Add scene image"}
+              aria-expanded={sceneImagesOpen}
+              title={sceneImage ? "Edit scene image" : "Add scene image"}
+              onPointerDown={stopCanvasInteraction}
+              onClick={(event) => {
+                stopCanvasInteraction(event);
+                setAuxiliaryPanelOpen("sceneImage", !sceneImagesOpen);
+              }}
+            >
+              <ImagePlus size={14} aria-hidden="true" />
+            </button>
+            <div className="speech-beat-scene-image-panel">
+              <div className="speech-beat-scene-image-panel-header">
+                <span>Scene image</span>
+                <div>
+                  <button
+                    type="button"
+                    className="speech-beat-scene-image-import"
+                    onPointerDown={stopCanvasInteraction}
+                    onClick={(event) => {
+                      stopCanvasInteraction(event);
+                      quickEditor.onImportSceneImage?.();
+                    }}
+                  ><ImagePlus size={13} /> Upload image</button>
+                  <button
+                    type="button"
+                    className="speech-beat-director-minimize"
+                    aria-label="Minimize scene images"
+                    title="Minimize scene images"
+                    onPointerDown={stopCanvasInteraction}
+                    onClick={(event) => {
+                      stopCanvasInteraction(event);
+                      setAuxiliaryPanelOpen("sceneImage", false);
+                    }}
+                  >−</button>
+                </div>
+              </div>
+              <label className="speech-beat-scene-image-select">
+                <span>Use an existing image</span>
+                <select
+                  value={sceneImage?.assetId ?? ""}
+                  onPointerDown={stopCanvasInteraction}
+                  onChange={(event) => quickEditor.onSceneImageUpdate?.(event.target.value || undefined)}
+                >
+                  <option value="">Choose an image…</option>
+                  {imageAssets.map((asset) => <option key={asset.id} value={asset.id}>{asset.name}</option>)}
+                </select>
+              </label>
+              {sceneImage ? (
+                <article className="speech-beat-scene-image-item">
+                  {sceneImage.url ? <img src={sceneImage.url} alt={sceneImage.name} /> : <span className="speech-beat-scene-image-placeholder"><ImagePlus size={18} /></span>}
+                  <span title={sceneImage.name}>{sceneImage.name}</span>
+                  <div className="speech-beat-scene-image-actions">
+                    <button
+                      type="button"
+                      className="danger"
+                      aria-label={`Remove ${sceneImage.name}`}
+                      onPointerDown={stopCanvasInteraction}
+                      onClick={(event) => {
+                        stopCanvasInteraction(event);
+                        quickEditor.onSceneImageUpdate?.();
+                      }}
+                    ><Trash2 size={13} /></button>
+                  </div>
+                </article>
+              ) : <button
+                type="button"
+                className="speech-beat-scene-image-empty"
+                onPointerDown={stopCanvasInteraction}
+                onClick={(event) => {
+                  stopCanvasInteraction(event);
+                  quickEditor.onImportSceneImage?.();
+                }}
+              ><ImagePlus size={16} /> Upload a PNG or JPEG image</button>}
+            </div>
+          </div>
+        ) : null}
         {canSource ? <Handle type="source" position={Position.Right} /> : null}
       </div>
     );
@@ -427,7 +684,7 @@ function StoryNode({ data, selected }: NodeProps<StoryCanvasNode>) {
 
   return (
     <div
-      className={`story-node ${nodeData.kind}${focusClass}${inspectorFocusClass}${isFinalEvent ? " terminal" : ""}${selected ? " selected" : ""}`}
+      className={`story-node ${nodeData.kind}${sequenceEntryClass}${focusClass}${inspectorFocusClass}${isFinalEvent ? " terminal" : ""}${selected ? " selected" : ""}`}
       style={colorStyle}
     >
       {canReceive ? <Handle type="target" position={Position.Left} /> : null}

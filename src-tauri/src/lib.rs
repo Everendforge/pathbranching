@@ -532,6 +532,54 @@ async fn import_universe_assets(
 }
 
 #[tauri::command]
+async fn import_scene_images(
+    app: tauri::AppHandle,
+    universe_path: String,
+) -> Result<Vec<AssetMetadata>, String> {
+    let root = PathBuf::from(universe_path);
+    if !root.is_dir() {
+        return Err("Universe path must be an existing directory.".to_string());
+    }
+    let Some(file) = app
+        .dialog()
+        .file()
+        .add_filter("Scene images", &["png", "jpg", "jpeg"])
+        .blocking_pick_file()
+    else {
+        return Ok(Vec::new());
+    };
+    let mut imported = Vec::new();
+    let source = file.into_path().map_err(|error| error.to_string())?;
+    if !source.is_file() || asset_kind(&source) != "image" {
+        return Ok(imported);
+    }
+    let extension = source
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
+    if !matches!(extension.as_deref(), Some("png" | "jpg" | "jpeg")) {
+        return Ok(imported);
+    }
+    let file_name = source.file_name().ok_or_else(|| "Imported images need a file name.".to_string())?;
+    let target_dir = root.join(".everend").join("assets").join("image");
+    fs::create_dir_all(&target_dir).map_err(|error| error.to_string())?;
+    let stem = source.file_stem().and_then(|value| value.to_str()).unwrap_or("scene-image");
+    let mut target = target_dir.join(file_name);
+    let mut suffix = 1_u32;
+    while target.exists() {
+        let name = match extension.as_deref() {
+            Some(extension) => format!("{}-{}.{}", stem, suffix, extension),
+            None => format!("{}-{}", stem, suffix),
+        };
+        target = target_dir.join(name);
+        suffix += 1;
+    }
+    fs::copy(&source, &target).map_err(|error| error.to_string())?;
+    imported.push(asset_metadata(&root, &target));
+    Ok(imported)
+}
+
+#[tauri::command]
 fn save_universe_text_file(
     universe_path: String,
     relative_path: String,
@@ -689,6 +737,7 @@ pub fn run() {
             read_universe_folder,
             index_canon_assets,
             import_universe_assets,
+            import_scene_images,
             save_universe_text_file,
             open_project_dialog,
             read_project_file,

@@ -1,4 +1,5 @@
 import type { Edge, Node, Viewport } from "@xyflow/react";
+import { speakerLabel } from "../speakerRoles.js";
 import type {
   Branch,
   BranchingProject,
@@ -115,6 +116,7 @@ export type StoryCanvasNodeColors = Partial<Record<StoryCanvasNodeKind, string>>
 export type StoryCanvasModelOptions = {
   nodeColors?: StoryCanvasNodeColors;
   scope?: CanvasScope;
+  gridSize?: number;
 };
 
 function hashString(value: string) {
@@ -595,10 +597,13 @@ function boundaryPortPosition(
   };
 }
 
-const SUBCANVAS_WORKSPACE_PADDING_X = 120;
-const SUBCANVAS_WORKSPACE_PADDING_Y = 100;
 const SUBCANVAS_WORKSPACE_MIN_WIDTH = 720;
 const SUBCANVAS_WORKSPACE_MIN_HEIGHT = 460;
+
+function subcanvasGridPadding(gridSize = 24) {
+  const padding = Math.max(1, gridSize);
+  return { x: padding, y: padding };
+}
 
 function subcanvasContent(nodes: StoryCanvasNode[]) {
   return nodes.filter(
@@ -609,7 +614,7 @@ function subcanvasContent(nodes: StoryCanvasNode[]) {
   );
 }
 
-function boundsForNodes(nodes: StoryCanvasNode[]): SubcanvasWorkspaceBounds {
+function boundsForNodes(nodes: StoryCanvasNode[], gridSize = 24): SubcanvasWorkspaceBounds {
   if (!nodes.length) {
     return { x: 220, y: 40, width: SUBCANVAS_WORKSPACE_MIN_WIDTH, height: SUBCANVAS_WORKSPACE_MIN_HEIGHT };
   }
@@ -617,22 +622,24 @@ function boundsForNodes(nodes: StoryCanvasNode[]): SubcanvasWorkspaceBounds {
   const right = Math.max(...nodes.map((node) => node.position.x + (node.width ?? NODE_WIDTH)));
   const top = Math.min(...nodes.map((node) => node.position.y));
   const bottom = Math.max(...nodes.map((node) => node.position.y + (node.height ?? 108)));
-  const x = left - SUBCANVAS_WORKSPACE_PADDING_X;
-  const y = top - SUBCANVAS_WORKSPACE_PADDING_Y;
+  const padding = subcanvasGridPadding(gridSize);
+  const x = left - padding.x;
+  const y = top - padding.y;
   return {
     x,
     y,
-    width: Math.max(SUBCANVAS_WORKSPACE_MIN_WIDTH, right - left + SUBCANVAS_WORKSPACE_PADDING_X * 2),
-    height: Math.max(SUBCANVAS_WORKSPACE_MIN_HEIGHT, bottom - top + SUBCANVAS_WORKSPACE_PADDING_Y * 2),
+    width: Math.max(SUBCANVAS_WORKSPACE_MIN_WIDTH, right - left + padding.x * 2),
+    height: Math.max(SUBCANVAS_WORKSPACE_MIN_HEIGHT, bottom - top + padding.y * 2),
   };
 }
 
 function expandedWorkspaceBounds(
   workspace: SubcanvasWorkspaceBounds,
   content: StoryCanvasNode[],
+  gridSize = 24,
 ): SubcanvasWorkspaceBounds {
   if (!content.length) return workspace;
-  const contentBounds = boundsForNodes(content);
+  const contentBounds = boundsForNodes(content, gridSize);
   const x = Math.min(workspace.x, contentBounds.x);
   const y = Math.min(workspace.y, contentBounds.y);
   const right = Math.max(workspace.x + workspace.width, contentBounds.x + contentBounds.width);
@@ -654,7 +661,7 @@ function boundaryPositionForWorkspace(
 
 export function layoutSubcanvasNodes(
   nodes: StoryCanvasNode[],
-  options: { preserveWorkspace?: boolean } = {},
+  options: { preserveWorkspace?: boolean; gridSize?: number } = {},
 ): StoryCanvasNode[] {
   const workspaceNode = nodes.find((node) => node.data.kind === "workspace");
   if (!workspaceNode) return nodes;
@@ -667,7 +674,7 @@ export function layoutSubcanvasNodes(
   };
   const workspace = options.preserveWorkspace
     ? currentWorkspace
-    : expandedWorkspaceBounds(currentWorkspace, subcanvasContent(nodes));
+    : expandedWorkspaceBounds(currentWorkspace, subcanvasContent(nodes), options.gridSize);
   const inputs = nodes.filter(
     (node) => node.data.kind === "boundary" && node.data.details?.direction === "input",
   );
@@ -721,9 +728,9 @@ function addSubcanvasWorkspace(
   const savedBounds = project.canvas?.scopes?.[canvasScopeKey(scope)]?.workspace;
   const bounds = savedBounds?.manual
     ? savedBounds
-    : savedBounds
-      ? expandedWorkspaceBounds(savedBounds, subcanvasContent(nodes))
-      : boundsForNodes(subcanvasContent(nodes));
+      : savedBounds
+      ? expandedWorkspaceBounds(savedBounds, subcanvasContent(nodes), options.gridSize)
+      : boundsForNodes(subcanvasContent(nodes), options.gridSize);
   pushNode(
     project,
     nodes,
@@ -749,7 +756,10 @@ function addSubcanvasWorkspace(
       zIndex: 0,
     },
   );
-  return layoutSubcanvasNodes(nodes, { preserveWorkspace: Boolean(savedBounds?.manual) });
+  return layoutSubcanvasNodes(nodes, {
+    preserveWorkspace: Boolean(savedBounds?.manual),
+    gridSize: options.gridSize,
+  });
 }
 
 function branchHeight(branch: Branch) {
@@ -795,7 +805,11 @@ function addConsequenceNodes(
     const dataObjectId =
       consequence.type === "unlockDataObject" && typeof consequence.objectId === "string" ? consequence.objectId : undefined;
 
-    pushNode(project, nodes, id, "runtimeAction", title, ownerLabel, 1160, cursor.supportY, badges, { consequence }, { nodeColors: options.nodeColors });
+    pushNode(project, nodes, id, "runtimeAction", title, ownerLabel, 1160, cursor.supportY, badges, {
+      consequence,
+      ownerId,
+      consequenceIndex: index,
+    }, { nodeColors: options.nodeColors });
     edges.push(edge(`edge:consequence:${ownerId}:${id}`, ownerId, id, "consequence", title, { consequences: [consequence] }));
 
     if (ref) {
@@ -1048,16 +1062,14 @@ function buildEventScopeModel(
     const block = scriptBlocks.get(`${beat.blockRef.scriptId}:${beat.blockRef.blockId}`);
     const nodeId = `beat:${eventNode.id}:${beat.id}`;
     const characterRef = block?.characterRef ?? block?.speakerRef;
-    const speaker = characterRef
-      ? project.canonRefs.find((ref) => ref.id === characterRef)?.label ?? characterRef
-      : undefined;
+    const speaker = speakerLabel(characterRef, project.canonRefs.find((ref) => ref.id === characterRef)?.label);
     pushNode(
       project,
       nodes,
       nodeId,
       beat.kind === "speech" ? "speechBeat" : "directionBeat",
       block?.content.trim().slice(0, 80) || (beat.kind === "speech" ? "New speech" : "New direction"),
-      beat.kind === "speech" ? speaker ?? "Narrador" : "Stage direction",
+      beat.kind === "speech" ? speaker : "Stage direction",
       740,
       420 + index * 168,
       logicBadges(beat.displayCondition, beat.ruleSets?.length ?? 0),
@@ -1275,16 +1287,14 @@ function buildDialogueScopeModel(
     const block = scriptBlocks.get(`${beat.blockRef.scriptId}:${beat.blockRef.blockId}`);
     const nodeId = `beat:${eventNode.id}:${beat.id}`;
     const characterRef = block?.characterRef ?? block?.speakerRef;
-    const speaker = characterRef
-      ? project.canonRefs.find((ref) => ref.id === characterRef)?.label ?? characterRef
-      : undefined;
+    const speaker = speakerLabel(characterRef, project.canonRefs.find((ref) => ref.id === characterRef)?.label);
     pushNode(
       project,
       nodes,
       nodeId,
       beat.kind === "speech" ? "speechBeat" : "directionBeat",
       block?.content.trim().slice(0, 80) || (beat.kind === "speech" ? "New speech" : "New direction"),
-      beat.kind === "speech" ? speaker ?? "Narrador" : "Stage direction",
+      beat.kind === "speech" ? speaker : "Stage direction",
       330 + (index % 2) * 310,
       90 + Math.floor(index / 2) * 175,
       logicBadges(beat.displayCondition, beat.ruleSets?.length ?? 0),
@@ -1434,23 +1444,24 @@ export function buildStoryCanvasModel(project: BranchingProject, options: StoryC
       80,
       cursor.sequenceY,
       [],
-      { sequenceId: sequence.id },
+      {
+        sequenceId: sequence.id,
+        sequenceEntryEventId:
+          sequence.entryEventId && activeEventIds.has(sequence.entryEventId)
+            ? sequence.entryEventId
+            : undefined,
+      },
       { nodeColors: options.nodeColors, scope },
     );
-
-    if (sequence.entryEventId && activeEventIds.has(sequence.entryEventId)) {
-      edges.push(edge(`edge:entry:${startNodeId}:${sequence.entryEventId}`, startNodeId, sequence.entryEventId, "entry", sequence.entryLabel ?? "", {
-        customLabel: sequence.entryLabel ?? "",
-      }));
-    }
     cursor.sequenceY += 190;
   }
 
   activeEvents.forEach((eventNode) => {
     const sequenceIndex = eventIndexInSequence.get(eventNode.id) ?? 0;
     const branch = eventNode.branchRef ? activeBranches.find((item) => item.id === eventNode.branchRef) : undefined;
-    const eventX = 360;
-    const eventY = cursor.eventY + sequenceIndex * 220;
+    const sequenceEntry = sequence?.entryEventId === eventNode.id;
+    const eventX = sequenceEntry ? 320 : 360;
+    const eventY = sequenceEntry ? cursor.sequenceY : cursor.eventY + sequenceIndex * 220;
     pushNode(
       project,
       nodes,
@@ -1470,6 +1481,7 @@ export function buildStoryCanvasModel(project: BranchingProject, options: StoryC
         branchColor: branchColor(branch, eventNode.branchRef, options),
         typeColor: eventTypeColor(project, eventNode, options),
         minimapColor: branchColor(branch, eventNode.branchRef, options) ?? eventTypeColor(project, eventNode, options),
+        sequenceEntry,
       },
       {
         nodeColors: options.nodeColors,

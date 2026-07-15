@@ -265,6 +265,15 @@ function migrateDialogue(
   };
 }
 
+function normalizeBeatSceneImage<T extends { sceneImage?: unknown; sceneImages?: unknown }>(beat: T): T {
+  const { sceneImages, ...withoutLegacyImages } = beat;
+  const sceneImage = beat.sceneImage ?? (Array.isArray(sceneImages) ? sceneImages[0] : undefined);
+  return {
+    ...withoutLegacyImages,
+    ...(sceneImage ? { sceneImage } : {}),
+  } as T;
+}
+
 export function normalizeProject(project: BranchingProject): BranchingProject {
   const entrySequenceId = project.entrySequenceId ?? project.sequences[0]?.id;
   const activeSequenceId =
@@ -307,13 +316,15 @@ export function normalizeProject(project: BranchingProject): BranchingProject {
   const events = (project.events ?? []).map((event) => {
     const dialogues = (event.dialogues ?? []).map((dialogue) => {
       const migrated = migrateDialogue(event.id, dialogue, scriptDocuments);
+      const beats = (migrated.beats ?? []).map(normalizeBeatSceneImage);
       const decisionMembers = (event.decisions ?? [])
         .filter((decision) => decision.dialogueId === migrated.id)
         .map((decision) => ({ kind: "decision" as const, id: decision.id }));
       return {
         ...migrated,
+        beats,
         members: migrated.members ?? [
-          ...(migrated.beats ?? []).map((beat) => ({ kind: "beat" as const, id: beat.id })),
+          ...beats.map((beat) => ({ kind: "beat" as const, id: beat.id })),
           ...decisionMembers,
         ],
       };
@@ -351,6 +362,7 @@ export function normalizeProject(project: BranchingProject): BranchingProject {
         })),
       })),
       dialogues,
+      dialogueBeats: event.dialogueBeats?.map(normalizeBeatSceneImage),
       presentEntityRefs: event.presentEntityRefs ?? (event.canonRefs ? [...event.canonRefs] : undefined),
       dialogueStarts,
       boundaryBindings: event.boundaryBindings ?? [],

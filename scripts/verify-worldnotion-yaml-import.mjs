@@ -7,6 +7,10 @@ import {
   canonExplorerTypeProperty,
   canonPresentationImageForRef,
 } from "../lib/explorerSchema.js";
+import {
+  canonVariantsForRef,
+  resolveCanonVariantFrontmatter,
+} from "../lib/worldnotionVariants.js";
 
 const fixture = (path) =>
   readFileSync(new URL(`../fixtures/spec-v0.2/${path}`, import.meta.url), "utf8");
@@ -152,6 +156,47 @@ assert.deepEqual(canonImagePropertiesForRef(imageConfig, portraitRef), [{
 assert.equal(
   canonPresentationImageForRef(imageConfig, portraitRef, "portrait")?.value,
   "attachments/mara.png",
+);
+
+const variantRef = {
+  frontmatter: {
+    name: "Mara",
+    identity: {
+      portrait: "attachments/mara-young.png",
+      profile: { age: 18, city: "Aster" },
+    },
+    variants: {
+      base: { label: "Young" },
+      veteran: {
+        label: "Veteran",
+        overrides: {
+          name: "Mara, veteran",
+          identity: {
+            portrait: "attachments/mara-veteran.png",
+            profile: { age: 52 },
+          },
+        },
+      },
+    },
+  },
+};
+assert.deepEqual(canonVariantsForRef(variantRef), [
+  { id: "base", label: "Young" },
+  { id: "veteran", label: "Veteran" },
+]);
+const veteranFrontmatter = resolveCanonVariantFrontmatter(variantRef, "veteran");
+assert.equal(veteranFrontmatter.name, "Mara, veteran");
+assert.deepEqual(veteranFrontmatter.identity, {
+  portrait: "attachments/mara-veteran.png",
+  profile: { age: 52, city: "Aster" },
+});
+assert.equal(
+  canonPresentationImageForRef(
+    imageConfig,
+    { kind: "character", frontmatter: veteranFrontmatter },
+    "portrait",
+  )?.value,
+  "attachments/mara-veteran.png",
 );
 
 const invalidYamlFinding = index.findings.find((finding) => finding.code === "invalid_frontmatter");

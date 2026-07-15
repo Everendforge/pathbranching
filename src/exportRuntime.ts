@@ -1,5 +1,6 @@
 import type { BranchingProject, RuntimeChoice, RuntimeNode, RuntimePackage, EventNode } from "./domain.js";
 import { orderedTransitions } from "./logic.js";
+import { UNKNOWN_SPEAKER_REF } from "./speakerRoles.js";
 
 function eventChoices(event: EventNode): RuntimeChoice[] | undefined {
   const outcomeChoices: RuntimeChoice[] = (event.decisions ?? []).flatMap((decision) =>
@@ -71,16 +72,30 @@ export function exportRuntimePackage(project: BranchingProject): RuntimePackage 
     const id = `beat:${event.id}:${beat.id}`;
     const block = scriptBlocks.get(`${beat.blockRef.scriptId}:${beat.blockRef.blockId}`);
     const characterRef = block?.characterRef ?? block?.speakerRef;
+    const sceneImage = beat.kind === "speech" && beat.sceneImage
+      ? (() => {
+          const asset = project.assets?.find((candidate) => candidate.id === beat.sceneImage?.assetId && candidate.kind === "image");
+          return asset ? {
+            id: beat.sceneImage.id,
+            assetId: asset.id,
+            path: asset.path,
+            name: asset.name,
+            extension: asset.extension,
+          } : undefined;
+        })()
+      : undefined;
     return {
       id,
       type: beat.kind === "speech" ? "dialogueBeat" : "directionBeat",
       textKey: block?.textKey ?? `script.${beat.blockRef.scriptId}.${beat.blockRef.blockId}`,
-      characterRef,
-      speakerRef: characterRef ? speakerMappings[characterRef] || characterRef : undefined,
+      characterRef: characterRef === UNKNOWN_SPEAKER_REF ? undefined : characterRef,
+      characterVariantId: characterRef === UNKNOWN_SPEAKER_REF ? undefined : block?.characterVariantId,
+      speakerRef: characterRef === UNKNOWN_SPEAKER_REF ? "unknown" : characterRef ? speakerMappings[characterRef] || characterRef : undefined,
       conditions: beat.displayCondition,
       ruleSetBindings: beat.ruleSetBindings,
       automaticTransitions: orderedTransitions((event.transitions ?? []).filter((transition) => transition.from === id)),
       dialogueId,
+      ...(sceneImage ? { sceneImage } : {}),
     };
   };
   const dialogueNodes: RuntimeNode[] = project.events.flatMap((event) =>

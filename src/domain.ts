@@ -107,6 +107,12 @@ export type ProjectAsset = {
   tags?: string[];
 };
 
+/** An ordered visual cue rendered alongside a speech beat. */
+export type SceneImageAttachment = {
+  id: string;
+  assetId: string;
+};
+
 export type LogicVariableType = "text" | "number" | "boolean" | "list" | "canonRef";
 export type LogicVariableGroup = { id: string; name: string; order: number };
 export type LogicVariable = {
@@ -192,6 +198,8 @@ export type ScriptBlock = {
   characterRef?: string;
   /** @deprecated Use `characterRef`; retained for v0.1 project compatibility. */
   speakerRef?: string;
+  /** Local speech-beat choice of a named WorldNotion variant. */
+  characterVariantId?: string;
 };
 
 export type LocalizationEntry = {
@@ -359,6 +367,12 @@ export type Branch = {
 
 export type EventType = "normal" | "exploration" | "final" | string;
 
+export type SpeechBeatLengthTarget = {
+  unit: "words" | "characters";
+  /** Suggested maximum for every speech beat in this event. */
+  target: number;
+};
+
 export type EventNode = {
   id: string;
   legacyId?: string;
@@ -371,10 +385,14 @@ export type EventNode = {
   branchRef?: string | null;
   script?: ScriptRef;
   canonRefs?: string[];
+  /** Canon location where this event takes place. */
+  locationRef?: string;
   /** Canon entities configured as present in this event. */
   presentEntityRefs?: string[];
   availability?: ConditionInput;
   decisions?: Decision[];
+  /** Optional pacing target displayed on each speech beat in this event. */
+  speechBeatLengthTarget?: SpeechBeatLengthTarget;
   /** Narrative beats authored directly on the event canvas. */
   dialogueBeats?: DialogueBeat[];
   dialogues?: DialogueNode[];
@@ -441,6 +459,12 @@ export type DialogueBeat = {
   id: string;
   kind: "speech" | "direction";
   blockRef: ScriptBlockRef;
+  /** Optional authoring note attached to a speech beat, not spoken aloud. */
+  directorNote?: string;
+  /** Optional visual cue shown while this speech beat is active. */
+  sceneImage?: SceneImageAttachment;
+  /** @deprecated Migrated to the single `sceneImage` attachment. */
+  sceneImages?: SceneImageAttachment[];
   displayCondition?: ConditionInput;
   ruleSetBindings?: RuleSetBinding[];
   ruleSets?: RuleSet[];
@@ -688,6 +712,10 @@ export type CanvasNodeAuthoringState = {
     y: number;
   };
   collapsed?: boolean;
+  auxiliaryPanels?: {
+    directorNote?: boolean;
+    sceneImage?: boolean;
+  };
 };
 
 export type ScopedCanvasAuthoringState = {
@@ -784,12 +812,22 @@ export type RuntimeChoice = {
   lockTextKey?: string;
 };
 
+export type RuntimeSceneImage = {
+  id: string;
+  assetId: string;
+  path: string;
+  name: string;
+  extension?: string;
+};
+
 export type RuntimeNode = {
   id: string;
   type: string;
   textKey?: string;
   speakerRef?: string;
   characterRef?: string;
+  characterVariantId?: string;
+  sceneImage?: RuntimeSceneImage;
   choices?: RuntimeChoice[];
   conditions?: ConditionInput;
   consequences?: Consequence[];
@@ -846,6 +884,9 @@ export type ValidationFinding = {
     | "duplicate_script_binding"
     | "invalid_speaker_role"
     | "invalid_speaker_presence"
+    | "invalid_character_variant"
+    | "missing_scene_image"
+    | "invalid_scene_image"
     | "invalid_dialogue_trigger"
     | "invalid_scope_transition";
   severity: ValidationSeverity;

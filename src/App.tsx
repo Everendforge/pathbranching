@@ -56,6 +56,11 @@ import {
   propertySupportsDialogueTrigger,
 } from "./explorerSchema.js";
 import {
+  canonVariantsForRef,
+  resolveCanonVariantFrontmatter,
+  resolveCanonVariantId,
+} from "./worldnotionVariants.js";
+import {
   AlertTriangle,
   BookOpen,
   Boxes,
@@ -198,6 +203,7 @@ import {
   scriptBlockTextKey,
   updateLocalizedEntry,
 } from "./localization.js";
+import { UNKNOWN_SPEAKER_REF } from "./speakerRoles.js";
 import * as mutations from "./projectMutations.js";
 import {
   exportRuntimeDialog,
@@ -209,6 +215,7 @@ import {
   revealUniverseFolder,
   exportTextDialog,
   importUniverseAssets,
+  importSceneImages,
   indexCanonAssets,
   saveWorkingCopy,
   saveUniverseTextFile,
@@ -358,7 +365,7 @@ function canonRefPath(ref: CanonRef) {
   return ref.canonSourcePath ?? ref.id;
 }
 
-function canonVaultImageUrl(
+function universeAssetUrl(
   project: Pick<BranchingProject, "universeRootPath">,
   relativePath: string,
 ): string | undefined {
@@ -368,6 +375,13 @@ function canonVaultImageUrl(
   return convertFileSrc(
     `${project.universeRootPath.replace(/[\\/]$/, "")}/${normalizedPath}`,
   );
+}
+
+function canonVaultImageUrl(
+  project: Pick<BranchingProject, "universeRootPath">,
+  relativePath: string,
+): string | undefined {
+  return universeAssetUrl(project, relativePath);
 }
 
 function searchablePropertyValues(value: unknown): string[] {
@@ -611,6 +625,98 @@ function updateProjectCanvas(
         : project.canvas?.scopes,
     },
   };
+}
+
+function updateCanvasNodePosition(
+  project: BranchingProject,
+  nodeId: string,
+  position: CanvasPoint,
+  scope = activeCanvasScope(project),
+): BranchingProject {
+  const scopeKey = scope ? canvasScopeKey(scope) : undefined;
+  const nodePosition = {
+    ...(scopeKey
+      ? project.canvas?.scopes?.[scopeKey]?.nodes?.[nodeId]
+      : project.canvas?.nodes?.[nodeId]),
+    position,
+  };
+
+  if (scopeKey && scope?.kind !== "sequence") {
+    return {
+      ...project,
+      canvas: {
+        ...project.canvas,
+        scopes: {
+          ...(project.canvas?.scopes ?? {}),
+          [scopeKey]: {
+            ...(project.canvas?.scopes?.[scopeKey] ?? {}),
+            nodes: {
+              ...(project.canvas?.scopes?.[scopeKey]?.nodes ?? {}),
+              [nodeId]: nodePosition,
+            },
+          },
+        },
+      },
+    };
+  }
+
+  return {
+    ...project,
+    canvas: {
+      ...project.canvas,
+      nodes: {
+        ...(project.canvas?.nodes ?? {}),
+        [nodeId]: nodePosition,
+      },
+    },
+  };
+}
+
+function updateCanvasNodeAuxiliaryPanel(
+  project: BranchingProject,
+  nodeId: string,
+  panel: "directorNote" | "sceneImage",
+  open: boolean,
+  scope = activeCanvasScope(project),
+): BranchingProject {
+  const scopeKey = scope ? canvasScopeKey(scope) : undefined;
+  const currentNode = scopeKey && scope?.kind !== "sequence"
+    ? project.canvas?.scopes?.[scopeKey]?.nodes?.[nodeId]
+    : project.canvas?.nodes?.[nodeId];
+  const nextNode = {
+    ...currentNode,
+    auxiliaryPanels: { ...currentNode?.auxiliaryPanels, [panel]: open },
+  };
+  if (scopeKey && scope?.kind !== "sequence") {
+    return {
+      ...project,
+      canvas: {
+        ...project.canvas,
+        scopes: {
+          ...(project.canvas?.scopes ?? {}),
+          [scopeKey]: {
+            ...(project.canvas?.scopes?.[scopeKey] ?? {}),
+            nodes: { ...(project.canvas?.scopes?.[scopeKey]?.nodes ?? {}), [nodeId]: nextNode },
+          },
+        },
+      },
+    };
+  }
+  return {
+    ...project,
+    canvas: { ...project.canvas, nodes: { ...(project.canvas?.nodes ?? {}), [nodeId]: nextNode } },
+  };
+}
+
+function positionMutationNode(
+  result: mutations.MutationResult,
+  position: CanvasPoint | undefined,
+  scope: CanvasScope | undefined,
+) {
+  const nodeId = result.selection?.type === "node" ? result.selection.id : undefined;
+  return nodeId && position
+    ? { ...result, project: updateCanvasNodePosition(result.project, nodeId, position, scope) }
+    : result;
 }
 
 type CanvasPoint = { x: number; y: number };
@@ -893,6 +999,203 @@ function isPointInside(node: StoryCanvasNode, x: number, y: number) {
     x <= node.position.x + width &&
     y >= node.position.y &&
     y <= node.position.y + height
+  );
+}
+
+type CanvasRect = { x: number; y: number; width: number; height: number };
+
+const DEFAULT_CANVAS_NODE_SIZE = { width: 230, height: 126 };
+const CANVAS_NODE_GAP = 24;
+
+function canvasNodeSize(node: StoryCanvasNode): { width: number; height: number } {
+  return {
+    width: Number(node.width ?? node.measured?.width ?? node.style?.width ?? DEFAULT_CANVAS_NODE_SIZE.width),
+    height: Number(node.height ?? node.measured?.height ?? node.style?.height ?? DEFAULT_CANVAS_NODE_SIZE.height),
+  };
+}
+
+function canvasNodeSizeForKind(kind: StoryCanvasNodeData["kind"]) {
+  switch (kind) {
+    case "branch":
+      return { width: 390, height: 190 };
+    case "decision":
+      return { width: 300, height: 170 };
+    case "speechBeat":
+    case "directionBeat":
+      return { width: 210, height: 106 };
+    case "dialogue":
+      return { width: 230, height: 150 };
+    case "dialogueStart":
+      return { width: 210, height: 88 };
+    default:
+      return DEFAULT_CANVAS_NODE_SIZE;
+  }
+}
+
+type CanvasClipboardKind =
+  | "event"
+  | "branch"
+  | "decision"
+  | "dialogue"
+  | "dialogueStart"
+  | "speechBeat"
+  | "directionBeat"
+  | "outcome";
+
+type CanvasClipboardItem = {
+  kind: CanvasClipboardKind;
+  nodeId: string;
+  position: { x: number; y: number };
+  value: unknown;
+  block?: unknown;
+  eventId?: string;
+  dialogueId?: string;
+  decisionId?: string;
+};
+
+type CanvasClipboard = {
+  scopeKey?: string;
+  items: CanvasClipboardItem[];
+};
+
+function cloneCanvasValue<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function rectanglesOverlap(left: CanvasRect, right: CanvasRect, gap = 0) {
+  return (
+    left.x < right.x + right.width + gap &&
+    left.x + left.width + gap > right.x &&
+    left.y < right.y + right.height + gap &&
+    left.y + left.height + gap > right.y
+  );
+}
+
+function nearestFreeCanvasPosition(
+  nodes: StoryCanvasNode[],
+  requested: CanvasPoint,
+  size: { width: number; height: number },
+  options: { snapToGrid: boolean; gridSize: number; constrainToWorkspace: boolean },
+) {
+  const workspace = nodes.find((node) => node.data.kind === "workspace");
+  const workspaceSize = workspace ? canvasNodeSize(workspace) : undefined;
+  const workspaceBounds = options.constrainToWorkspace && workspace && workspaceSize
+    ? {
+        x: workspace.position.x + CANVAS_NODE_GAP,
+        y: workspace.position.y + CANVAS_NODE_GAP,
+        width: Math.max(0, workspaceSize.width - CANVAS_NODE_GAP * 2),
+        height: Math.max(0, workspaceSize.height - CANVAS_NODE_GAP * 2),
+      }
+    : undefined;
+  const obstacles = nodes
+    .filter((node) => node.data.kind !== "workspace" && !node.data.isContainer)
+    .map((node) => ({
+      x: node.position.x,
+      y: node.position.y,
+      ...canvasNodeSize(node),
+    }));
+  const step = Math.max(24, options.snapToGrid ? options.gridSize : 32);
+  const candidate = (x: number, y: number): CanvasRect => ({
+    x,
+    y,
+    width: size.width,
+    height: size.height,
+  });
+  const fitsWorkspace = (rect: CanvasRect) =>
+    !workspaceBounds || (
+      rect.x >= workspaceBounds.x &&
+      rect.y >= workspaceBounds.y &&
+      rect.x + rect.width <= workspaceBounds.x + workspaceBounds.width &&
+      rect.y + rect.height <= workspaceBounds.y + workspaceBounds.height
+    );
+  const isFree = (rect: CanvasRect) =>
+    fitsWorkspace(rect) && !obstacles.some((obstacle) => rectanglesOverlap(rect, obstacle, CANVAS_NODE_GAP));
+
+  const candidates: CanvasRect[] = [];
+  for (let radius = 0; radius <= 80; radius += 1) {
+    for (let offsetX = -radius; offsetX <= radius; offsetX += 1) {
+      for (let offsetY = -radius; offsetY <= radius; offsetY += 1) {
+        if (radius > 0 && Math.max(Math.abs(offsetX), Math.abs(offsetY)) !== radius) continue;
+        candidates.push(candidate(requested.x + offsetX * step, requested.y + offsetY * step));
+      }
+    }
+    const free = candidates.filter(isFree);
+    if (free.length > 0) {
+      free.sort((left, right) => {
+        const leftDistance = (left.x - requested.x) ** 2 + (left.y - requested.y) ** 2;
+        const rightDistance = (right.x - requested.x) ** 2 + (right.y - requested.y) ** 2;
+        return leftDistance - rightDistance;
+      });
+      return { x: free[0].x, y: free[0].y };
+    }
+  }
+
+  return requested;
+}
+
+function visibleCanvasFlowBounds(reactFlowInstance: ReactFlowInstance<any, any>) {
+  const flowElement = document.querySelector<HTMLElement>(".react-flow");
+  if (!flowElement) return undefined;
+  const rect = flowElement.getBoundingClientRect();
+  const viewport = reactFlowInstance.getViewport();
+  if (!viewport.zoom || !rect.width || !rect.height) return undefined;
+  return {
+    elementWidth: rect.width,
+    elementHeight: rect.height,
+    left: -viewport.x / viewport.zoom,
+    top: -viewport.y / viewport.zoom,
+    right: (rect.width - viewport.x) / viewport.zoom,
+    bottom: (rect.height - viewport.y) / viewport.zoom,
+    viewport,
+  };
+}
+
+function ensureCanvasNodeVisible(
+  reactFlowInstance: ReactFlowInstance<any, any>,
+  node: StoryCanvasNode,
+) {
+  const bounds = visibleCanvasFlowBounds(reactFlowInstance);
+  if (!bounds) return;
+  const size = canvasNodeSize(node);
+  const nodeBounds: CanvasRect = {
+    x: node.position.x,
+    y: node.position.y,
+    width: size.width,
+    height: size.height,
+  };
+  const flowPadding = 32;
+  if (
+    nodeBounds.x >= bounds.left + flowPadding &&
+    nodeBounds.y >= bounds.top + flowPadding &&
+    nodeBounds.x + nodeBounds.width <= bounds.right - flowPadding &&
+    nodeBounds.y + nodeBounds.height <= bounds.bottom - flowPadding
+  ) {
+    return;
+  }
+
+  const union = {
+    left: Math.min(bounds.left, nodeBounds.x),
+    top: Math.min(bounds.top, nodeBounds.y),
+    right: Math.max(bounds.right, nodeBounds.x + nodeBounds.width),
+    bottom: Math.max(bounds.bottom, nodeBounds.y + nodeBounds.height),
+  };
+  const unionWidth = union.right - union.left + flowPadding * 2;
+  const unionHeight = union.bottom - union.top + flowPadding * 2;
+  const nextZoom = Math.min(
+    bounds.viewport.zoom,
+    bounds.elementWidth / unionWidth,
+    bounds.elementHeight / unionHeight,
+  );
+  const zoom = Math.max(0.05, nextZoom);
+  const centerX = (union.left + union.right) / 2;
+  const centerY = (union.top + union.bottom) / 2;
+  reactFlowInstance.setViewport(
+    {
+      x: bounds.elementWidth / 2 - centerX * zoom,
+      y: bounds.elementHeight / 2 - centerY * zoom,
+      zoom,
+    },
+    { duration: 0 },
   );
 }
 
@@ -6104,7 +6407,7 @@ function Inspector({
                       onUpdateScriptBlock(
                         selectedDialogueBeatContext.beat.blockRef.scriptId,
                         selectedDialogueBeatContext.beat.blockRef.blockId,
-                        { characterRef },
+                        { characterRef, characterVariantId: undefined },
                       );
                       if (characterRef && selectedBeatEvent && !selectedBeatPresentEntityRefs.includes(characterRef)) {
                         onUpdateEvent(selectedBeatEvent.id, {
@@ -6113,6 +6416,28 @@ function Inspector({
                       }
                     }}
                   />
+                  {(() => {
+                    const characterRef = selectedDialogueBeatContext.block.characterRef ?? selectedDialogueBeatContext.block.speakerRef;
+                    const canonRef = project.canonRefs.find((ref) => ref.id === characterRef);
+                    const variants = canonRef ? canonVariantsForRef(canonRef) : [];
+                    return canonRef && variants.length > 1 ? (
+                      <label className="field-label">
+                        Character variant
+                        <select
+                          value={resolveCanonVariantId(canonRef, selectedDialogueBeatContext.block.characterVariantId)}
+                          onChange={(event) =>
+                            onUpdateScriptBlock(
+                              selectedDialogueBeatContext.beat.blockRef.scriptId,
+                              selectedDialogueBeatContext.beat.blockRef.blockId,
+                              { characterVariantId: event.target.value === "base" ? undefined : event.target.value },
+                            )
+                          }
+                        >
+                          {variants.map((variant) => <option key={variant.id} value={variant.id}>{variant.label}</option>)}
+                        </select>
+                      </label>
+                    ) : null;
+                  })()}
                   {(selectedDialogueBeatContext.block.characterRef ?? selectedDialogueBeatContext.block.speakerRef) &&
                   !selectedBeatPresentEntityRefs.includes(selectedDialogueBeatContext.block.characterRef ?? selectedDialogueBeatContext.block.speakerRef ?? "") ? (
                     <p className="warning-text">This speaker is not present in the event yet. Choose it from the search results to add it automatically.</p>
@@ -6256,7 +6581,7 @@ function Inspector({
                   onUpdateScriptBlock(
                     selectedDialogueFirstBeat.blockRef.scriptId,
                     selectedDialogueFirstBeat.blockRef.blockId,
-                    { characterRef },
+                    { characterRef, characterVariantId: undefined },
                   );
                   if (characterRef && selectedDialogueEvent && !selectedDialoguePresentEntityRefs.includes(characterRef)) {
                     onUpdateEvent(selectedDialogueEvent.id, {
@@ -6265,6 +6590,28 @@ function Inspector({
                   }
                 }}
               />
+              {(() => {
+                const characterRef = selectedDialogueFirstBlock?.characterRef ?? selectedDialogueFirstBlock?.speakerRef;
+                const canonRef = project.canonRefs.find((ref) => ref.id === characterRef);
+                const variants = canonRef ? canonVariantsForRef(canonRef) : [];
+                return canonRef && selectedDialogueFirstBeat && variants.length > 1 ? (
+                  <label className="field-label">
+                    Character variant
+                    <select
+                      value={resolveCanonVariantId(canonRef, selectedDialogueFirstBlock?.characterVariantId)}
+                      onChange={(event) =>
+                        onUpdateScriptBlock(
+                          selectedDialogueFirstBeat.blockRef.scriptId,
+                          selectedDialogueFirstBeat.blockRef.blockId,
+                          { characterVariantId: event.target.value === "base" ? undefined : event.target.value },
+                        )
+                      }
+                    >
+                      {variants.map((variant) => <option key={variant.id} value={variant.id}>{variant.label}</option>)}
+                    </select>
+                  </label>
+                ) : null;
+              })()}
               <label className="field-label">
                 Text
                 <textarea
@@ -7857,6 +8204,8 @@ function StoryCanvas({
   onUpdateDialogue,
   onUpdateDialogueBeat,
   onUpdateEventDialogueBeat,
+  onImportSceneImage,
+  onAuxiliaryPanelChange,
   onUpdateScriptBlock,
   onUpdateLocalizedText,
   onDeleteDialogueBeat,
@@ -7990,10 +8339,10 @@ function StoryCanvas({
   onUpdateBranch: (id: string, updates: Partial<Branch>) => void;
   onCreateEventInBranch: (branchId: string, type?: EventType) => void;
   onUpdateEvent: (id: string, updates: Partial<EventNode>) => void;
-  onCreateDecision: (eventId: string, dialogueId?: string) => void;
-  onCreateDialogue: (eventId: string) => void;
-  onCreateDialogueBeat: (eventId: string, dialogueId: string, kind: DialogueBeat["kind"]) => void;
-  onCreateEventDialogueBeat: (eventId: string, kind: DialogueBeat["kind"]) => void;
+  onCreateDecision: (eventId: string, dialogueId?: string, position?: CanvasPoint) => void;
+  onCreateDialogue: (eventId: string, position?: CanvasPoint) => void;
+  onCreateDialogueBeat: (eventId: string, dialogueId: string, kind: DialogueBeat["kind"], position?: CanvasPoint) => void;
+  onCreateEventDialogueBeat: (eventId: string, kind: DialogueBeat["kind"], position?: CanvasPoint) => void;
   onUpdateDecision: (
     eventId: string,
     decisionId: string,
@@ -8006,6 +8355,8 @@ function StoryCanvas({
   ) => void;
   onUpdateDialogueBeat: (eventId: string, dialogueId: string, beatId: string, updates: Partial<DialogueBeat>) => void;
   onUpdateEventDialogueBeat: (eventId: string, beatId: string, updates: Partial<DialogueBeat>) => void;
+  onImportSceneImage: (eventId: string, dialogueId: string | undefined, beatId: string) => void;
+  onAuxiliaryPanelChange: (nodeId: string, panel: "directorNote" | "sceneImage", open: boolean) => void;
   onUpdateScriptBlock: (scriptId: string, blockId: string, updates: Partial<ScriptBlock>) => void;
   onUpdateLocalizedText: (textKey: string, locale: string, value: string) => void;
   onDeleteDialogueBeat: (eventId: string, dialogueId: string, beatId: string) => void;
@@ -8086,7 +8437,7 @@ function StoryCanvas({
   onGroupDialogueMembers: (nodeIds: string[]) => void;
   onDetachDialogueMembers: (nodeIds: string[]) => void;
   onDissolveDialogue: (eventId: string, dialogueId: string) => void;
-  onCreateDialogueStart: (eventId: string) => void;
+  onCreateDialogueStart: (eventId: string, position?: CanvasPoint) => void;
   onActivateMarkdownTab: (id: string) => void;
   onCloseMarkdownTab: (id: string) => void;
   onChangeMarkdownContent: (id: string, content: string) => void;
@@ -8121,11 +8472,20 @@ function StoryCanvas({
   } | undefined>(undefined);
   const draggedNodeRef = useRef(false);
   const [reactFlowInstance, setReactFlowInstance] =
-    useState<ReactFlowInstance<StoryCanvasNode, StoryCanvasEdge>>();
+    useState<ReactFlowInstance<any, any>>();
   const [contextMenu, setContextMenu] = useState<CanvasContextMenu>();
   const [editingEdgeId, setEditingEdgeId] = useState<string>();
   const [draggingEvent, setDraggingEvent] = useState(false);
   const [minimapOpen, setMinimapOpen] = useState(true);
+  const [canvasLocale, setCanvasLocale] = useState(primaryLocale);
+  const [canvasLocaleMenuOpen, setCanvasLocaleMenuOpen] = useState(false);
+  const canvasLocaleOptions = useMemo(
+    () => normalizeLocaleList(primaryLocale, locales),
+    [locales, primaryLocale],
+  );
+  useEffect(() => {
+    setCanvasLocale((current) => canvasLocaleOptions.includes(current) ? current : primaryLocale);
+  }, [canvasLocaleOptions, primaryLocale]);
 
   const clearPendingNodeClick = useCallback(() => {
     const pending = pendingNodeClickRef.current;
@@ -8246,41 +8606,114 @@ function StoryCanvas({
             typeof (node.data.details?.beat as { blockRef?: { scriptId?: unknown; blockId?: unknown } } | undefined)?.blockRef?.blockId === "string"
               ? (() => {
                   const block = node.data.details?.block as ScriptBlock | undefined;
-                  const blockRef = (node.data.details!.beat as DialogueBeat).blockRef;
+                  const beat = node.data.details!.beat as DialogueBeat;
+                  const blockRef = beat.blockRef;
                   const textKey = block?.textKey ?? scriptBlockTextKey(blockRef.scriptId, blockRef.blockId);
                   const beatEventId = typeof node.data.details?.eventId === "string" ? node.data.details.eventId : undefined;
                   const beatEvent = beatEventId ? project.events.find((event) => event.id === beatEventId) : undefined;
                   const presentEntityRefs = beatEvent?.presentEntityRefs ?? beatEvent?.canonRefs ?? [];
                   const currentCharacterRef = block?.characterRef ?? block?.speakerRef;
+                  const currentCanonRef = project.canonRefs.find((canonRef) => canonRef.id === currentCharacterRef);
+                  const activeScopeKey = activeScope && activeScope.kind !== "sequence" ? canvasScopeKey(activeScope) : undefined;
+                  const auxiliaryPanels = activeScopeKey
+                    ? project.canvas?.scopes?.[activeScopeKey]?.nodes?.[node.id]?.auxiliaryPanels
+                    : project.canvas?.nodes?.[node.id]?.auxiliaryPanels;
+                  const activeText = block
+                    ? blockValues(project, blockRef.scriptId, block, primaryLocale)[canvasLocale] ?? ""
+                    : "";
+                  const lengthTarget = beat.kind === "speech" ? beatEvent?.speechBeatLengthTarget : undefined;
+                  const textCount = !lengthTarget
+                    ? 0
+                    : lengthTarget.unit === "words"
+                      ? activeText.trim() ? activeText.trim().split(/\s+/u).length : 0
+                      : Array.from(activeText).length;
                   return {
                     values: block ? blockValues(project, blockRef.scriptId, block, primaryLocale) : {},
+                    directorNote: beat.directorNote ?? "",
+                    sceneImage: (() => {
+                      const attachment = beat.sceneImage;
+                      const asset = attachment ? project.assets?.find((candidate) => candidate.id === attachment.assetId && candidate.kind === "image") : undefined;
+                      return attachment && asset ? { ...attachment, name: asset.name, url: universeAssetUrl(project, asset.path) } : undefined;
+                    })(),
+                    imageAssets: (project.assets ?? [])
+                      .filter((asset) => asset.kind === "image" && ["png", "jpg", "jpeg"].includes(asset.extension?.toLowerCase() ?? ""))
+                      .map((asset) => ({ id: asset.id, name: asset.name })),
+                    directorNoteOpen: auxiliaryPanels?.directorNote ?? false,
+                    sceneImageOpen: auxiliaryPanels?.sceneImage ?? false,
                     primaryLocale,
+                    activeLocale: canvasLocale,
                     languages: normalizeLocaleList(primaryLocale, locales),
                     localeNames,
                     characterRef: currentCharacterRef,
+                    characterVariantId: currentCanonRef
+                      ? resolveCanonVariantId(currentCanonRef, block?.characterVariantId)
+                      : undefined,
+                    textCounter: lengthTarget && lengthTarget.target > 0
+                      ? { count: textCount, unit: lengthTarget.unit, target: lengthTarget.target }
+                      : undefined,
                     speakerOptions: project.canonRefs
                       .filter((canonRef) => presentEntityRefs.includes(canonRef.id) || canonRef.id === currentCharacterRef)
                       .map((canonRef) => {
-                        const portrait = canonPresentationImageForRef(
-                          propertiesConfig,
-                          canonRef,
-                          "portrait",
-                        );
+                        const variants = canonVariantsForRef(canonRef).map((variant) => {
+                          const portrait = canonPresentationImageForRef(
+                            propertiesConfig,
+                            { ...canonRef, frontmatter: resolveCanonVariantFrontmatter(canonRef, variant.id) },
+                            "portrait",
+                          );
+                          return {
+                            ...variant,
+                            portraitUrl: portrait ? canonVaultImageUrl(project, portrait.value) : undefined,
+                          };
+                        });
+                        const portrait = variants.find((variant) => variant.id === "base")?.portraitUrl;
                         return {
                           id: canonRef.id,
                           label: canonRef.label ?? canonRef.id,
-                          portraitUrl: portrait
-                            ? canonVaultImageUrl(project, portrait.value)
-                            : undefined,
+                          portraitUrl: portrait,
+                          variants,
                         };
                       }),
                     onTextUpdate: (locale: string, value: string) => onUpdateLocalizedText(textKey, locale, value),
+                    onDirectorNoteUpdate: (value: string) => {
+                      const dialogueId = typeof node.data.details?.dialogueId === "string"
+                        ? node.data.details.dialogueId
+                        : undefined;
+                      if (dialogueId) {
+                        onUpdateDialogueBeat(beatEventId!, dialogueId, beat.id, { directorNote: value });
+                      } else if (beatEventId) {
+                        onUpdateEventDialogueBeat(beatEventId, beat.id, { directorNote: value });
+                      }
+                    },
+                    onSceneImageUpdate: (assetId?: string) => {
+                      const dialogueId = typeof node.data.details?.dialogueId === "string"
+                        ? node.data.details.dialogueId
+                        : undefined;
+                      const sceneImage = assetId
+                        ? { id: beat.sceneImage?.id ?? `scene-image:${crypto.randomUUID()}`, assetId }
+                        : undefined;
+                      if (dialogueId) {
+                        onUpdateDialogueBeat(beatEventId!, dialogueId, beat.id, { sceneImage });
+                      } else if (beatEventId) {
+                        onUpdateEventDialogueBeat(beatEventId, beat.id, { sceneImage });
+                      }
+                    },
+                    onImportSceneImage: () => {
+                      const dialogueId = typeof node.data.details?.dialogueId === "string"
+                        ? node.data.details.dialogueId
+                        : undefined;
+                      if (beatEventId) onImportSceneImage(beatEventId, dialogueId, beat.id);
+                    },
+                    onAuxiliaryPanelChange: (panel: "directorNote" | "sceneImage", open: boolean) => onAuxiliaryPanelChange(node.id, panel, open),
                     onCharacterUpdate: (characterRef?: string) => {
-                      onUpdateScriptBlock(blockRef.scriptId, blockRef.blockId, { characterRef });
-                      if (characterRef && beatEvent && !presentEntityRefs.includes(characterRef)) {
+                      onUpdateScriptBlock(blockRef.scriptId, blockRef.blockId, { characterRef, characterVariantId: undefined });
+                      if (characterRef && characterRef !== UNKNOWN_SPEAKER_REF && beatEvent && !presentEntityRefs.includes(characterRef)) {
                         onUpdateEvent(beatEvent.id, { presentEntityRefs: [...presentEntityRefs, characterRef] });
                       }
                     },
+                    onCharacterVariantUpdate: (characterVariantId: string) =>
+                      onUpdateScriptBlock(blockRef.scriptId, blockRef.blockId, {
+                        characterVariantId: characterVariantId === "base" ? undefined : characterVariantId,
+                      }),
                   };
                 })()
               : undefined,
@@ -8313,7 +8746,7 @@ function StoryCanvas({
         };
       }),
     }),
-    [activeScope, canvasBackground.connectionPadding, commitEdgeLabel, editingEdgeId, edges, inspectorEdgeStates, inspectorNodeStates, localeNames, locales, nodes, onCreateBoundaryEnd, onCreateBoundaryRoute, onCreateBoundaryRouteEvent, onDeleteBoundaryEnd, onUpdateEvent, onUpdateLocalizedText, onUpdateScriptBlock, onUpdateTransition, onWorkspaceBoundsChange, primaryLocale, project],
+    [activeScope, canvasBackground.connectionPadding, canvasLocale, commitEdgeLabel, editingEdgeId, edges, inspectorEdgeStates, inspectorNodeStates, localeNames, locales, nodes, onAuxiliaryPanelChange, onCreateBoundaryEnd, onCreateBoundaryRoute, onCreateBoundaryRouteEvent, onDeleteBoundaryEnd, onImportSceneImage, onUpdateDialogueBeat, onUpdateEvent, onUpdateEventDialogueBeat, onUpdateLocalizedText, onUpdateScriptBlock, onUpdateTransition, onWorkspaceBoundsChange, primaryLocale, project],
   );
   const activeEventScope =
     activeScope?.kind === "event"
@@ -8429,18 +8862,83 @@ function StoryCanvas({
     : selection;
   const inspectorShowsManualSave =
     manualInspectorEnabled && Boolean(manualInspectorDraftKey(inspectorSelection));
+  const fitViewNodesRef = useRef<StoryCanvasNode[]>([]);
+  fitViewNodesRef.current = graph.nodes.filter((node) => {
+    if (activeScope?.kind === "sequence") return true;
+    return node.data.kind !== "workspace" && node.data.kind !== "boundary" && node.data.kind !== "endAdder";
+  });
 
+  const fittedCanvasRef = useRef<{ projectKey: string; scopeKey: string } | undefined>(undefined);
+  const hasFitViewNodesRef = useRef(false);
+  const canvasScopeKeyValue = activeScope ? canvasScopeKey(activeScope) : "";
+  const canvasProjectKey = `${project.projectId}:${project.storyId ?? ""}`;
+  const canvasNodeIdSignature = graph.nodes.map((node) => node.id).join("|");
   useEffect(() => {
     if (!reactFlowInstance) {
       return;
     }
+    const fitNodes = fitViewNodesRef.current;
+    const hasFitNodes = fitNodes.length > 0;
+    const fittedCanvas = fittedCanvasRef.current;
+    const scopeChanged =
+      !fittedCanvas ||
+      fittedCanvas.projectKey !== canvasProjectKey ||
+      fittedCanvas.scopeKey !== canvasScopeKeyValue;
+    const nodesBecameAvailable = !hasFitViewNodesRef.current && hasFitNodes;
+    hasFitViewNodesRef.current = hasFitNodes;
+    if (!hasFitNodes || (!scopeChanged && !nodesBecameAvailable)) {
+      return;
+    }
+    fittedCanvasRef.current = {
+      projectKey: canvasProjectKey,
+      scopeKey: canvasScopeKeyValue,
+    };
     window.requestAnimationFrame(() => {
       reactFlowInstance.fitView({
+        nodes: fitNodes,
         padding: activeScope?.kind === "event" ? 0.3 : 0.24,
-        duration: 180,
+        duration: 0,
       });
     });
-  }, [activeScope, graph.nodes.length, reactFlowInstance]);
+  }, [activeScope, canvasNodeIdSignature, canvasProjectKey, canvasScopeKeyValue, reactFlowInstance]);
+
+  const previousCanvasNodeIdsRef = useRef<{ scopeKey: string; ids: Set<string> } | undefined>(undefined);
+  useEffect(() => {
+    const scopeKey = activeScope ? canvasScopeKey(activeScope) : "";
+    const currentIds = new Set(graph.nodes.map((node) => node.id));
+    const previous = previousCanvasNodeIdsRef.current;
+    previousCanvasNodeIdsRef.current = { scopeKey, ids: currentIds };
+    if (!previous || previous.scopeKey !== scopeKey || !reactFlowInstance) return;
+
+    const createdNode = graph.nodes.find((node) => !previous.ids.has(node.id));
+    if (!createdNode) return;
+    window.requestAnimationFrame(() => {
+      ensureCanvasNodeVisible(reactFlowInstance, createdNode);
+    });
+  }, [activeScope, canvasNodeIdSignature, graph.nodes, reactFlowInstance]);
+
+  const positionForNewNode = useCallback(
+    (position: CanvasPoint, kind: StoryCanvasNodeData["kind"]) =>
+      nearestFreeCanvasPosition(
+        nodes,
+        snapCanvasPoint(
+          position,
+          canvasBackground.snapToGrid,
+          canvasBackground.gridSize,
+        ),
+        canvasNodeSizeForKind(kind),
+        {
+          snapToGrid: canvasBackground.snapToGrid,
+          gridSize: canvasBackground.gridSize,
+          constrainToWorkspace: Boolean(
+            activeScope &&
+            activeScope.kind !== "sequence" &&
+            project.canvas?.scopes?.[canvasScopeKey(activeScope)]?.workspace?.manual,
+          ),
+        },
+      ),
+    [activeScope, canvasBackground.gridSize, canvasBackground.snapToGrid, nodes, project.canvas?.scopes],
+  );
 
   const openContextMenu = useCallback(
     (event: MouseEvent | ReactMouseEvent) => {
@@ -8713,6 +9211,33 @@ function StoryCanvas({
           })}
         </div>
       </div>
+      <div className="canvas-locale-control">
+        <button
+          type="button"
+          aria-label="Canvas language"
+          aria-haspopup="listbox"
+          aria-expanded={canvasLocaleMenuOpen}
+          onClick={() => setCanvasLocaleMenuOpen((open) => !open)}
+        >
+          <Globe2 size={14} aria-hidden="true" />
+          <span>{localeDisplayName(canvasLocale, localeNames)}</span>
+          <ChevronDown size={13} aria-hidden="true" />
+        </button>
+        {canvasLocaleMenuOpen ? <div className="canvas-locale-menu" role="listbox" aria-label="Canvas language">
+          {canvasLocaleOptions.map((locale) => <button
+            key={locale}
+            type="button"
+            role="option"
+            aria-selected={locale === canvasLocale}
+            onClick={() => {
+              setCanvasLocale(locale);
+              setCanvasLocaleMenuOpen(false);
+            }}
+          >
+            {localeDisplayName(locale, localeNames)}{locale === primaryLocale ? " · Primary" : ""}
+          </button>)}
+        </div> : null}
+      </div>
 
       <ReactFlowProvider>
         <ReactFlow
@@ -8743,6 +9268,7 @@ function StoryCanvas({
             setContextMenu(undefined);
             setEditingEdgeId(undefined);
             if (node.data.kind === "workspace") return;
+            if (event.target instanceof Element && event.target.closest("input, textarea, select, button, [contenteditable=\"true\"]")) return;
             if (draggedNodeRef.current || event.shiftKey) return;
             const now = Date.now();
             const pending = pendingNodeClickRef.current;
@@ -8805,8 +9331,6 @@ function StoryCanvas({
             }
           }}
           onPaneContextMenu={openContextMenu}
-          fitView
-          fitViewOptions={{ padding: 0.24 }}
           defaultViewport={project.canvas?.viewport}
           proOptions={{ hideAttribution: true }}
           snapToGrid={canvasBackground.snapToGrid}
@@ -8872,6 +9396,22 @@ function StoryCanvas({
                 const contextNode = contextMenu.contextNodeId
                   ? nodes.find((node) => node.id === contextMenu.contextNodeId)
                   : undefined;
+                const canOpenScript =
+                  (contextNode?.data.kind === "speechBeat" || contextNode?.data.kind === "directionBeat") &&
+                  typeof contextNode.data.details?.eventId === "string";
+                if (canOpenScript && contextNode) {
+                  return (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        openNodeCanvas(contextNode);
+                        setContextMenu(undefined);
+                      }}
+                    >
+                      Open script
+                    </button>
+                  );
+                }
                 if (contextNode?.data.kind !== "event") return null;
                 return (
                   <button
@@ -8958,16 +9498,48 @@ function StoryCanvas({
               <button
                 type="button"
                 onClick={() => {
-                  onCreateDialogueBeat(activeDialogueScope.eventId, activeDialogueScope.id, "speech");
+                  onCreateDialogueBeat(
+                    activeDialogueScope.eventId,
+                    activeDialogueScope.id,
+                    "speech",
+                    positionForNewNode(
+                      { x: contextMenu.flowX, y: contextMenu.flowY },
+                      "speechBeat",
+                    ),
+                  );
                   setContextMenu(undefined);
                 }}
-              >
-                Speech Beat
-              </button>
-              <button
+                >
+                  Speech Beat
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onCreateDialogueBeat(
+                      activeDialogueScope.eventId,
+                      activeDialogueScope.id,
+                      "direction",
+                      positionForNewNode(
+                        { x: contextMenu.flowX, y: contextMenu.flowY },
+                        "directionBeat",
+                      ),
+                    );
+                    setContextMenu(undefined);
+                  }}
+                >
+                  Director Direction
+                </button>
+                <button
                 type="button"
                 onClick={() => {
-                  onCreateDecision(activeDialogueScope.eventId, activeDialogueScope.id);
+                  onCreateDecision(
+                    activeDialogueScope.eventId,
+                    activeDialogueScope.id,
+                    positionForNewNode(
+                      { x: contextMenu.flowX, y: contextMenu.flowY },
+                      "decision",
+                    ),
+                  );
                   setContextMenu(undefined);
                 }}
               >
@@ -8984,14 +9556,19 @@ function StoryCanvas({
                   if (contextMenu.sourceNodeId) {
                     if (activeEventScope) {
                       onCreateNestedEvent(activeEventScope.id, categoryId, {
-                        x: contextMenu.flowX,
-                        y: contextMenu.flowY,
+                        ...positionForNewNode(
+                          { x: contextMenu.flowX, y: contextMenu.flowY },
+                          "event",
+                        ),
                       });
                     } else {
                       onCreateConnectedEvent(
                         contextMenu.sourceNodeId,
                         categoryId,
-                        { x: contextMenu.flowX, y: contextMenu.flowY },
+                        positionForNewNode(
+                          { x: contextMenu.flowX, y: contextMenu.flowY },
+                          "event",
+                        ),
                       );
                     }
                   }
@@ -9010,13 +9587,17 @@ function StoryCanvas({
                 onSelect={(categoryId) => {
                   if (activeEventScope) {
                     onCreateNestedEvent(activeEventScope.id, categoryId, {
-                      x: contextMenu.flowX,
-                      y: contextMenu.flowY,
+                      ...positionForNewNode(
+                        { x: contextMenu.flowX, y: contextMenu.flowY },
+                        "event",
+                      ),
                     });
                   } else {
                     onCreateEvent(categoryId, {
-                      x: contextMenu.flowX,
-                      y: contextMenu.flowY,
+                      ...positionForNewNode(
+                        { x: contextMenu.flowX, y: contextMenu.flowY },
+                        "event",
+                      ),
                     });
                   }
                   setContextMenu(undefined);
@@ -9027,7 +9608,14 @@ function StoryCanvas({
                   <button
                     type="button"
                     onClick={() => {
-                      onCreateDecision(activeEventScope.id);
+                      onCreateDecision(
+                        activeEventScope.id,
+                        undefined,
+                        positionForNewNode(
+                          { x: contextMenu.flowX, y: contextMenu.flowY },
+                          "decision",
+                        ),
+                      );
                       setContextMenu(undefined);
                     }}
                   >
@@ -9036,16 +9624,45 @@ function StoryCanvas({
                   <button
                     type="button"
                     onClick={() => {
-                      onCreateEventDialogueBeat(activeEventScope.id, "speech");
+                      onCreateEventDialogueBeat(
+                        activeEventScope.id,
+                        "speech",
+                        positionForNewNode(
+                          { x: contextMenu.flowX, y: contextMenu.flowY },
+                          "speechBeat",
+                        ),
+                      );
                       setContextMenu(undefined);
                     }}
-                  >
-                    Speech Beat
-                  </button>
-                  <button
+                    >
+                      Speech Beat
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onCreateEventDialogueBeat(
+                          activeEventScope.id,
+                          "direction",
+                          positionForNewNode(
+                            { x: contextMenu.flowX, y: contextMenu.flowY },
+                            "directionBeat",
+                          ),
+                        );
+                        setContextMenu(undefined);
+                      }}
+                    >
+                      Director Direction
+                    </button>
+                    <button
                     type="button"
                     onClick={() => {
-                      onCreateDialogue(activeEventScope.id);
+                      onCreateDialogue(
+                        activeEventScope.id,
+                        positionForNewNode(
+                          { x: contextMenu.flowX, y: contextMenu.flowY },
+                          "dialogue",
+                        ),
+                      );
                       setContextMenu(undefined);
                     }}
                   >
@@ -9054,7 +9671,13 @@ function StoryCanvas({
                   <button
                     type="button"
                     onClick={() => {
-                      onCreateDialogueStart(activeEventScope.id);
+                      onCreateDialogueStart(
+                        activeEventScope.id,
+                        positionForNewNode(
+                          { x: contextMenu.flowX, y: contextMenu.flowY },
+                          "dialogueStart",
+                        ),
+                      );
                       setContextMenu(undefined);
                     }}
                   >
@@ -9291,6 +9914,8 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
   const workspaceRef = useRef<PathBranchingWorkspace | undefined>(undefined);
   const fileStateRef = useRef<ProjectFileState>({ dirty: false });
   const selectionRef = useRef<Selection | undefined>(undefined);
+  const canvasClipboardRef = useRef<CanvasClipboard | undefined>(undefined);
+  const canvasPasteOffsetRef = useRef(0);
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const persistProjectRef = useRef<
     ((options?: { manual?: boolean }) => Promise<void>) | undefined
@@ -9343,6 +9968,7 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
       const model = buildStoryCanvasModel(normalizedProject, {
         nodeColors: settingsRef.current.nodeColors,
         scope: normalizedScope,
+        gridSize: settingsRef.current.canvasBackground.gridSize,
       });
       if (options.dirty || options.revision) {
         projectRevisionRef.current += 1;
@@ -9415,6 +10041,7 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
       const model = buildStoryCanvasModel(activeProjectWithScope, {
         nodeColors: settingsRef.current.nodeColors,
         scope: normalizedScope,
+        gridSize: settingsRef.current.canvasBackground.gridSize,
       });
       workspaceRef.current = nextWorkspace;
       projectRef.current = activeProjectWithScope;
@@ -9535,6 +10162,7 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
         const model = buildStoryCanvasModel(snapshot.project, {
           nodeColors: settingsRef.current.nodeColors,
           scope: snapshotScope,
+          gridSize: settingsRef.current.canvasBackground.gridSize,
         });
         setProject(snapshot.project);
         setActiveScopeState(snapshotScope);
@@ -9649,6 +10277,18 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
       commitCanvasAction(label, result);
     },
     [commitCanvasAction],
+  );
+
+  const changeAuxiliaryPanel = useCallback(
+    (nodeId: string, panel: "directorNote" | "sceneImage", open: boolean) => {
+      const currentProject = projectRef.current;
+      if (!currentProject) return;
+      commitCanvasAction(
+        open ? "Expanded beat panel" : "Collapsed beat panel",
+        updateCanvasNodeAuxiliaryPanel(currentProject, nodeId, panel, open, activeScope ?? activeCanvasScope(currentProject)),
+      );
+    },
+    [activeScope, commitCanvasAction],
   );
 
   const updateManualInspectorDraft = useCallback(
@@ -10447,6 +11087,7 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
     const model = buildStoryCanvasModel(currentProject, {
       nodeColors: settings.nodeColors,
       scope,
+      gridSize: settings.canvasBackground.gridSize,
     });
     setActiveScopeState(scope);
     setNodes(model.nodes);
@@ -11238,6 +11879,52 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
     }
   }, [commitStructuralAction, fileState.universePath]);
 
+  const importSceneImageForBeat = useCallback(async (
+    eventId: string,
+    dialogueId: string | undefined,
+    beatId: string,
+  ) => {
+    if (!fileState.universePath) {
+      setMessage("Open a universe before importing scene images.");
+      return;
+    }
+    try {
+      const imported = await importSceneImages(fileState.universePath);
+      if (imported.length === 0) return;
+      const current = projectRef.current;
+      if (!current) return;
+      const event = current.events.find((candidate) => candidate.id === eventId);
+      const beat = dialogueId
+        ? event?.dialogues?.find((dialogue) => dialogue.id === dialogueId)?.beats?.find((candidate) => candidate.id === beatId)
+        : event?.dialogueBeats?.find((candidate) => candidate.id === beatId);
+      if (!beat || beat.kind !== "speech") {
+        setError("Scene images can only be added to an existing speech beat.");
+        return;
+      }
+      const importedAt = new Date().toISOString();
+      const registered = imported.map((asset) => ({
+        ...asset,
+        id: `asset:${crypto.randomUUID()}`,
+        origin: "uncanon" as const,
+        importedAt,
+      }));
+      const sceneImage = { id: beat.sceneImage?.id ?? `scene-image:${crypto.randomUUID()}`, assetId: registered[0].id };
+      const withAssets: BranchingProject = {
+        ...current,
+        assets: [...(current.assets ?? []), ...registered],
+      };
+      const result = dialogueId
+        ? mutations.updateDialogueBeat(withAssets, eventId, dialogueId, beatId, { sceneImage })
+        : mutations.updateEventDialogueBeat(withAssets, eventId, beatId, { sceneImage });
+      await commitStructuralAction("Set scene image", {
+        project: result.project,
+        message: "Set scene image.",
+      });
+    } catch (assetError) {
+      setError(assetError instanceof Error ? assetError.message : String(assetError));
+    }
+  }, [commitStructuralAction, fileState.universePath]);
+
   useEffect(() => {
     if (!desktopRuntime || !fileState.universePath) return;
     let cancelled = false;
@@ -11486,6 +12173,7 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
       const model = buildStoryCanvasModel(nextProject, {
         nodeColors: settingsRef.current.nodeColors,
         scope: normalizedScope,
+        gridSize: settingsRef.current.canvasBackground.gridSize,
       });
       projectRef.current = nextProject;
       setProject(nextProject);
@@ -12005,6 +12693,24 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
     [eventDraft?.eventId, mutateEventDraft, runCanvasMutation],
   );
 
+  const createScriptTransition = useCallback(
+    (eventId: string, from: string, to: string) => {
+      const currentProject = projectRef.current;
+      if (!currentProject) return;
+      if (eventDraft?.eventId === eventId) {
+        mutateEventDraft((draftProject) =>
+          mutations.createInternalTransition(draftProject, eventId, from, to),
+        );
+        return;
+      }
+      runCanvasMutation(
+        mutations.createInternalTransition(currentProject, eventId, from, to),
+        "Created script transition",
+      );
+    },
+    [eventDraft?.eventId, mutateEventDraft, runCanvasMutation],
+  );
+
   const createBoundaryRouteEvent = useCallback(
     (eventId: string) => {
       if (!isTauriRuntime()) {
@@ -12346,7 +13052,7 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
   );
 
   const createDecision = useCallback(
-    (eventId: string, dialogueId?: string) => {
+    (eventId: string, dialogueId?: string, position?: CanvasPoint) => {
       const currentProject = projectRef.current;
       if (!currentProject) {
         return;
@@ -12355,18 +13061,29 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
         const draftProject = applyEventDraftToProject(currentProject, eventDraft);
         setEventDraft(undefined);
         runCanvasMutation(
-          mutations.createDecision(draftProject, eventId, dialogueId),
+          positionMutationNode(
+            mutations.createDecision(draftProject, eventId, dialogueId),
+            position,
+            activeScope,
+          ),
           "Created decision",
         );
         return;
       }
-      runCanvasMutation(mutations.createDecision(currentProject, eventId, dialogueId));
+      runCanvasMutation(
+        positionMutationNode(
+          mutations.createDecision(currentProject, eventId, dialogueId),
+          position,
+          activeScope,
+        ),
+        "Created decision",
+      );
     },
-    [eventDraft, runCanvasMutation],
+    [activeScope, eventDraft, runCanvasMutation],
   );
 
   const createDialogue = useCallback(
-    (eventId: string) => {
+    (eventId: string, position?: CanvasPoint) => {
       const currentProject = projectRef.current;
       if (!currentProject) {
         return;
@@ -12375,17 +13092,25 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
         const draftProject = applyEventDraftToProject(currentProject, eventDraft);
         setEventDraft(undefined);
         runCanvasMutation(
-          mutations.createDialogue(draftProject, eventId),
+          positionMutationNode(
+            mutations.createDialogue(draftProject, eventId),
+            position,
+            activeScope,
+          ),
           "Created dialogue",
         );
         return;
       }
       runCanvasMutation(
-        mutations.createDialogue(currentProject, eventId),
+        positionMutationNode(
+          mutations.createDialogue(currentProject, eventId),
+          position,
+          activeScope,
+        ),
         "Created dialogue",
       );
     },
-    [eventDraft, runCanvasMutation],
+    [activeScope, eventDraft, runCanvasMutation],
   );
 
   const updateDecision = useCallback(
@@ -12427,7 +13152,7 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
   );
 
   const createDialogueBeat = useCallback(
-    (eventId: string, dialogueId: string, kind: DialogueBeat["kind"]) => {
+    (eventId: string, dialogueId: string, kind: DialogueBeat["kind"], position?: CanvasPoint) => {
       const currentProject = projectRef.current;
       if (!currentProject) return;
       const sourceProject =
@@ -12436,15 +13161,19 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
           : currentProject;
       if (eventDraft?.eventId === eventId) setEventDraft(undefined);
       runCanvasMutation(
-        mutations.createDialogueBeat(sourceProject, eventId, dialogueId, kind),
+        positionMutationNode(
+          mutations.createDialogueBeat(sourceProject, eventId, dialogueId, kind),
+          position,
+          activeScope,
+        ),
         "Created dialogue beat",
       );
     },
-    [eventDraft, runCanvasMutation],
+    [activeScope, eventDraft, runCanvasMutation],
   );
 
   const createEventDialogueBeat = useCallback(
-    (eventId: string, kind: DialogueBeat["kind"]) => {
+    (eventId: string, kind: DialogueBeat["kind"], position?: CanvasPoint) => {
       const currentProject = projectRef.current;
       if (!currentProject) return;
       const sourceProject = eventDraft?.eventId === eventId
@@ -12452,11 +13181,15 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
         : currentProject;
       if (eventDraft?.eventId === eventId) setEventDraft(undefined);
       runCanvasMutation(
-        mutations.createEventDialogueBeat(sourceProject, eventId, kind),
+        positionMutationNode(
+          mutations.createEventDialogueBeat(sourceProject, eventId, kind),
+          position,
+          activeScope,
+        ),
         "Created dialogue beat",
       );
     },
-    [eventDraft, runCanvasMutation],
+    [activeScope, eventDraft, runCanvasMutation],
   );
 
   const updateDialogueBeat = useCallback(
@@ -12809,6 +13542,25 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
 
   const deleteBoundaryEdge = useCallback(
     (edgeId: string) => {
+      if (edgeId.startsWith("edge:entry:")) {
+        const entryParts = edgeId.replace("edge:entry:start:", "").split(":");
+        const sequenceId = entryParts.shift();
+        const eventId = entryParts.join(":");
+        const currentProject = projectRef.current;
+        if (!currentProject || !sequenceId || !eventId) return;
+        const sequence = currentProject.sequences.find((item) => item.id === sequenceId);
+        if (!sequence || sequence.entryEventId !== eventId) return;
+        const fallbackEntry = sequence.eventIds.find((candidate) => candidate !== eventId) ?? "";
+        runCanvasMutation({
+          project: {
+            ...currentProject,
+            sequences: currentProject.sequences.map((item) =>
+              item.id === sequenceId ? { ...item, entryEventId: fallbackEntry } : item,
+            ),
+          },
+        });
+        return;
+      }
       if (edgeId.startsWith("edge:boundary:")) {
         removeBoundaryBinding(edgeId.replace("edge:boundary:", ""));
         return;
@@ -12819,7 +13571,7 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
       const dialogueId = edgeId.replace("edge:dialogue-entry:", "");
       updateDialogue(activeScope.eventId, dialogueId, { entryBeatId: undefined });
     },
-    [activeScope, removeBoundaryBinding, updateDialogue],
+    [activeScope, removeBoundaryBinding, runCanvasMutation, updateDialogue],
   );
 
   const createCanonSuggestion = useCallback(
@@ -12911,7 +13663,7 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
                 }
               : node,
           ),
-          { preserveWorkspace: true },
+          { preserveWorkspace: true, gridSize: settingsRef.current.canvasBackground.gridSize },
         ),
       );
       if (!persist) return;
@@ -12940,7 +13692,9 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
     (changes: NodeChange<StoryCanvasNode>[]) => {
       setNodes((currentNodes) => {
         const nextNodes = applyNodeChanges(changes, currentNodes);
-        return layoutSubcanvasNodes(nextNodes);
+        return layoutSubcanvasNodes(nextNodes, {
+          gridSize: settingsRef.current.canvasBackground.gridSize,
+        });
       });
     },
     [],
@@ -13099,7 +13853,7 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
                 : sequence,
             ),
           },
-          { type: "edge", id: `edge:entry:${sourceNode.id}:${targetEventId}` },
+          { type: "node", id: targetEventId },
         );
         return;
       }
@@ -13360,6 +14114,115 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
 
       const id = targetSelection.id;
       const selectedNode = nodes.find((node) => node.id === id);
+      if (selectedNode?.data.kind === "start" || selectedNode?.data.kind === "sequence" || selectedNode?.data.kind === "workspace") {
+        setMessage("This canvas anchor is structural and cannot be deleted.");
+        return;
+      }
+      if (selectedNode?.data.kind === "endAdder") {
+        setMessage("Add End is an action control, not a stored node.");
+        return;
+      }
+      if (selectedNode?.data.kind === "boundary") {
+        const eventId = selectedNode.data.details?.eventId;
+        const transitionId = selectedNode.data.details?.transitionId;
+        if (typeof transitionId === "string") {
+          deleteTransition(transitionId);
+          return;
+        }
+        if (typeof eventId === "string") {
+          const sequence = currentProject.sequences.find((item) => item.entryEventId === eventId);
+          if (sequence) {
+            const fallbackEntry = sequence.eventIds.find((candidate) => candidate !== eventId) ?? "";
+            runCanvasMutation({
+              project: {
+                ...currentProject,
+                sequences: currentProject.sequences.map((item) => item.id === sequence.id ? { ...item, entryEventId: fallbackEntry } : item),
+              },
+            });
+            return;
+          }
+        }
+        setMessage("This boundary has no stored dependency to delete.");
+        return;
+      }
+      if (selectedNode?.data.kind === "routeGate") {
+        const routeSourceId = selectedNode.data.details?.routeSourceId;
+        if (typeof routeSourceId === "string") {
+          const scopeKey = activeScope ? canvasScopeKey(activeScope) : undefined;
+          const currentSources = scopeKey
+            ? currentProject.canvas?.scopes?.[scopeKey]?.routeGateSources ?? []
+            : currentProject.canvas?.routeGateSources ?? [];
+          const nextCanvas = scopeKey
+            ? {
+                ...currentProject.canvas,
+                scopes: {
+                  ...(currentProject.canvas?.scopes ?? {}),
+                  [scopeKey]: {
+                    ...(currentProject.canvas?.scopes?.[scopeKey] ?? {}),
+                    routeGateSources: currentSources.filter((source) => source !== routeSourceId),
+                  },
+                },
+              }
+            : {
+                ...currentProject.canvas,
+                routeGateSources: currentSources.filter((source) => source !== routeSourceId),
+              };
+          runCanvasMutation({ project: { ...currentProject, canvas: nextCanvas } });
+          return;
+        }
+      }
+      if (selectedNode?.data.kind === "inkSection" && typeof selectedNode.data.details?.eventId === "string") {
+        const eventId = selectedNode.data.details.eventId;
+        runCanvasMutation({
+          project: {
+            ...currentProject,
+            events: currentProject.events.map((event) => event.id === eventId ? { ...event, script: undefined } : event),
+          },
+        });
+        return;
+      }
+      if (selectedNode?.data.kind === "runtimeAction") {
+        const ownerId = selectedNode.data.details?.ownerId;
+        const consequenceIndex = selectedNode.data.details?.consequenceIndex;
+        if (typeof ownerId === "string" && typeof consequenceIndex === "number") {
+          const ownerEvent = currentProject.events.find((event) => event.id === ownerId);
+          if (ownerEvent) {
+            runCanvasMutation({
+              project: {
+                ...currentProject,
+                events: currentProject.events.map((event) => event.id === ownerId
+                  ? { ...event, unlocks: (event.unlocks ?? []).filter((_, index) => index !== consequenceIndex) }
+                  : event),
+              },
+            });
+            return;
+          }
+          const ownerOutcome = currentProject.events.flatMap((event) =>
+            (event.decisions ?? []).flatMap((decision) => decision.outcomes.map((outcome) => ({ event, decision, outcome }))),
+          ).find(({ event, decision, outcome }) => `outcome:${event.id}:${decision.id}:${outcome.id}` === ownerId);
+          if (ownerOutcome) {
+            runCanvasMutation({
+              project: {
+                ...currentProject,
+                events: currentProject.events.map((event) => event.id === ownerOutcome.event.id
+                  ? {
+                      ...event,
+                      decisions: (event.decisions ?? []).map((decision) => decision.id === ownerOutcome.decision.id
+                        ? {
+                            ...decision,
+                            outcomes: decision.outcomes.map((outcome) => outcome.id === ownerOutcome.outcome.id
+                              ? { ...outcome, consequences: (outcome.consequences ?? []).filter((_, index) => index !== consequenceIndex) }
+                              : outcome),
+                          }
+                        : decision),
+                    }
+                  : event),
+              },
+            });
+            return;
+          }
+        }
+      }
       if (
         (selectedNode?.data.kind === "speechBeat" || selectedNode?.data.kind === "directionBeat") &&
         typeof selectedNode.data.details?.eventId === "string"
@@ -13422,6 +14285,22 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
         }
         return;
       }
+      if (
+        selectedNode?.data.kind === "outcome" &&
+        typeof selectedNode.data.details?.eventId === "string" &&
+        typeof selectedNode.data.details?.decisionId === "string"
+      ) {
+        const outcome = selectedNode.data.details.outcome as { id?: string } | undefined;
+        if (outcome?.id) {
+          runCanvasMutation(mutations.deleteOutcome(
+            currentProject,
+            selectedNode.data.details.eventId,
+            selectedNode.data.details.decisionId,
+            outcome.id,
+          ));
+        }
+        return;
+      }
       if (selectedNode?.data.kind === "missingRef") {
         const ownerId = selectedNode.data.details?.ownerId;
         const missingEventId = selectedNode.data.details?.missingEventId;
@@ -13435,6 +14314,10 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
           );
           setSelection(undefined);
         }
+        return;
+      }
+      if (selectedNode?.data.kind === "knowledge") {
+        setMessage("Reference nodes are derived from story conditions and consequences.");
         return;
       }
 
@@ -13473,12 +14356,6 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
 
       const branch = findBranch(project, id);
       if (branch) {
-        if (branch.eventIds.length > 0) {
-          setMessage(
-            "Branch deletion is blocked while it still contains events.",
-          );
-          return;
-        }
         updateProject(
           {
             ...project,
@@ -13487,6 +14364,7 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
               ...item,
               branchIds: withoutValue(item.branchIds, branch.id),
             })),
+            events: project.events.map((item) => item.branchRef === branch.id ? { ...item, branchRef: undefined } : item),
           },
           undefined,
         );
@@ -13496,21 +14374,9 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
 
       const event = findEvent(project, id);
       if (event) {
-        if ((event.childEventIds ?? []).length > 0) {
-          setMessage(
-            "Event deletion is blocked while it contains nested events.",
-          );
-          return;
-        }
         const entryOwner = project.sequences.find(
           (item) => item.entryEventId === event.id,
         );
-        if (entryOwner) {
-          setMessage(
-            `Event deletion is blocked while it is the entry event of "${entryOwner.name}".`,
-          );
-          return;
-        }
 
         const removedTransitionIds = new Set(
           project.events.flatMap((item) =>
@@ -13529,6 +14395,9 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
             sequences: project.sequences.map((item) => ({
               ...item,
               eventIds: withoutValue(item.eventIds, event.id),
+              ...(item.id === entryOwner?.id
+                ? { entryEventId: item.eventIds.find((candidate) => candidate !== event.id) ?? "" }
+                : {}),
             })),
             branches: project.branches.map((item) => ({
               ...item,
@@ -13546,7 +14415,9 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
                           event.id,
                         ),
                       }
-                    : item;
+                    : item.parentEventId === event.id
+                      ? { ...item, parentEventId: undefined }
+                      : item;
                 return {
                   ...withoutParentLink,
                   transitions: (withoutParentLink.transitions ?? []).filter(
@@ -13571,7 +14442,7 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
         setSelection(undefined);
       }
     },
-    [closeDeletedNodeInspector, nodes, project, runCanvasMutation, updateProject],
+    [activeScope, closeDeletedNodeInspector, deleteTransition, nodes, project, runCanvasMutation, updateProject],
   );
 
   const deleteNodeSelections = useCallback(
@@ -13626,7 +14497,31 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
             nextProject = mutations.removeMissingEventReference(nextProject, ownerId, missingEventId).project;
             deletedCount += 1;
           }
+        } else if (node.data.kind === "outcome" && typeof eventId === "string" && typeof node.data.details?.decisionId === "string") {
+          const outcome = node.data.details.outcome as { id?: string } | undefined;
+          if (outcome?.id) {
+            nextProject = mutations.deleteOutcome(nextProject, eventId, node.data.details.decisionId, outcome.id).project;
+            deletedCount += 1;
+          }
         }
+      }
+
+      const branchIds = selectedNodes
+        .filter((node) => node.data.kind === "branch")
+        .map((node) => node.id)
+        .filter((id) => nextProject.branches.some((branch) => branch.id === id));
+      if (branchIds.length > 0) {
+        const removedBranches = new Set(branchIds);
+        nextProject = {
+          ...nextProject,
+          branches: nextProject.branches.filter((branch) => !removedBranches.has(branch.id)),
+          sequences: nextProject.sequences.map((sequence) => ({
+            ...sequence,
+            branchIds: sequence.branchIds?.filter((id) => !removedBranches.has(id)),
+          })),
+          events: nextProject.events.map((event) => removedBranches.has(event.branchRef ?? "") ? { ...event, branchRef: undefined } : event),
+        };
+        deletedCount += branchIds.length;
       }
 
       const eventIds = selectedNodes
@@ -13635,8 +14530,7 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
         .filter((id) => {
           const event = findEvent(nextProject, id);
           return Boolean(event) &&
-            (event?.childEventIds?.length ?? 0) === 0 &&
-            !nextProject.sequences.some((sequence) => sequence.entryEventId === id);
+            Boolean(event);
         });
       if (eventIds.length > 0) {
         const removedEventIds = new Set(eventIds);
@@ -13652,6 +14546,9 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
           sequences: nextProject.sequences.map((sequence) => ({
             ...sequence,
             eventIds: sequence.eventIds.filter((id) => !removedEventIds.has(id)),
+            entryEventId: removedEventIds.has(sequence.entryEventId)
+              ? sequence.eventIds.find((id) => !removedEventIds.has(id)) ?? ""
+              : sequence.entryEventId,
           })),
           branches: nextProject.branches.map((branch) => ({
             ...branch,
@@ -13661,6 +14558,7 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
             .filter((event) => !removedEventIds.has(event.id))
             .map((event) => ({
               ...event,
+              parentEventId: removedEventIds.has(event.parentEventId ?? "") ? undefined : event.parentEventId,
               childEventIds: event.childEventIds?.filter((id) => !removedEventIds.has(id)),
               transitions: (event.transitions ?? []).filter(
                 (transition) => !removedEventIds.has(transition.from) && !removedEventIds.has(transition.to),
@@ -13687,6 +14585,360 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
     },
     [closeDeletedNodeInspector, commitCanvasAction, nodes],
   );
+
+  const canvasSelectionNodeIds = useCallback(() => {
+    const ids = nodes.filter((node) => node.selected).map((node) => node.id);
+    const currentSelection = selectionRef.current;
+    if (currentSelection?.type === "node" && !ids.includes(currentSelection.id)) {
+      ids.push(currentSelection.id);
+    }
+    return ids;
+  }, [nodes]);
+
+  const copyCanvasSelection = useCallback(() => {
+    const selectedIds = canvasSelectionNodeIds();
+    const items: CanvasClipboardItem[] = [];
+    selectedIds.forEach((nodeId) => {
+      const node = nodes.find((candidate) => candidate.id === nodeId);
+      if (!node) return;
+      const details = node.data.details ?? {};
+      const value =
+        node.data.kind === "event" ? details.event
+          : node.data.kind === "decision" ? details.decision
+            : node.data.kind === "dialogue" ? details.dialogue
+              : node.data.kind === "dialogueStart" ? details.start
+                : node.data.kind === "outcome" ? details.outcome
+                  : (node.data.kind === "speechBeat" || node.data.kind === "directionBeat") ? details.beat
+                    : undefined;
+      if (!value) return;
+      if (![
+        "event",
+        "decision",
+        "dialogue",
+        "dialogueStart",
+        "outcome",
+        "speechBeat",
+        "directionBeat",
+      ].includes(node.data.kind)) return;
+      items.push({
+        kind: node.data.kind as CanvasClipboardKind,
+        nodeId,
+        position: { x: node.position.x, y: node.position.y },
+        value: cloneCanvasValue(value),
+        block:
+          (node.data.kind === "speechBeat" || node.data.kind === "directionBeat") && details.block
+            ? cloneCanvasValue(details.block)
+            : undefined,
+        eventId: typeof details.eventId === "string" ? details.eventId : undefined,
+        dialogueId: typeof details.dialogueId === "string" ? details.dialogueId : undefined,
+        decisionId: typeof details.decisionId === "string" ? details.decisionId : undefined,
+      });
+    });
+    if (items.length === 0) {
+      setMessage("Select a story node to copy.");
+      return [];
+    }
+    canvasClipboardRef.current = {
+      scopeKey: activeScope ? canvasScopeKey(activeScope) : undefined,
+      items,
+    };
+    canvasPasteOffsetRef.current = 0;
+    setMessage(`Copied ${items.length} node${items.length === 1 ? "" : "s"}.`);
+    return selectedIds;
+  }, [activeScope, canvasSelectionNodeIds, nodes]);
+
+  const cutCanvasSelection = useCallback(() => {
+    const selectedIds = copyCanvasSelection();
+    if (selectedIds.length > 0) {
+      deleteNodeSelections(selectedIds);
+    }
+  }, [copyCanvasSelection, deleteNodeSelections]);
+
+  const pasteCanvasSelection = useCallback(() => {
+    const currentProject = projectRef.current;
+    const clipboard = canvasClipboardRef.current;
+    if (!currentProject || !clipboard?.items.length) {
+      setMessage("Nothing to paste.");
+      return;
+    }
+
+    const eventIdMap = new Map<string, string>();
+    const decisionIdMap = new Map<string, string>();
+    const dialogueIdMap = new Map<string, string>();
+    const beatIdMap = new Map<string, string>();
+    const outcomeIdMap = new Map<string, string>();
+    let nextEvents = [...currentProject.events];
+    let nextScriptDocuments = cloneCanvasValue(currentProject.scriptDocuments ?? []);
+    const nextLocalizationEntries = {
+      ...(currentProject.localizationCatalog?.entries ?? {}),
+    };
+    let pastedNodeIds: string[] = [];
+
+    const eventItems = clipboard.items.filter((item) => item.kind === "event");
+    eventItems.forEach((item) => {
+      const source = cloneCanvasValue(item.value) as EventNode;
+      const id = mutations.uniqueId(`${source.id}-copy`, nextEvents.map((event) => event.id));
+      eventIdMap.set(source.id, id);
+      const event: EventNode = {
+        ...source,
+        id,
+        parentEventId: activeScope?.kind === "event" ? activeScope.id : undefined,
+        childEventIds: [],
+        decisions: [],
+        dialogues: [],
+        dialogueStarts: [],
+        dialogueBeats: [],
+        transitions: (source.transitions ?? []).map((transition) => ({
+          ...transition,
+          id: mutations.uniqueId(`${transition.id}-copy`, nextEvents.flatMap((candidate) => candidate.transitions ?? []).map((candidate) => candidate.id)),
+          from: eventIdMap.get(transition.from) ?? id,
+          to: eventIdMap.get(transition.to) ?? transition.to,
+        })),
+      };
+      nextEvents.push(event);
+      pastedNodeIds.push(id);
+    });
+
+    const eventTargetId = (sourceEventId?: string) =>
+      sourceEventId ? eventIdMap.get(sourceEventId) ?? sourceEventId : undefined;
+
+    const updateEvent = (eventId: string, update: (event: EventNode) => EventNode) => {
+      nextEvents = nextEvents.map((event) => event.id === eventId ? update(event) : event);
+    };
+
+    clipboard.items.filter((item) => item.kind === "decision").forEach((item) => {
+      const targetEventId = eventTargetId(item.eventId);
+      const source = cloneCanvasValue(item.value) as Decision;
+      const target = nextEvents.find((event) => event.id === targetEventId);
+      if (!target || !targetEventId) return;
+      const id = mutations.uniqueId(`${source.id}-copy`, (target.decisions ?? []).map((decision) => decision.id));
+      decisionIdMap.set(`${item.eventId}:${source.id}`, id);
+      updateEvent(targetEventId, (event) => ({
+        ...event,
+        decisions: [...(event.decisions ?? []), { ...source, id, outcomes: [], dialogueId: undefined }],
+      }));
+      pastedNodeIds.push(`decision:${targetEventId}:${id}`);
+    });
+
+    clipboard.items.filter((item) => item.kind === "dialogue").forEach((item) => {
+      const targetEventId = eventTargetId(item.eventId);
+      const source = cloneCanvasValue(item.value) as DialogueNode;
+      const target = nextEvents.find((event) => event.id === targetEventId);
+      if (!target || !targetEventId) return;
+      const id = mutations.uniqueId(`${source.id}-copy`, (target.dialogues ?? []).map((dialogue) => dialogue.id));
+      dialogueIdMap.set(`${item.eventId}:${source.id}`, id);
+      updateEvent(targetEventId, (event) => ({
+        ...event,
+        dialogues: [...(event.dialogues ?? []), { ...source, id, beats: [], members: [], entryBeatId: undefined }],
+      }));
+      pastedNodeIds.push(`dialogue:${targetEventId}:${id}`);
+    });
+
+    clipboard.items.filter((item) => item.kind === "dialogueStart").forEach((item) => {
+      const targetEventId = eventTargetId(item.eventId);
+      const source = cloneCanvasValue(item.value) as DialogueStart;
+      const target = nextEvents.find((event) => event.id === targetEventId);
+      if (!target || !targetEventId) return;
+      const id = mutations.uniqueId(`${source.id}-copy`, (target.dialogueStarts ?? []).map((start) => start.id));
+      updateEvent(targetEventId, (event) => ({ ...event, dialogueStarts: [...(event.dialogueStarts ?? []), { ...source, id }] }));
+      pastedNodeIds.push(`dialogue-start:${targetEventId}:${id}`);
+    });
+
+    clipboard.items.filter((item) => item.kind === "speechBeat" || item.kind === "directionBeat").forEach((item) => {
+      const targetEventId = eventTargetId(item.eventId);
+      const source = cloneCanvasValue(item.value) as DialogueBeat;
+      const target = nextEvents.find((event) => event.id === targetEventId);
+      if (!target || !targetEventId) return;
+      const targetDialogueId = item.dialogueId ? dialogueIdMap.get(`${item.eventId}:${item.dialogueId}`) ?? item.dialogueId : undefined;
+      let blockRef = source.blockRef;
+      const sourceDocument = currentProject.scriptDocuments?.find((document) => document.id === source.blockRef.scriptId);
+      const sourceBlock = sourceDocument?.blocks.find((block) => block.id === source.blockRef.blockId)
+        ?? (item.block as ScriptBlock | undefined);
+      let targetDocument = nextScriptDocuments.find((document) => document.id === source.blockRef.scriptId);
+      if (!targetDocument && sourceBlock) {
+        const scriptId = mutations.uniqueId(`script:clipboard`, nextScriptDocuments.map((document) => document.id));
+        targetDocument = {
+          id: scriptId,
+          name: "Pasted Beats",
+          format: "forge-script",
+          blocks: [],
+        };
+        nextScriptDocuments = [...nextScriptDocuments, targetDocument];
+      }
+      if (sourceBlock && targetDocument) {
+        const blockId = mutations.uniqueId(`${sourceBlock.id}-copy`, targetDocument.blocks.map((block) => block.id));
+        const textKey = scriptBlockTextKey(targetDocument.id, blockId);
+        const sourceTextKey = sourceBlock.textKey ?? scriptBlockTextKey(sourceDocument?.id ?? source.blockRef.scriptId, sourceBlock.id);
+        const sourceValues = currentProject.localizationCatalog?.entries[sourceTextKey]?.values;
+        const values = sourceValues ?? {
+          ...(currentProject.localizationCatalog?.primaryLocale
+            ? { [currentProject.localizationCatalog.primaryLocale]: sourceBlock.content }
+            : {}),
+          ...(sourceBlock.translations ?? {}),
+        };
+        nextScriptDocuments = nextScriptDocuments.map((document) => document.id === targetDocument.id
+          ? { ...document, blocks: [...document.blocks, { ...cloneCanvasValue(sourceBlock), id: blockId, textKey }] }
+          : document);
+        nextLocalizationEntries[textKey] = { values: cloneCanvasValue(values) };
+        blockRef = { scriptId: targetDocument.id, blockId };
+      }
+      const id = mutations.uniqueId(`${source.id}-copy`, [
+        ...(target.dialogueBeats ?? []).map((beat) => beat.id),
+        ...(target.dialogues ?? []).flatMap((dialogue) => (dialogue.beats ?? []).map((beat) => beat.id)),
+      ]);
+      beatIdMap.set(`${item.eventId}:${item.dialogueId ?? "event"}:${source.id}`, id);
+      if (targetDialogueId && target.dialogues?.some((dialogue) => dialogue.id === targetDialogueId)) {
+        updateEvent(targetEventId, (event) => ({
+          ...event,
+          dialogues: (event.dialogues ?? []).map((dialogue) => dialogue.id === targetDialogueId
+          ? {
+                ...dialogue,
+                beats: [...(dialogue.beats ?? []), { ...source, id, blockRef }],
+                members: [...(dialogue.members ?? []), { kind: "beat", id }],
+                entryBeatId: dialogue.entryBeatId ?? id,
+              }
+            : dialogue),
+        }));
+      } else {
+        updateEvent(targetEventId, (event) => ({ ...event, dialogueBeats: [...(event.dialogueBeats ?? []), { ...source, id, blockRef }] }));
+      }
+      pastedNodeIds.push(`beat:${targetEventId}:${id}`);
+    });
+
+    clipboard.items.filter((item) => item.kind === "outcome").forEach((item) => {
+      const targetEventId = eventTargetId(item.eventId);
+      const source = cloneCanvasValue(item.value) as Outcome;
+      const sourceDecisionId = item.decisionId;
+      const targetDecisionId = decisionIdMap.get(`${item.eventId}:${sourceDecisionId}`) ?? sourceDecisionId;
+      const target = nextEvents.find((event) => event.id === targetEventId);
+      const decision = target?.decisions?.find((candidate) => candidate.id === targetDecisionId);
+      if (!target || !targetEventId || !decision) return;
+      const id = mutations.uniqueId(`${source.id}-copy`, decision.outcomes.map((outcome) => outcome.id));
+      outcomeIdMap.set(`${item.eventId}:${sourceDecisionId}:${source.id}`, id);
+      updateEvent(targetEventId, (event) => ({
+        ...event,
+        decisions: (event.decisions ?? []).map((candidate) => candidate.id === targetDecisionId
+          ? { ...candidate, outcomes: [...candidate.outcomes, { ...source, id }] }
+          : candidate),
+      }));
+      pastedNodeIds.push(`outcome:${targetEventId}:${targetDecisionId}:${id}`);
+    });
+
+    const activeSequenceId = activeScope?.kind === "sequence" ? activeScope.id : mutations.activeSequenceId(currentProject);
+    const activeSequence = nextEvents.length > currentProject.events.length
+      ? currentProject.sequences.find((sequence) => sequence.id === activeSequenceId)
+      : undefined;
+    let nextSequences = currentProject.sequences;
+    if (activeSequence && eventIdMap.size > 0) {
+      const pastedEventIds = Array.from(eventIdMap.values());
+      nextSequences = currentProject.sequences.map((sequence) => sequence.id === activeSequence.id
+        ? { ...sequence, eventIds: [...sequence.eventIds, ...pastedEventIds] }
+        : sequence);
+    }
+    if (activeScope?.kind === "event" && eventIdMap.size > 0) {
+      const childIds = Array.from(eventIdMap.values());
+      nextEvents = nextEvents.map((event) => event.id === activeScope.id
+        ? { ...event, childEventIds: [...(event.childEventIds ?? []), ...childIds] }
+        : event);
+    }
+
+    const pasteOffset = (canvasPasteOffsetRef.current + 1) * 32;
+    canvasPasteOffsetRef.current += 1;
+    const positionEntries: Record<string, { position: { x: number; y: number } }> = {};
+    const occupiedNodes = [...nodes];
+    clipboard.items.forEach((item) => {
+      const pastedId = item.kind === "event" ? eventIdMap.get((item.value as EventNode).id)
+        : item.kind === "decision" ? (() => {
+            const source = item.value as Decision;
+            const targetEventId = eventTargetId(item.eventId);
+            return targetEventId ? `decision:${targetEventId}:${decisionIdMap.get(`${item.eventId}:${source.id}`)}` : undefined;
+          })()
+          : item.kind === "dialogue" ? (() => {
+              const source = item.value as DialogueNode;
+              const targetEventId = eventTargetId(item.eventId);
+              return targetEventId ? `dialogue:${targetEventId}:${dialogueIdMap.get(`${item.eventId}:${source.id}`)}` : undefined;
+            })()
+            : item.kind === "dialogueStart" ? undefined
+              : item.kind === "outcome" ? undefined
+                : (() => {
+                    const source = item.value as DialogueBeat;
+                    const targetEventId = eventTargetId(item.eventId);
+                    return targetEventId ? `beat:${targetEventId}:${beatIdMap.get(`${item.eventId}:${item.dialogueId ?? "event"}:${source.id}`)}` : undefined;
+                  })();
+      if (!pastedId || pastedId.endsWith(":undefined")) return;
+      const position = nearestFreeCanvasPosition(
+        occupiedNodes,
+        { x: item.position.x + pasteOffset, y: item.position.y + pasteOffset },
+        canvasNodeSizeForKind(item.kind),
+        {
+          snapToGrid: settings.canvasBackground.snapToGrid,
+          gridSize: settings.canvasBackground.gridSize,
+          constrainToWorkspace: Boolean(activeScope && activeScope.kind !== "sequence" && currentProject.canvas?.scopes?.[canvasScopeKey(activeScope)]?.workspace?.manual),
+        },
+      );
+      positionEntries[pastedId] = { position };
+      occupiedNodes.push({ id: pastedId, type: "story", position, data: { kind: item.kind, title: "", storyObjectId: pastedId, badges: [] } } as StoryCanvasNode);
+    });
+
+    const scopeKey = activeScope ? canvasScopeKey(activeScope) : undefined;
+    const nextCanvas = scopeKey
+      ? {
+          ...currentProject.canvas,
+          scopes: {
+            ...(currentProject.canvas?.scopes ?? {}),
+            [scopeKey]: {
+              ...(currentProject.canvas?.scopes?.[scopeKey] ?? {}),
+              nodes: { ...(currentProject.canvas?.scopes?.[scopeKey]?.nodes ?? {}), ...positionEntries },
+            },
+          },
+        }
+      : { ...currentProject.canvas, nodes: { ...(currentProject.canvas?.nodes ?? {}), ...positionEntries } };
+    nextEvents = nextEvents.map((event) => event);
+    if (pastedNodeIds.length === 0) {
+      setMessage("The selected nodes could not be pasted here.");
+      return;
+    }
+    commitCanvasAction(`Pasted ${pastedNodeIds.length} node${pastedNodeIds.length === 1 ? "" : "s"}`, {
+      ...currentProject,
+      events: nextEvents,
+      sequences: nextSequences,
+      scriptDocuments: nextScriptDocuments,
+      ...(currentProject.localizationCatalog
+        ? {
+            localizationCatalog: {
+              ...currentProject.localizationCatalog,
+              entries: nextLocalizationEntries,
+            },
+          }
+        : {}),
+      canvas: nextCanvas,
+    }, { type: "node", id: pastedNodeIds[0] });
+  }, [activeScope, commitCanvasAction, nodes, project, settings.canvasBackground.gridSize, settings.canvasBackground.snapToGrid]);
+
+  useEffect(() => {
+    if (suiteChrome && !suiteChrome.active) return;
+    const handleCanvasClipboardKey = (event: KeyboardEvent) => {
+      const target = event.target;
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement ||
+        (target instanceof HTMLElement && target.isContentEditable)
+      ) return;
+      if (shortcutMatches(event, "Mod+C")) {
+        event.preventDefault();
+        copyCanvasSelection();
+      } else if (shortcutMatches(event, "Mod+X")) {
+        event.preventDefault();
+        cutCanvasSelection();
+      } else if (shortcutMatches(event, "Mod+V")) {
+        event.preventDefault();
+        pasteCanvasSelection();
+      }
+    };
+    window.addEventListener("keydown", handleCanvasClipboardKey, true);
+    return () => window.removeEventListener("keydown", handleCanvasClipboardKey, true);
+  }, [copyCanvasSelection, cutCanvasSelection, pasteCanvasSelection, suiteChrome]);
 
   const groupDialogueMembers = useCallback((nodeIds: string[]) => {
     const currentProject = projectRef.current;
@@ -13728,11 +14980,41 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
     }
   }, [activeScope, navigateCanvasScope, runCanvasMutation]);
 
-  const createDialogueStart = useCallback((eventId: string) => {
+  const createDialogueStart = useCallback((eventId: string, position?: CanvasPoint, source?: DialogueStart["source"]) => {
     const currentProject = projectRef.current;
     if (!currentProject) return;
-    runCanvasMutation(mutations.createDialogueStart(currentProject, eventId));
+    runCanvasMutation(
+      positionMutationNode(
+        mutations.createDialogueStart(currentProject, eventId, source),
+        position,
+        activeScope,
+      ),
+    );
+  }, [activeScope, runCanvasMutation]);
+
+  const updateDialogueStart = useCallback((eventId: string, startId: string, updates: Partial<DialogueStart>) => {
+    const currentProject = projectRef.current;
+    if (!currentProject) return;
+    runCanvasMutation(mutations.updateDialogueStart(currentProject, eventId, startId, updates));
   }, [runCanvasMutation]);
+
+  const deleteDialogueStart = useCallback((eventId: string, startId: string) => {
+    const currentProject = projectRef.current;
+    if (!currentProject) return;
+    runCanvasMutation(mutations.deleteDialogueStart(currentProject, eventId, startId));
+  }, [runCanvasMutation]);
+
+  const eventScriptPortraitUrl = useCallback((refId: string) => {
+    if (!project) return undefined;
+    const ref = project.canonRefs.find((candidate) => candidate.id === refId);
+    if (!ref) return undefined;
+    const portrait = canonPresentationImageForRef(
+      workspace?.canonIndex.propertiesConfig,
+      ref,
+      "portrait",
+    );
+    return portrait ? canonVaultImageUrl(project, portrait.value) : undefined;
+  }, [project, workspace?.canonIndex.propertiesConfig]);
 
   useEffect(() => {
     if (suiteChrome && !suiteChrome.active) return;
@@ -13759,7 +15041,15 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
 
       if (currentSelection.type === "node") {
         event.preventDefault();
-        deleteSelection(currentSelection);
+        const selectedNodeIds = nodes.filter((node) => node.selected).map((node) => node.id);
+        if (!selectedNodeIds.includes(currentSelection.id)) {
+          selectedNodeIds.push(currentSelection.id);
+        }
+        if (selectedNodeIds.length > 1) {
+          deleteNodeSelections(selectedNodeIds);
+        } else {
+          deleteSelection(currentSelection);
+        }
         return;
       }
 
@@ -13786,7 +15076,7 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
 
     window.addEventListener("keydown", handleDeleteKey, true);
     return () => window.removeEventListener("keydown", handleDeleteKey, true);
-  }, [deleteBoundaryEdge, deleteSelection, deleteTransition, suiteChrome]);
+  }, [deleteBoundaryEdge, deleteNodeSelections, deleteSelection, deleteTransition, nodes, suiteChrome]);
 
   const createKnowledgeObject = useCallback(() => {
     if (!project) {
@@ -14350,10 +15640,29 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
                   navigateCanvasScope(crumb.scope, { type: "node", id: crumb.scope.id });
                 },
               }))}
-              onClose={() => setEventScriptWorkspace(undefined)}
+              portraitUrlForRef={eventScriptPortraitUrl}
+              propertiesConfig={workspace?.canonIndex.propertiesConfig}
               onUpdateEvent={updateEvent}
               onUpdateText={updateCanvasLocalizedText}
               onUpdateBlock={updateCanvasScriptBlock}
+              onCreateEventBeat={createEventDialogueBeat}
+              onCreateDialogueBeat={createDialogueBeat}
+              onUpdateBeat={(dialogueId, beatId, updates) => dialogueId
+                ? updateDialogueBeat(eventScriptWorkspace.eventId, dialogueId, beatId, updates)
+                : updateEventDialogueBeat(eventScriptWorkspace.eventId, beatId, updates)}
+              onDeleteBeat={(dialogueId, beatId) => dialogueId
+                ? deleteDialogueBeat(eventScriptWorkspace.eventId, dialogueId, beatId)
+                : deleteEventDialogueBeat(eventScriptWorkspace.eventId, beatId)}
+              onCreateDecision={createDecision}
+              onUpdateDecision={updateDecision}
+              onDeleteDecision={deleteDecision}
+              onUpdateOutcome={updateOutcome}
+              onCreateTrigger={(source) => createDialogueStart(eventScriptWorkspace.eventId, undefined, source)}
+              onUpdateTrigger={(startId, updates) => updateDialogueStart(eventScriptWorkspace.eventId, startId, updates)}
+              onDeleteTrigger={(startId) => deleteDialogueStart(eventScriptWorkspace.eventId, startId)}
+              onCreateTransition={(from, to) => createScriptTransition(eventScriptWorkspace.eventId, from, to)}
+              onUpdateTransition={updateTransition}
+              onDeleteTransition={deleteTransition}
             />
           ) : <StoryCanvas
             project={project}
@@ -14410,6 +15719,8 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
             onUpdateDialogue={updateDialogue}
             onUpdateDialogueBeat={updateDialogueBeat}
             onUpdateEventDialogueBeat={updateEventDialogueBeat}
+            onImportSceneImage={importSceneImageForBeat}
+            onAuxiliaryPanelChange={changeAuxiliaryPanel}
             onUpdateScriptBlock={updateCanvasScriptBlock}
             onUpdateLocalizedText={updateCanvasLocalizedText}
             onDeleteDialogueBeat={deleteDialogueBeat}

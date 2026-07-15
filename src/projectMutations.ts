@@ -842,11 +842,12 @@ export function detachDialogueMembers(
 export function createDialogueStart(
   project: BranchingProject,
   eventId: string,
+  source?: DialogueStart["source"],
 ): MutationResult {
   const event = findEvent(project, eventId);
   if (!event) return { project, message: "Event not found." };
   const id = uniqueId("dialogue-trigger", (event.dialogueStarts ?? []).map((start) => start.id));
-  const start: DialogueStart = { id };
+  const start: DialogueStart = { id, source };
   const updated = updateEvent(project, eventId, { dialogueStarts: [...(event.dialogueStarts ?? []), start] });
   return { ...updated, selection: { type: "node", id: `dialogue-start:${eventId}:${id}` } };
 }
@@ -1070,9 +1071,11 @@ export function updateScriptBlock(
   blockId: string,
   updates: Partial<NonNullable<BranchingProject["scriptDocuments"]>[number]["blocks"][number]>,
 ): MutationResult {
-  const normalizedUpdates = updates.characterRef !== undefined
+  const updatesCharacterRef = Object.prototype.hasOwnProperty.call(updates, "characterRef");
+  const updatesSpeakerRef = Object.prototype.hasOwnProperty.call(updates, "speakerRef");
+  const normalizedUpdates = updatesCharacterRef
     ? { ...updates, speakerRef: updates.characterRef }
-    : updates.speakerRef !== undefined
+    : updatesSpeakerRef
       ? { ...updates, characterRef: updates.speakerRef }
       : updates;
   return {
