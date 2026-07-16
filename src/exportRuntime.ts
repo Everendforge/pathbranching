@@ -1,4 +1,11 @@
-import type { BranchingProject, RuntimeChoice, RuntimeNode, RuntimePackage, EventNode } from "./domain.js";
+import type {
+  BranchingProject,
+  EventNode,
+  RuntimeChoice,
+  RuntimeNode,
+  RuntimePackage,
+  SceneImageAttachment,
+} from "./domain.js";
 import { orderedTransitions } from "./logic.js";
 import { UNKNOWN_SPEAKER_REF } from "./speakerRoles.js";
 
@@ -43,6 +50,22 @@ export function exportRuntimePackage(project: BranchingProject): RuntimePackage 
         identityWarning: ref!.identityWarning,
       }));
 
+  const runtimeImage = (attachment: SceneImageAttachment | undefined) => {
+    if (!attachment) return undefined;
+    const asset = project.assets?.find(
+      (candidate) => candidate.id === attachment.assetId && candidate.kind === "image",
+    );
+    return asset
+      ? {
+          id: attachment.id,
+          assetId: asset.id,
+          path: asset.path,
+          name: asset.name,
+          extension: asset.extension,
+        }
+      : undefined;
+  };
+
   const eventNodes: RuntimeNode[] = project.events.map((event) => ({
     id: event.id,
     type: "event",
@@ -53,6 +76,9 @@ export function exportRuntimePackage(project: BranchingProject): RuntimePackage 
     canonRefDetails: canonRefDetails(event.canonRefs),
     storyText: event.text,
     script: event.script,
+    ...(runtimeImage(event.coverImage)
+      ? { coverImage: runtimeImage(event.coverImage) }
+      : {}),
     legacyId: event.legacyId,
     decisions: event.decisions,
     transitions: event.transitions,
@@ -136,7 +162,7 @@ export function exportRuntimePackage(project: BranchingProject): RuntimePackage 
       ...(event.decisions ?? []).flatMap((decision) => [
         [`decision.${decision.id}.prompt`, decision.name] as const,
         ...decision.outcomes.flatMap((outcome) => [
-          [`outcome.${outcome.id}.text`, decision.optionStyle === "followUpText" ? outcome.description || outcome.name : outcome.name] as const,
+          [`outcome.${outcome.id}.text`, outcome.visibleText?.trim() || outcome.name] as const,
           ...(outcome.lockText?.content ? [[`outcome.${outcome.id}.lock`, outcome.lockText.content] as const] : []),
         ]),
       ]),

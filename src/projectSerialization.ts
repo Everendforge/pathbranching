@@ -357,6 +357,7 @@ export function normalizeProject(project: BranchingProject): BranchingProject {
         ...decision,
         outcomes: (decision.outcomes ?? []).map((outcome) => ({
           ...outcome,
+          visibleText: outcome.visibleText ?? outcome.name,
           availability: outcome.availability ?? outcome.conditions,
           unavailableBehavior: outcome.unavailableBehavior ?? "locked",
         })),

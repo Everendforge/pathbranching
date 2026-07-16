@@ -68,6 +68,7 @@ import {
   ChevronDown,
   ChevronRight,
   ChevronUp,
+  Crosshair,
   Castle,
   CircleDot,
   Database,
@@ -75,17 +76,21 @@ import {
   Eye,
   EyeOff,
   FilePlus2,
+  FileText,
   FolderOpen,
   Focus,
   Globe2,
   GitBranch,
   Home,
+  ImagePlus,
   Link,
   Maximize2,
   MessageSquare,
+  MousePointerClick,
   Minimize2,
   Moon,
   OctagonAlert,
+  RefreshCw,
   SearchCheck,
   Settings,
   Split,
@@ -142,6 +147,7 @@ import type {
   RuleSetPhase,
   RuleSet,
   ScriptBlock,
+  SceneImageAttachment,
   Sequence,
   Transition,
   ValidationFinding,
@@ -246,7 +252,7 @@ import {
   findSequence,
   rootSequenceScope,
 } from "./storySelection.js";
-import type { SuiteChrome } from "./suiteChrome.js";
+import type { SuiteChrome, SuiteSettings } from "./suiteChrome.js";
 import {
   buildPathTree,
   buildSequenceConnectionPreview,
@@ -269,12 +275,14 @@ import {
   loadSettings,
   normalizeCanvasBackgroundSettings,
   normalizeCanvasLayoutMode,
+  normalizeAuthoringDisplaySettings,
   normalizeNodeColorSettings,
   normalizeWorkspaceSession,
   rememberRecentProject,
   saveSettings,
   storableMarkdownTabs,
   type AppSettings,
+  type AuthoringDisplaySettings,
   type CanvasBackgroundSettings,
   type CanvasLayoutMode,
   type EventInspectorTabGroup,
@@ -375,6 +383,31 @@ function universeAssetUrl(
   return convertFileSrc(
     `${project.universeRootPath.replace(/[\\/]$/, "")}/${normalizedPath}`,
   );
+}
+
+function eventCoverImageForNode(
+  project: Pick<BranchingProject, "assets" | "universeRootPath">,
+  event: EventNode,
+): (SceneImageAttachment & { name: string; url?: string }) | undefined {
+  const attachment = event.coverImage;
+  const asset = attachment
+    ? project.assets?.find((candidate) => candidate.id === attachment.assetId && candidate.kind === "image")
+    : undefined;
+  return attachment && asset
+    ? { ...attachment, name: asset.name, url: universeAssetUrl(project, asset.path) }
+    : undefined;
+}
+
+function dialogueTriggerPortraitUrl(
+  project: Pick<BranchingProject, "canonRefs" | "universeRootPath">,
+  propertiesConfig: Record<string, unknown> | undefined,
+  start: DialogueStart | undefined,
+) {
+  if (start?.source?.kind !== "canonRef") return undefined;
+  const ref = project.canonRefs.find((candidate) => candidate.id === start.source?.id);
+  if (!ref) return undefined;
+  const portrait = canonPresentationImageForRef(propertiesConfig, ref, "portrait");
+  return portrait ? canonVaultImageUrl(project, portrait.value) : undefined;
 }
 
 function canonVaultImageUrl(
@@ -675,7 +708,7 @@ function updateCanvasNodePosition(
 function updateCanvasNodeAuxiliaryPanel(
   project: BranchingProject,
   nodeId: string,
-  panel: "directorNote" | "sceneImage",
+  panel: "directorNote" | "sceneImage" | "coverImage" | "description",
   open: boolean,
   scope = activeCanvasScope(project),
 ): BranchingProject {
@@ -720,6 +753,13 @@ function positionMutationNode(
 }
 
 type CanvasPoint = { x: number; y: number };
+
+type ConnectedNarrativeNodeKind =
+  | "decision"
+  | "dialogue"
+  | "speechBeat"
+  | "directionBeat"
+  | "dialogueStart";
 
 function snapCanvasPoint(
   point: CanvasPoint,
@@ -907,6 +947,65 @@ function eventIdFromSelection(
   return undefined;
 }
 
+function ownerEventIdFromCanvasSelection(
+  project: BranchingProject,
+  selection: Selection,
+) {
+  if (selection.type !== "node") return undefined;
+  if (findEvent(project, selection.id)) return selection.id;
+  const prefixes = ["decision:", "outcome:", "dialogue:", "dialogue-boundary:", "beat:", "dialogue-start:"];
+  return project.events.find((event) =>
+    prefixes.some((prefix) => selection.id.startsWith(`${prefix}${event.id}:`)),
+  )?.id;
+}
+
+function canvasScopeForSelection(
+  project: BranchingProject,
+  selection: Selection,
+  ownerEventId: string,
+): CanvasScope | undefined {
+  if (selection.type !== "node") return undefined;
+  const event = findEvent(project, ownerEventId);
+  if (!event) return undefined;
+
+  if (selection.id.startsWith("dialogue-boundary:")) {
+    const dialogue = event.dialogues?.find((candidate) =>
+      selection.id === `dialogue-boundary:${event.id}:${candidate.id}:input`,
+    );
+    return dialogue ? { kind: "dialogue", id: dialogue.id, eventId: event.id } : undefined;
+  }
+
+  const decision = event.decisions?.find((candidate) =>
+    selection.id === `decision:${event.id}:${candidate.id}` ||
+    candidate.outcomes.some((outcome) => selection.id === `outcome:${event.id}:${candidate.id}:${outcome.id}`),
+  );
+  if (decision?.dialogueId) {
+    return { kind: "dialogue", id: decision.dialogueId, eventId: event.id };
+  }
+
+  const dialogue = event.dialogues?.find((candidate) =>
+    selection.id === `dialogue:${event.id}:${candidate.id}` ||
+    candidate.beats?.some((beat) => selection.id === `beat:${event.id}:${beat.id}`),
+  );
+  if (dialogue && selection.id.startsWith("beat:")) {
+    return { kind: "dialogue", id: dialogue.id, eventId: event.id };
+  }
+
+  if (
+    selection.id.startsWith("decision:") ||
+    selection.id.startsWith("outcome:") ||
+    selection.id.startsWith("beat:") ||
+    selection.id.startsWith("dialogue:") ||
+    selection.id.startsWith("dialogue-start:")
+  ) {
+    return { kind: "event", id: event.id };
+  }
+
+  if (event.parentEventId) return { kind: "event", id: event.parentEventId };
+  const sequenceId = project.sequences.find((sequence) => sequence.eventIds.includes(event.id))?.id;
+  return sequenceId ? { kind: "sequence", id: sequenceId } : undefined;
+}
+
 function storyExplorerSelectionId(
   project: BranchingProject,
   selection?: Selection,
@@ -921,6 +1020,8 @@ function storyExplorerSelectionId(
       return `file:branch:${selection.id}`;
     if (project.events.some((event) => event.id === selection.id))
       return `file:event:${selection.id}`;
+    if (/^(?:decision|outcome|dialogue|dialogue-boundary|beat|dialogue-start):/.test(selection.id))
+      return `file:path:${selection.id}`;
   }
   return `file:sequence:${activeSequenceId(project) ?? ""}`;
 }
@@ -2678,7 +2779,14 @@ function ConfirmActionDialog({
 }
 
 type PathBranchingSettingsSection =
-  "suite" | "overview" | "authoring" | "markdown" | "bridge" | "workspace" | "recents";
+  | "suite"
+  | "update"
+  | "overview"
+  | "authoring"
+  | "markdown"
+  | "bridge"
+  | "workspace"
+  | "recents";
 
 const primaryFontOptions = [
   ["sans", "Sans serif"],
@@ -2842,6 +2950,7 @@ function PathBranchingSettingsModal({
   findings,
   theme,
   onUpdateEventCategories,
+  onAuthoringDisplayChange,
   onCanvasBackgroundChange,
   onNodeColorChange,
   onThemeChange,
@@ -2866,6 +2975,7 @@ function PathBranchingSettingsModal({
   findings: ValidationFinding[];
   theme: ThemeId;
   onUpdateEventCategories: (categories: EventCategoryDefinition[]) => void;
+  onAuthoringDisplayChange: (updates: Partial<AuthoringDisplaySettings>) => void;
   onCanvasBackgroundChange: (
     updates: Partial<CanvasBackgroundSettings>,
   ) => void;
@@ -2884,12 +2994,7 @@ function PathBranchingSettingsModal({
   onRemoveRecentUniverse: (path: string) => void;
   onSaveUniverseProfile: (profile: UniverseProfile) => Promise<void>;
   onClose: () => void;
-  suiteSettings?: {
-    primaryFont: string;
-    onPrimaryFontChange: (font: string) => void;
-    style: string;
-    onStyleChange: (style: string) => void;
-  };
+  suiteSettings?: SuiteSettings;
 }) {
   const [activeSection, setActiveSection] =
     useState<PathBranchingSettingsSection>(project ? "overview" : "workspace");
@@ -2954,6 +3059,14 @@ function PathBranchingSettingsModal({
                 >
                   <Settings size={14} />
                   Suite
+                </button>
+                <button
+                  className={activeSection === "update" ? "active" : ""}
+                  onClick={() => setActiveSection("update")}
+                  type="button"
+                >
+                  <RefreshCw size={14} />
+                  Update
                 </button>
               </div>
             ) : null}
@@ -3048,6 +3161,30 @@ function PathBranchingSettingsModal({
                       ))}
                     </select>
                   </label>
+                </div>
+              </div>
+            ) : null}
+            {activeSection === "update" && suiteSettings ? (
+              <div className="settings-panel forge-update-panel">
+                <div className="settings-page-title">
+                  <h3>Everend Forge Update</h3>
+                  <p>Check, download, and install signed updates for the Suite.</p>
+                </div>
+                <div className="settings-grid">
+                  <label><span>Installed version</span><input value={suiteSettings.update.currentVersion} readOnly /></label>
+                  <label><span>Platform</span><input value={suiteSettings.update.platform} readOnly /></label>
+                  <label><span>Application ID</span><input value={suiteSettings.update.identifier} readOnly /></label>
+                </div>
+                <div className={`forge-update-status ${suiteSettings.update.status}`} role="status">
+                  <RefreshCw size={18} className={suiteSettings.update.status === "checking" || suiteSettings.update.status === "downloading" ? "spinning" : ""} />
+                  <div>
+                    <strong>{suiteSettings.update.status === "checking" ? "Checking for updates..." : suiteSettings.update.status === "available" ? `Version ${suiteSettings.update.availableVersion} is ready` : suiteSettings.update.status === "downloading" ? `Installing Everend Forge ${suiteSettings.update.availableVersion}...` : suiteSettings.update.status === "up-to-date" ? "You are up to date" : suiteSettings.update.status === "error" ? "Update check failed" : "Ready to check for updates"}</strong>
+                    <p>{suiteSettings.update.error ?? "The updater is ready to contact the release server."}</p>
+                  </div>
+                </div>
+                <div className="settings-action-list forge-update-actions">
+                  <button type="button" onClick={suiteSettings.update.onCheck} disabled={suiteSettings.update.status === "checking" || suiteSettings.update.status === "downloading"}><RefreshCw size={14} /> Check for updates</button>
+                  {suiteSettings.update.status === "available" ? <button type="button" onClick={suiteSettings.update.onInstall}>Download and install</button> : null}
                 </div>
               </div>
             ) : null}
@@ -3162,6 +3299,55 @@ function PathBranchingSettingsModal({
                     onChange={onUpdateEventCategories}
                   />
                 ) : null}
+                <section className="settings-subsection">
+                  <div className="settings-page-title compact">
+                    <h3>Canvas information</h3>
+                    <p>Choose which icon-and-number metrics appear on event and decision nodes.</p>
+                  </div>
+                  <div className="settings-grid">
+                    <label>
+                      <span>Decisions</span>
+                      <input type="checkbox" checked={settings.authoringDisplay.showDecisionCount} onChange={(event) => onAuthoringDisplayChange({ showDecisionCount: event.target.checked })} />
+                    </label>
+                    <label>
+                      <span>Outcomes</span>
+                      <input type="checkbox" checked={settings.authoringDisplay.showOutcomeCount} onChange={(event) => onAuthoringDisplayChange({ showOutcomeCount: event.target.checked })} />
+                    </label>
+                    <label>
+                      <span>Dialogue elements</span>
+                      <input type="checkbox" checked={settings.authoringDisplay.showDialogueCount} onChange={(event) => onAuthoringDisplayChange({ showDialogueCount: event.target.checked })} />
+                    </label>
+                    <label>
+                      <span>Character count</span>
+                      <input type="checkbox" checked={settings.authoringDisplay.showCharacterCount} onChange={(event) => onAuthoringDisplayChange({ showCharacterCount: event.target.checked })} />
+                    </label>
+                    <label>
+                      <span>Word count</span>
+                      <input type="checkbox" checked={settings.authoringDisplay.showWordCount} onChange={(event) => onAuthoringDisplayChange({ showWordCount: event.target.checked })} />
+                    </label>
+                  </div>
+                  <div className="settings-page-title compact">
+                    <h3>Speech beat counter</h3>
+                    <p>Used when an event does not define its own speech pacing target.</p>
+                  </div>
+                  <div className="settings-grid">
+                    <label>
+                      <span>Show counter</span>
+                      <input type="checkbox" checked={settings.authoringDisplay.speechBeatCounterEnabled} onChange={(event) => onAuthoringDisplayChange({ speechBeatCounterEnabled: event.target.checked })} />
+                    </label>
+                    <label>
+                      <span>Measure</span>
+                      <select disabled={!settings.authoringDisplay.speechBeatCounterEnabled} value={settings.authoringDisplay.speechBeatCounterUnit} onChange={(event) => onAuthoringDisplayChange({ speechBeatCounterUnit: event.target.value as "words" | "characters" })}>
+                        <option value="words">Words</option>
+                        <option value="characters">Characters</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>Target</span>
+                      <input type="number" min={1} max={2000} step={1} disabled={!settings.authoringDisplay.speechBeatCounterEnabled} value={settings.authoringDisplay.speechBeatCounterTarget} onChange={(event) => onAuthoringDisplayChange({ speechBeatCounterTarget: Number(event.target.value) })} />
+                    </label>
+                  </div>
+                </section>
               </div>
             ) : null}
 
@@ -4058,11 +4244,9 @@ function BranchTagPanel({
 function pathTreeNodeIcon(kind: PathTreeNode["kind"]) {
   if (kind === "decision") return <Split size={13} />;
   if (kind === "dialogue") return <MessageSquare size={13} />;
+  if (kind === "beat") return <FileText size={13} />;
+  if (kind === "outcome" || kind === "trigger") return <CircleDot size={13} />;
   return <GitBranch size={13} />;
-}
-
-function collectPathTreeIds(node: PathTreeNode): string[] {
-  return [node.id, ...node.children.flatMap(collectPathTreeIds)];
 }
 
 function PathTreeRow({
@@ -4160,13 +4344,11 @@ function PathOutlinePanel({
   selectedId?: string;
   onNavigate: (node: PathTreeNode) => void;
 }) {
-  const [query, setQuery] = useState("");
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const tree = useMemo(
     () => buildPathTree(project, sequence),
     [project, sequence],
   );
-  const normalizedQuery = query.trim().toLowerCase();
 
   const toggle = useCallback((id: string) => {
     setExpanded((current) => {
@@ -4180,55 +4362,31 @@ function PathOutlinePanel({
     });
   }, []);
 
-  const matchesQuery = useCallback(
-    (node: PathTreeNode): boolean =>
-      !normalizedQuery ||
-      [node.label, node.subtitle, ...node.badges]
-        .filter(Boolean)
-        .some((value) =>
-          String(value).toLowerCase().includes(normalizedQuery),
-        ) ||
-      node.children.some((child) => matchesQuery(child)),
-    [normalizedQuery],
-  );
-
-  const filteredTree = normalizedQuery
-    ? tree.filter((node) => matchesQuery(node))
-    : tree;
-  const effectiveExpanded = normalizedQuery
-    ? new Set(tree.flatMap(collectPathTreeIds))
-    : expanded;
   const isActive = (node: PathTreeNode) =>
-    node.kind === "event" && selectedId === `file:event:${node.selectId}`;
+    selectedId === (node.kind === "event" ? `file:event:${node.selectId}` : `file:path:${node.selectId}`);
 
   return (
     <div className="story-outline-map">
       <div className="outline-toolbar">
-        <input
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search paths"
-          aria-label="Search paths"
-        />
         <span>
           {tree.length} root event{tree.length === 1 ? "" : "s"}
         </span>
       </div>
       <div className="path-tree">
-        {filteredTree.map((node) => (
+        {tree.map((node) => (
           <PathTreeRow
             key={node.id}
             node={node}
             depth={0}
-            expanded={effectiveExpanded}
+            expanded={expanded}
             onToggle={toggle}
             onNavigate={onNavigate}
             isActive={isActive}
           />
         ))}
       </div>
-      {!filteredTree.length ? (
-        <span className="empty-line">No paths match this search.</span>
+      {!tree.length ? (
+        <span className="empty-line">No paths yet.</span>
       ) : null}
     </div>
   );
@@ -4671,6 +4829,84 @@ function DebugInspector({
   return <section className="inspector-section debug-inspector"><h2>Debug</h2><pre>{JSON.stringify(payload, null, 2)}</pre></section>;
 }
 
+function EventInspectorTabPreview({
+  project,
+  event,
+  compact = false,
+}: {
+  project: BranchingProject;
+  event: EventNode;
+  compact?: boolean;
+}) {
+  const cover = eventCoverImageForNode(project, event);
+  const branch = event.branchRef
+    ? project.branches.find((candidate) => candidate.id === event.branchRef)
+    : undefined;
+  const category = project.eventCategories?.find((candidate) => candidate.id === event.type);
+  const outcomeCount = event.decisions?.reduce(
+    (count, decision) => count + decision.outcomes.length,
+    0,
+  ) ?? 0;
+  const dialogueCount = (event.dialogues?.length ?? 0) + (event.dialogueBeats?.length ?? 0);
+  const description = event.description?.trim().replace(/\s+/gu, " ");
+
+  return (
+    <div className={`event-inspector-tab-preview${compact ? " compact" : ""}`}>
+      <div className="event-inspector-tab-preview-image" aria-hidden="true">
+        {cover?.url ? (
+          <img src={cover.url} alt="" />
+        ) : (
+          <ImagePlus size={compact ? 14 : 17} />
+        )}
+      </div>
+      <div className="event-inspector-tab-preview-copy">
+        <strong className="event-inspector-tab-preview-name">{event.name || "Untitled event"}</strong>
+        {!compact ? (
+          <span className="event-inspector-tab-preview-description">
+            {description ? description.slice(0, 120) : "No description yet."}
+          </span>
+        ) : null}
+        <span className="event-inspector-tab-preview-tags">
+          <span title="Event type"><Split size={11} aria-hidden="true" />{category?.label ?? event.type}</span>
+          <span title="Branch"><GitBranch size={11} aria-hidden="true" />{branch?.title ?? "No branch"}</span>
+          {!compact ? (
+            <>
+              <span title="Decisions"><CircleDot size={11} aria-hidden="true" />{event.decisions?.length ?? 0}</span>
+              <span title="Outcomes"><Split size={11} aria-hidden="true" />{outcomeCount}</span>
+              <span title="Dialogue elements"><MessageSquare size={11} aria-hidden="true" />{dialogueCount}</span>
+            </>
+          ) : null}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function EventInspectorTabHeader({
+  project,
+  event,
+}: {
+  project: BranchingProject;
+  event: EventNode;
+}) {
+  const branch = event.branchRef
+    ? project.branches.find((candidate) => candidate.id === event.branchRef)
+    : undefined;
+  const category = project.eventCategories?.find((candidate) => candidate.id === event.type);
+  return (
+    <div className="event-inspector-tab-header">
+      <strong className="event-inspector-tab-header-main" title={event.name}>
+        <GitBranch className="event-header-icon" size={14} aria-hidden="true" />
+        <span>{event.name || "Untitled event"}</span>
+      </strong>
+      <span className="event-inspector-tab-preview-tags" aria-label="Event metadata">
+        <span title="Event type"><Split size={11} aria-hidden="true" />{category?.label ?? event.type}</span>
+        <span title="Branch"><GitBranch size={11} aria-hidden="true" />{branch?.title ?? "No branch"}</span>
+      </span>
+    </div>
+  );
+}
+
 function EventAuthoringDock({
   project,
   nodes,
@@ -4690,6 +4926,7 @@ function EventAuthoringDock({
   onLoadGroup,
   onDeleteGroup,
   onSelect,
+  onLocateInspectorTab,
   inspectorTabs,
   expandedInspectorTabId,
   inspectorMaximized,
@@ -4718,6 +4955,7 @@ function EventAuthoringDock({
   onLoadGroup: (groupId: string) => void;
   onDeleteGroup: (groupId: string) => void;
   onSelect: (selection?: Selection) => void;
+  onLocateInspectorTab: (selection: Selection) => void;
   inspectorTabs: InspectorTab[];
   expandedInspectorTabId?: string;
   inspectorMaximized: boolean;
@@ -4728,6 +4966,7 @@ function EventAuthoringDock({
   onToggleInspectorMaximized: () => void;
   children: ReactNode;
 }) {
+  const dockRef = useRef<HTMLElement | null>(null);
   const tabContextMenuRef = useRef<HTMLDivElement | null>(null);
   const manuallyCollapsedEventIdRef = useRef<string | undefined>(undefined);
   const manuallyClosedEventIdRef = useRef<string | undefined>(undefined);
@@ -4756,6 +4995,29 @@ function EventAuthoringDock({
     (group) => group.id === selectedTabGroupId,
   );
   const hasInspectorTabs = openEvents.length + inspectorTabs.length > 0;
+  const availableInspectorHeight = useCallback(() => {
+    if (inspectorMaximized) return Number.POSITIVE_INFINITY;
+    const dockHeight = dockRef.current?.getBoundingClientRect().height;
+    if (!dockHeight) return 440;
+    const cardCount = openEvents.length + inspectorTabs.length;
+    const minimizedCards = Math.max(0, cardCount - 1);
+    const cardGaps = Math.max(0, cardCount - 1) * 4;
+    const toolsHeight = inspectorTabs.length > 0 ? 36 : 0;
+    const toolsGap = inspectorTabs.length > 0 ? 6 : 0;
+    return Math.max(0, dockHeight - minimizedCards * 42 - cardGaps - toolsHeight - toolsGap);
+  }, [eventInspector.expandedEventId, inspectorMaximized, inspectorTabs.length, openEvents.length]);
+  const inspectorCardHeight = useCallback(
+    (tabId: string) => {
+      const requested = inspectorHeights[tabId] ?? 440;
+      const available = availableInspectorHeight();
+      return Number.isFinite(available) ? Math.min(requested, available) : requested;
+    },
+    [availableInspectorHeight, inspectorHeights],
+  );
+  const canExpandInspector = useCallback(
+    () => inspectorMaximized || availableInspectorHeight() >= 240,
+    [availableInspectorHeight, inspectorMaximized],
+  );
   const resizeInspectorCard = useCallback((event: ReactPointerEvent<HTMLDivElement>, tabId: string) => {
     if (inspectorMaximized) return;
     event.preventDefault();
@@ -4763,10 +5025,16 @@ function EventAuthoringDock({
     const card = event.currentTarget.parentElement;
     const startY = event.clientY;
     const startHeight = card?.getBoundingClientRect().height ?? inspectorHeights[tabId] ?? 440;
+    const maxHeight = availableInspectorHeight();
+    const minHeight = Math.min(240, maxHeight);
     const onMove = (moveEvent: PointerEvent) => {
+      const requestedHeight = startHeight + startY - moveEvent.clientY;
       setInspectorHeights((current) => ({
         ...current,
-        [tabId]: Math.min(window.innerHeight - 70, Math.max(180, startHeight + startY - moveEvent.clientY)),
+        [tabId]: Math.min(
+          maxHeight,
+          Math.max(minHeight, Math.min(window.innerHeight - 70, requestedHeight)),
+        ),
       }));
     };
     const onEnd = () => {
@@ -4775,7 +5043,7 @@ function EventAuthoringDock({
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onEnd, { once: true });
-  }, [inspectorHeights, inspectorMaximized]);
+  }, [availableInspectorHeight, inspectorHeights, inspectorMaximized]);
   const renderGroupMenu = useCallback(
     (variant: "stack" | "collapsed") => (
       <div
@@ -4877,12 +5145,21 @@ function EventAuthoringDock({
 
   const toggleInspector = useCallback(
     (eventId: string) => {
+      if (eventInspector.expandedEventId !== eventId && !canExpandInspector()) return;
       manuallyCollapsedEventIdRef.current = undefined;
       manuallyClosedEventIdRef.current = undefined;
       onOpenEvent(eventId);
       onSelect({ type: "node", id: eventId });
     },
-    [onOpenEvent, onSelect],
+    [canExpandInspector, eventInspector.expandedEventId, onOpenEvent, onSelect],
+  );
+
+  const toggleInspectorTab = useCallback(
+    (tabId: string) => {
+      if (expandedInspectorTabId !== tabId && !canExpandInspector()) return;
+      onOpenInspectorTab(tabId);
+    },
+    [canExpandInspector, expandedInspectorTabId, onOpenInspectorTab],
   );
 
   const closeInspector = useCallback(
@@ -4958,6 +5235,7 @@ function EventAuthoringDock({
       return (
         <aside
           className={`event-authoring-dock explorer-inspector-dock ${inspectorMaximized ? "maximized" : ""}`}
+          ref={dockRef}
           aria-label="Inspector dock"
         >
           <div className="event-inspector-stack">
@@ -4984,7 +5262,7 @@ function EventAuthoringDock({
                   role="listitem"
                   data-inspector-kind={tab.selection.type}
                   data-active={expanded || undefined}
-                  style={{ "--stack-index": index + 1, "--inspector-card-height": `${inspectorHeights[tab.id] ?? 440}px` } as CSSProperties}
+                  style={{ "--stack-index": index + 1, "--inspector-card-height": `${inspectorCardHeight(tab.id)}px` } as CSSProperties}
                 >
                   {expanded ? <div className="event-inspector-card-resize-border" onPointerDown={(event) => resizeInspectorCard(event, tab.id)} title="Drag top border to resize" /> : null}
                   <div className="event-editor-header">
@@ -4992,12 +5270,15 @@ function EventAuthoringDock({
                       type="button"
                       className="event-minimized-title"
                       title={tab.title}
-                      onClick={() => onOpenInspectorTab(tab.id)}
+                      onClick={() => toggleInspectorTab(tab.id)}
                     >
                       <strong><TabIcon className="event-header-icon" size={14} /><span className="event-header-copy"><span className="event-header-name">{tab.title}</span></span></strong>
                     </button>
                     <div className="event-editor-actions">
-                      <button type="button" title={expanded ? "Minimize inspector" : "Expand inspector"} onClick={() => onOpenInspectorTab(tab.id)}>
+                      <button type="button" className="inspector-locate-button" title="Locate on canvas" aria-label="Locate on canvas" onClick={() => onLocateInspectorTab(tab.selection)}>
+                        <Crosshair size={14} />
+                      </button>
+                      <button type="button" title={expanded ? "Minimize inspector" : "Expand inspector"} onClick={() => toggleInspectorTab(tab.id)}>
                         {expanded ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
                       </button>
                       {tab.mode === "debug" ? (
@@ -5020,6 +5301,7 @@ function EventAuthoringDock({
       tabGroups.length > 0 ? (
       <aside
         className="event-authoring-dock collapsed"
+        ref={dockRef}
         aria-label="Event authoring dock"
       >
         <div className="event-inspector-collapsed-controls">
@@ -5052,6 +5334,7 @@ function EventAuthoringDock({
   return (
     <aside
       className={`event-authoring-dock ${inspectorMaximized ? "maximized" : ""}`}
+      ref={dockRef}
       aria-label="Event inspector stack"
     >
       <div className="event-inspector-stack">
@@ -5080,15 +5363,18 @@ function EventAuthoringDock({
                 role="listitem"
                 data-inspector-kind={tab.selection.type}
                 data-active={expanded || undefined}
-                style={{ "--stack-index": index + openEvents.length + 1, "--inspector-card-height": `${inspectorHeights[tab.id] ?? 440}px` } as CSSProperties}
+                style={{ "--stack-index": index + openEvents.length + 1, "--inspector-card-height": `${inspectorCardHeight(tab.id)}px` } as CSSProperties}
               >
                 {expanded ? <div className="event-inspector-card-resize-border" onPointerDown={(event) => resizeInspectorCard(event, tab.id)} title="Drag top border to resize" /> : null}
                 <div className="event-editor-header">
-                  <button type="button" className="event-minimized-title" title={tab.title} onClick={() => onOpenInspectorTab(tab.id)}>
+                  <button type="button" className="event-minimized-title" title={tab.title} onClick={() => toggleInspectorTab(tab.id)}>
                     <strong><TabIcon className="event-header-icon" size={14} /><span className="event-header-copy"><span className="event-header-name">{tab.title}</span></span></strong>
                   </button>
                   <div className="event-editor-actions">
-                    <button type="button" title={expanded ? "Minimize inspector" : "Expand inspector"} onClick={() => onOpenInspectorTab(tab.id)}>{expanded ? <ChevronDown size={14} /> : <ChevronUp size={14} />}</button>
+                    <button type="button" className="inspector-locate-button" title="Locate on canvas" aria-label="Locate on canvas" onClick={() => onLocateInspectorTab(tab.selection)}>
+                      <Crosshair size={14} />
+                    </button>
+                    <button type="button" title={expanded ? "Minimize inspector" : "Expand inspector"} onClick={() => toggleInspectorTab(tab.id)}>{expanded ? <ChevronDown size={14} /> : <ChevronUp size={14} />}</button>
                     {tab.mode === "debug" ? (
                       <button type="button" title="Disable Inspector Debug" onClick={onDisableInspectorDebug}><Power size={14} /></button>
                     ) : <button type="button" title="Close inspector" onClick={() => onCloseInspectorTab(tab.id)} onContextMenu={openInspectorTabCloseMenu}><X size={14} /></button>}
@@ -5113,13 +5399,13 @@ function EventAuthoringDock({
                 role="listitem"
                 data-inspector-kind="event"
                 data-active={isExpanded || undefined}
-                style={{ "--stack-index": index + 1, "--inspector-card-height": `${inspectorHeights[`event:${event.id}`] ?? 440}px` } as CSSProperties}
+                style={{ "--stack-index": index + inspectorTabs.length + 1, "--inspector-card-height": `${inspectorCardHeight(`event:${event.id}`)}px` } as CSSProperties}
               >
                 {isExpanded ? <div className="event-inspector-card-resize-border" onPointerDown={(pointerEvent) => resizeInspectorCard(pointerEvent, `event:${event.id}`)} title="Drag top border to resize" /> : null}
                 <div className="event-editor-header">
                   {isExpanded ? (
                     <div className="event-header-title">
-                      <strong title={cardEvent.name ?? "No event selected"}>
+                      <strong title={cardEvent.name || "Untitled event"}>
                         <GitBranch
                           className="event-header-icon"
                           size={15}
@@ -5127,7 +5413,7 @@ function EventAuthoringDock({
                         />
                         <span className="event-header-copy">
                           <span className="event-header-name">
-                            {cardEvent.name ?? "No event selected"}
+                            {cardEvent.name || "Untitled event"}
                           </span>
                         </span>
                       </strong>
@@ -5139,19 +5425,19 @@ function EventAuthoringDock({
                       onClick={() => toggleInspector(event.id)}
                       title={`Open ${event.name}`}
                     >
-                      <strong>
-                        <GitBranch
-                          className="event-header-icon"
-                          size={14}
-                          aria-hidden="true"
-                        />
-                        <span className="event-header-copy">
-                          <span className="event-header-name">{event.name}</span>
-                        </span>
-                      </strong>
+                      <EventInspectorTabHeader project={project} event={event} />
                     </button>
                   )}
                   <div className="event-editor-actions">
+                    <button
+                      type="button"
+                      className="inspector-locate-button"
+                      title="Locate on canvas"
+                      aria-label="Locate on canvas"
+                      onClick={() => onLocateInspectorTab({ type: "node", id: event.id })}
+                    >
+                      <Crosshair size={14} />
+                    </button>
                     <button
                       type="button"
                       title={
@@ -5774,46 +6060,44 @@ function Inspector({
 
   return (
     <aside className={`canvas-inspector ${embedded ? "embedded" : ""}`}>
-      <div
-        className={`inspector-header inspector-object-header ${embedded ? "embedded" : ""}`}
-      >
-        <div className="inspector-object-identity">
-          <span className="inspector-object-icon" aria-hidden="true">
-            <InspectorIdentityIcon size={16} />
-          </span>
-          <div>
-            <strong title={inspectorIdentity.label}>
-              {inspectorIdentity.label}
-              {manualDirty ? (
-                <span
-                  className="inspector-dirty-star"
-                  title="Unsaved inspector changes"
-                  aria-label="Unsaved inspector changes"
-                >
-                  *
-                </span>
-              ) : null}
-            </strong>
-            <span>{inspectorIdentity.kind}</span>
+      {!embedded ? (
+        <div className="inspector-header inspector-object-header">
+          <div className="inspector-object-identity">
+            <span className="inspector-object-icon" aria-hidden="true">
+              <InspectorIdentityIcon size={16} />
+            </span>
+            <div>
+              <strong title={inspectorIdentity.label}>
+                {inspectorIdentity.label}
+                {manualDirty ? (
+                  <span
+                    className="inspector-dirty-star"
+                    title="Unsaved inspector changes"
+                    aria-label="Unsaved inspector changes"
+                  >
+                    *
+                  </span>
+                ) : null}
+              </strong>
+              <span>{inspectorIdentity.kind}</span>
+            </div>
           </div>
-        </div>
-        {onSaveManual ? (
-          <button
-            type="button"
-            className="inspector-save-button"
-            title="Save inspector changes (Ctrl+S)"
-            onClick={onSaveManual}
-            disabled={!manualDirty}
-          >
-            Save
-          </button>
-        ) : null}
-        {!embedded ? (
+          {onSaveManual ? (
+            <button
+              type="button"
+              className="inspector-save-button"
+              title="Save inspector changes (Ctrl+S)"
+              onClick={onSaveManual}
+              disabled={!manualDirty}
+            >
+              Save
+            </button>
+          ) : null}
           <button type="button" title="Close inspector" onClick={onClose}>
             x
           </button>
-        ) : null}
-      </div>
+        </div>
+      ) : null}
 
       <div className="inspector-scroll">
         {sequence ? (
@@ -5971,16 +6255,10 @@ function Inspector({
             <InspectorContentTabs value={objectInspectorTab} onChange={setObjectInspectorTab} tabs={[{ id: "overview", label: "Overview" }, { id: "connections", label: "Connections" }, { id: "logic", label: "Logic" }, { id: "choices", label: "Choices" }]} />
             {objectInspectorTab === "overview" ? <>
             <section className="inspector-section">
-              <h2>Event</h2>
-              <label className="field-label">
-                Name
-                <input
-                  value={event.name}
-                  onChange={(inputEvent) =>
-                    onUpdateEvent(event.id, { name: inputEvent.target.value })
-                  }
-                />
-              </label>
+              <div className="event-inspector-overview-preview">
+                <EventInspectorTabPreview project={project} event={event} />
+              </div>
+              <h2>Event overview</h2>
               <label className="field-label">
                 Description
                 <textarea
@@ -5992,6 +6270,32 @@ function Inspector({
                     })
                   }
                 />
+              </label>
+              <label className="field-label">
+                Cover image
+                <select
+                  value={event.coverImage?.assetId ?? ""}
+                  onChange={(inputEvent) => {
+                    const assetId = inputEvent.target.value;
+                    onUpdateEvent(event.id, {
+                      coverImage: assetId
+                        ? {
+                            id: event.coverImage?.id ?? `event-cover:${crypto.randomUUID()}`,
+                            assetId,
+                          }
+                        : undefined,
+                    });
+                  }}
+                >
+                  <option value="">No cover image</option>
+                  {(project.assets ?? [])
+                    .filter((asset) => asset.kind === "image")
+                    .map((asset) => (
+                      <option key={asset.id} value={asset.id}>
+                        {asset.name}
+                      </option>
+                    ))}
+                </select>
               </label>
               <label className="field-label">
                 Category
@@ -6209,21 +6513,6 @@ function Inspector({
               <h2>Decision</h2>
               {objectInspectorTab === "overview" ? <>
               <label className="field-label">
-                Name
-                <input
-                  value={selectedDecisionContext.decision!.name}
-                  onChange={(inputEvent) =>
-                    onUpdateDecision(
-                      selectedDecisionContext.eventId,
-                      selectedDecisionContext.decision!.id,
-                      {
-                        name: inputEvent.target.value,
-                      },
-                    )
-                  }
-                />
-              </label>
-              <label className="field-label">
                 Type
                 <input
                   value={selectedDecisionContext.decision!.type}
@@ -6257,7 +6546,7 @@ function Inspector({
               <label className="field-label">
                 Option presentation
                 <select
-                  value={selectedDecisionContext.decision!.optionStyle ?? "visibleText"}
+                  value={selectedDecisionContext.decision!.optionStyle === "iconOnly" ? "iconOnly" : "visibleText"}
                   onChange={(inputEvent) =>
                     onUpdateDecision(
                       selectedDecisionContext.eventId,
@@ -6265,15 +6554,13 @@ function Inspector({
                       {
                         optionStyle: inputEvent.target.value as
                           | "visibleText"
-                          | "followUpText"
                           | "iconOnly",
                       },
                     )
                   }
                 >
-                  <option value="visibleText">Visible option text</option>
-                  <option value="followUpText">Follow-up text</option>
-                  <option value="iconOnly">Icon only</option>
+                  <option value="visibleText">TEXT</option>
+                  <option value="iconOnly">ICON</option>
                 </select>
               </label>
               </> : null}
@@ -6288,42 +6575,13 @@ function Inspector({
                     <label className="field-label compact-field">
                       Visible text
                       <input
-                        value={outcome.name}
+                        value={outcome.visibleText ?? outcome.name}
                         onChange={(inputEvent) =>
                           onUpdateOutcome(
                             selectedDecisionContext.eventId,
                             selectedDecisionContext.decision!.id,
                             outcome.id,
-                            { name: inputEvent.target.value },
-                          )
-                        }
-                      />
-                    </label>
-                    <label className="field-label compact-field">
-                      Follow-up text
-                      <input
-                        value={outcome.description ?? ""}
-                        onChange={(inputEvent) =>
-                          onUpdateOutcome(
-                            selectedDecisionContext.eventId,
-                            selectedDecisionContext.decision!.id,
-                            outcome.id,
-                            { description: inputEvent.target.value || undefined },
-                          )
-                        }
-                      />
-                    </label>
-                    <label className="field-label compact-field">
-                      Icon
-                      <input
-                        value={outcome.icon ?? ""}
-                        placeholder="◇"
-                        onChange={(inputEvent) =>
-                          onUpdateOutcome(
-                            selectedDecisionContext.eventId,
-                            selectedDecisionContext.decision!.id,
-                            outcome.id,
-                            { icon: inputEvent.target.value || undefined },
+                            { visibleText: inputEvent.target.value },
                           )
                         }
                       />
@@ -6714,16 +6972,16 @@ function Inspector({
             <section className="inspector-section">
               <h2>Outcome</h2>
               <label className="field-label">
-                Name
+                Visible text
                 <input
-                  value={selectedOutcomeContext.outcome!.name}
+                  value={selectedOutcomeContext.outcome!.visibleText ?? selectedOutcomeContext.outcome!.name}
                   onChange={(inputEvent) =>
                     onUpdateOutcome(
                       selectedOutcomeContext.eventId,
                       selectedOutcomeContext.decisionId,
                       selectedOutcomeContext.outcome!.id,
                       {
-                        name: inputEvent.target.value,
+                        visibleText: inputEvent.target.value,
                       },
                     )
                   }
@@ -7899,6 +8157,7 @@ type CanvasContextMenu = {
 };
 
 const CANVAS_CLICK_SEQUENCE_WINDOW_MS = 360;
+const DIRECTED_NODE_OPEN_DELAY_MS = 750;
 
 type CanvasDialogueMember = {
   eventId: string;
@@ -8177,6 +8436,7 @@ function StoryCanvas({
   expandedInspectorTabId,
   inspectorMaximized,
   canvasBackground,
+  authoringDisplay,
   onCanvasBackgroundChange,
   onNodesChange,
   onEdgesChange,
@@ -8191,6 +8451,8 @@ function StoryCanvas({
   onToggleData,
   onCreateEvent,
   onCreateNestedEvent,
+  onCreateConnectedNestedEvent,
+  onCreateConnectedNarrativeNode,
   onCreateConnectedEvent,
   onUpdateSequence,
   onUpdateBranch,
@@ -8205,6 +8467,7 @@ function StoryCanvas({
   onUpdateDialogueBeat,
   onUpdateEventDialogueBeat,
   onImportSceneImage,
+  onImportEventCoverImage,
   onAuxiliaryPanelChange,
   onUpdateScriptBlock,
   onUpdateLocalizedText,
@@ -8305,6 +8568,7 @@ function StoryCanvas({
   expandedInspectorTabId?: string;
   inspectorMaximized: boolean;
   canvasBackground: CanvasBackgroundSettings;
+  authoringDisplay: AuthoringDisplaySettings;
   onCanvasBackgroundChange: (updates: Partial<CanvasBackgroundSettings>) => void;
   onNodesChange: (changes: NodeChange<StoryCanvasNode>[]) => void;
   onEdgesChange: (changes: EdgeChange<StoryCanvasEdge>[]) => void;
@@ -8329,6 +8593,18 @@ function StoryCanvas({
     parentEventId: string,
     type?: EventType,
     position?: { x: number; y: number },
+  ) => void;
+  onCreateConnectedNestedEvent: (
+    parentEventId: string,
+    sourceNodeId: string,
+    type: EventType,
+    position: { x: number; y: number },
+  ) => void;
+  onCreateConnectedNarrativeNode: (
+    scope: Extract<CanvasScope, { kind: "event" | "dialogue" }>,
+    sourceNodeId: string,
+    kind: ConnectedNarrativeNodeKind,
+    position: CanvasPoint,
   ) => void;
   onCreateConnectedEvent: (
     sourceNodeId: string,
@@ -8356,7 +8632,8 @@ function StoryCanvas({
   onUpdateDialogueBeat: (eventId: string, dialogueId: string, beatId: string, updates: Partial<DialogueBeat>) => void;
   onUpdateEventDialogueBeat: (eventId: string, beatId: string, updates: Partial<DialogueBeat>) => void;
   onImportSceneImage: (eventId: string, dialogueId: string | undefined, beatId: string) => void;
-  onAuxiliaryPanelChange: (nodeId: string, panel: "directorNote" | "sceneImage", open: boolean) => void;
+  onImportEventCoverImage: (eventId: string) => void;
+  onAuxiliaryPanelChange: (nodeId: string, panel: "directorNote" | "sceneImage" | "coverImage" | "description", open: boolean) => void;
   onUpdateScriptBlock: (scriptId: string, blockId: string, updates: Partial<ScriptBlock>) => void;
   onUpdateLocalizedText: (textKey: string, locale: string, value: string) => void;
   onDeleteDialogueBeat: (eventId: string, dialogueId: string, beatId: string) => void;
@@ -8466,19 +8743,40 @@ function StoryCanvas({
   const shellRef = useRef<HTMLElement | null>(null);
   const pendingNodeClickRef = useRef<{
     nodeId: string;
-    count: number;
-    lastClickAt: number;
     timer?: number;
   } | undefined>(undefined);
+  const directedNodeHoldRef = useRef<{
+    nodeId: string;
+    timer: number;
+  } | undefined>(undefined);
+  const pendingLocateNodeRef = useRef<string | undefined>(undefined);
+  const pendingLocateFitSkipRef = useRef<string | undefined>(undefined);
   const draggedNodeRef = useRef(false);
   const [reactFlowInstance, setReactFlowInstance] =
     useState<ReactFlowInstance<any, any>>();
   const [contextMenu, setContextMenu] = useState<CanvasContextMenu>();
+  const contextMenuFocusRef = useRef<HTMLElement | null>(null);
+  const contextMenuWasOpenRef = useRef(false);
   const [editingEdgeId, setEditingEdgeId] = useState<string>();
   const [draggingEvent, setDraggingEvent] = useState(false);
+  const [directedNodeOpening, setDirectedNodeOpening] = useState(true);
   const [minimapOpen, setMinimapOpen] = useState(true);
   const [canvasLocale, setCanvasLocale] = useState(primaryLocale);
   const [canvasLocaleMenuOpen, setCanvasLocaleMenuOpen] = useState(false);
+
+  useEffect(() => {
+    if (contextMenu) {
+      contextMenuWasOpenRef.current = true;
+      return;
+    }
+    if (!contextMenuWasOpenRef.current) return;
+    contextMenuWasOpenRef.current = false;
+    window.requestAnimationFrame(() => {
+      const target = contextMenuFocusRef.current ?? shellRef.current;
+      target?.focus({ preventScroll: true });
+      contextMenuFocusRef.current = null;
+    });
+  }, [contextMenu]);
   const canvasLocaleOptions = useMemo(
     () => normalizeLocaleList(primaryLocale, locales),
     [locales, primaryLocale],
@@ -8495,9 +8793,18 @@ function StoryCanvas({
     pendingNodeClickRef.current = undefined;
   }, []);
 
+  const clearDirectedNodeHold = useCallback(() => {
+    const pending = directedNodeHoldRef.current;
+    if (pending) window.clearTimeout(pending.timer);
+    directedNodeHoldRef.current = undefined;
+  }, []);
+
   useEffect(() => {
-    return () => clearPendingNodeClick();
-  }, [clearPendingNodeClick]);
+    return () => {
+      clearPendingNodeClick();
+      clearDirectedNodeHold();
+    };
+  }, [clearDirectedNodeHold, clearPendingNodeClick]);
 
   const inspectorNodeStates = useMemo(() => {
     const states = new Map<string, "open" | "expanded">();
@@ -8534,6 +8841,48 @@ function StoryCanvas({
           inspectorState: inspectorNodeStates.get(node.id),
           details: {
             ...node.data.details,
+            coverImage:
+              node.data.kind === "event" && node.data.details?.showEventOverview === true
+                ? eventCoverImageForNode(project, node.data.details.event as EventNode)
+                : undefined,
+            dialogueTriggerPortraitUrl:
+              node.data.kind === "dialogueStart"
+                ? dialogueTriggerPortraitUrl(
+                    project,
+                    propertiesConfig,
+                    node.data.details?.start as DialogueStart | undefined,
+                  )
+                : undefined,
+            eventEditor:
+              node.data.kind === "event" && node.data.details?.showEventOverview === true
+                ? (() => {
+                    const event = node.data.details.event as EventNode;
+                    const scopeKey = activeScope && activeScope.kind !== "sequence" ? canvasScopeKey(activeScope) : undefined;
+                    const auxiliaryPanels = scopeKey
+                      ? project.canvas?.scopes?.[scopeKey]?.nodes?.[node.id]?.auxiliaryPanels
+                      : project.canvas?.nodes?.[node.id]?.auxiliaryPanels;
+                    return {
+                      description: event.description ?? "",
+                      coverImage: eventCoverImageForNode(project, event),
+                      imageAssets: (project.assets ?? [])
+                        .filter((asset) => asset.kind === "image")
+                        .map((asset) => ({ id: asset.id, name: asset.name })),
+                      coverImageOpen: auxiliaryPanels?.coverImage ?? false,
+                      descriptionOpen: auxiliaryPanels?.description ?? false,
+                      onDescriptionUpdate: (value: string) => onUpdateEvent(event.id, { description: value || undefined }),
+                      onCoverImageUpdate: (assetId?: string) => {
+                        onUpdateEvent(event.id, {
+                          coverImage: assetId
+                            ? { id: event.coverImage?.id ?? `event-cover:${crypto.randomUUID()}`, assetId }
+                            : undefined,
+                        });
+                        onAuxiliaryPanelChange(node.id, "coverImage", false);
+                      },
+                      onImportCoverImage: () => onImportEventCoverImage(event.id),
+                      onAuxiliaryPanelChange: (panel: "coverImage" | "description", open: boolean) => onAuxiliaryPanelChange(node.id, panel, open),
+                    };
+                  })()
+                : undefined,
             workspaceEditor:
             node.data.kind === "workspace" &&
             activeScope &&
@@ -8600,6 +8949,26 @@ function StoryCanvas({
                   };
                 })()
               : undefined,
+            decisionEditor:
+            node.data.kind === "decision" &&
+            typeof node.data.details?.eventId === "string" &&
+            (node.data.details?.decision as Decision | undefined)?.id
+              ? (() => {
+                  const eventId = node.data.details!.eventId as string;
+                  const decision = node.data.details!.decision as Decision;
+                  const optionStyle = decision.optionStyle === "iconOnly" ? "iconOnly" : "visibleText";
+                  return {
+                    optionStyle,
+                    onOptionStyleUpdate: (style: "visibleText" | "iconOnly") =>
+                      onUpdateDecision(eventId, decision.id, { optionStyle: style }),
+                    onOutcomeUpdate: (outcomeId: string, updates: Partial<Pick<Outcome, "visibleText">>) =>
+                      onUpdateOutcome(eventId, decision.id, outcomeId, updates),
+                    onCreateOutcome: () => onCreateOutcome(eventId, decision.id),
+                    onDeleteOutcome: (outcomeId: string) =>
+                      onDeleteOutcome(eventId, decision.id, outcomeId),
+                  };
+                })()
+              : undefined,
             quickEditor:
             (node.data.kind === "speechBeat" || node.data.kind === "directionBeat") &&
             typeof (node.data.details?.beat as { blockRef?: { scriptId?: unknown; blockId?: unknown } } | undefined)?.blockRef?.scriptId === "string" &&
@@ -8621,7 +8990,11 @@ function StoryCanvas({
                   const activeText = block
                     ? blockValues(project, blockRef.scriptId, block, primaryLocale)[canvasLocale] ?? ""
                     : "";
-                  const lengthTarget = beat.kind === "speech" ? beatEvent?.speechBeatLengthTarget : undefined;
+                  const lengthTarget = beat.kind === "speech"
+                    ? beatEvent?.speechBeatLengthTarget ?? (authoringDisplay.speechBeatCounterEnabled
+                      ? { unit: authoringDisplay.speechBeatCounterUnit, target: authoringDisplay.speechBeatCounterTarget }
+                      : undefined)
+                    : undefined;
                   const textCount = !lengthTarget
                     ? 0
                     : lengthTarget.unit === "words"
@@ -8636,7 +9009,7 @@ function StoryCanvas({
                       return attachment && asset ? { ...attachment, name: asset.name, url: universeAssetUrl(project, asset.path) } : undefined;
                     })(),
                     imageAssets: (project.assets ?? [])
-                      .filter((asset) => asset.kind === "image" && ["png", "jpg", "jpeg"].includes(asset.extension?.toLowerCase() ?? ""))
+                      .filter((asset) => asset.kind === "image")
                       .map((asset) => ({ id: asset.id, name: asset.name })),
                     directorNoteOpen: auxiliaryPanels?.directorNote ?? false,
                     sceneImageOpen: auxiliaryPanels?.sceneImage ?? false,
@@ -8746,7 +9119,7 @@ function StoryCanvas({
         };
       }),
     }),
-    [activeScope, canvasBackground.connectionPadding, canvasLocale, commitEdgeLabel, editingEdgeId, edges, inspectorEdgeStates, inspectorNodeStates, localeNames, locales, nodes, onAuxiliaryPanelChange, onCreateBoundaryEnd, onCreateBoundaryRoute, onCreateBoundaryRouteEvent, onDeleteBoundaryEnd, onImportSceneImage, onUpdateDialogueBeat, onUpdateEvent, onUpdateEventDialogueBeat, onUpdateLocalizedText, onUpdateScriptBlock, onUpdateTransition, onWorkspaceBoundsChange, primaryLocale, project],
+    [activeScope, authoringDisplay, canvasBackground.connectionPadding, canvasLocale, commitEdgeLabel, editingEdgeId, edges, inspectorEdgeStates, inspectorNodeStates, localeNames, locales, nodes, onAuxiliaryPanelChange, onCreateBoundaryEnd, onCreateBoundaryRoute, onCreateBoundaryRouteEvent, onCreateOutcome, onDeleteBoundaryEnd, onDeleteOutcome, onImportEventCoverImage, onImportSceneImage, onUpdateDecision, onUpdateDialogueBeat, onUpdateEvent, onUpdateEventDialogueBeat, onUpdateLocalizedText, onUpdateOutcome, onUpdateScriptBlock, onUpdateTransition, onWorkspaceBoundsChange, primaryLocale, project, propertiesConfig],
   );
   const activeEventScope =
     activeScope?.kind === "event"
@@ -8755,6 +9128,27 @@ function StoryCanvas({
         ? project.events.find((event) => event.id === activeScope.eventId)
         : undefined;
   const activeDialogueScope = activeScope?.kind === "dialogue" ? activeScope : undefined;
+
+  useEffect(() => {
+    const pendingNodeId = pendingLocateNodeRef.current;
+    if (!pendingNodeId || !reactFlowInstance) return;
+    const target = graph.nodes.find((node) => node.id === pendingNodeId);
+    if (!target) return;
+    pendingLocateNodeRef.current = undefined;
+    onSelect({ type: "node", id: target.id });
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        if (pendingLocateFitSkipRef.current !== pendingNodeId) return;
+        const size = canvasNodeSize(target);
+        reactFlowInstance.setCenter(
+          target.position.x + size.width / 2,
+          target.position.y + size.height / 2,
+          { duration: 220, zoom: 1 },
+        );
+        pendingLocateFitSkipRef.current = undefined;
+      });
+    });
+  }, [graph.nodes, onSelect, reactFlowInstance]);
 
   const breadcrumbs = useMemo(
     () => canvasBreadcrumb(project, activeScope),
@@ -8889,6 +9283,13 @@ function StoryCanvas({
     if (!hasFitNodes || (!scopeChanged && !nodesBecameAvailable)) {
       return;
     }
+    if (pendingLocateFitSkipRef.current && graph.nodes.some((node) => node.id === pendingLocateFitSkipRef.current)) {
+      fittedCanvasRef.current = {
+        projectKey: canvasProjectKey,
+        scopeKey: canvasScopeKeyValue,
+      };
+      return;
+    }
     fittedCanvasRef.current = {
       projectKey: canvasProjectKey,
       scopeKey: canvasScopeKeyValue,
@@ -8900,7 +9301,7 @@ function StoryCanvas({
         duration: 0,
       });
     });
-  }, [activeScope, canvasNodeIdSignature, canvasProjectKey, canvasScopeKeyValue, reactFlowInstance]);
+  }, [activeScope, canvasNodeIdSignature, canvasProjectKey, canvasScopeKeyValue, graph.nodes, reactFlowInstance]);
 
   const previousCanvasNodeIdsRef = useRef<{ scopeKey: string; ids: Set<string> } | undefined>(undefined);
   useEffect(() => {
@@ -8940,6 +9341,41 @@ function StoryCanvas({
     [activeScope, canvasBackground.gridSize, canvasBackground.snapToGrid, nodes, project.canvas?.scopes],
   );
 
+  const locateInspectorSelection = useCallback(
+    (nextSelection: Selection) => {
+      if (nextSelection.type !== "node") {
+        onSelect(nextSelection);
+        return;
+      }
+      const ownerEventId = eventIdFromSelection(project, graph.nodes, nextSelection)
+        ?? ownerEventIdFromCanvasSelection(project, nextSelection);
+      const target = graph.nodes.find((node) => node.id === nextSelection.id);
+      if (!target) {
+        if (ownerEventId) {
+          const scope = canvasScopeForSelection(project, nextSelection, ownerEventId);
+          if (scope) {
+            pendingLocateNodeRef.current = nextSelection.id;
+            pendingLocateFitSkipRef.current = nextSelection.id;
+            onNavigateScope(scope, nextSelection);
+          }
+          return;
+        }
+        onSelect(nextSelection);
+        return;
+      }
+      onSelect(nextSelection);
+      window.requestAnimationFrame(() => {
+        const size = canvasNodeSize(target);
+        reactFlowInstance?.setCenter(
+          target.position.x + size.width / 2,
+          target.position.y + size.height / 2,
+          { duration: 220 },
+        );
+      });
+    },
+    [graph.nodes, onNavigateScope, onSelect, project, reactFlowInstance],
+  );
+
   const openContextMenu = useCallback(
     (event: MouseEvent | ReactMouseEvent) => {
       event.preventDefault();
@@ -8957,6 +9393,9 @@ function StoryCanvas({
       if (workspaceNode && !isPointInside(workspaceNode, flowPosition.x, flowPosition.y)) {
         return;
       }
+      contextMenuFocusRef.current = document.activeElement instanceof HTMLElement && document.activeElement !== document.body
+        ? document.activeElement
+        : shellRef.current;
       const selectedNodeIds = nodes
         .filter((node) => node.selected)
         .map((node) => node.id);
@@ -9007,6 +9446,9 @@ function StoryCanvas({
       if (edgeItem.data?.kind !== "transition" || typeof edgeItem.data.routeSourceId !== "string") {
         return;
       }
+      contextMenuFocusRef.current = document.activeElement instanceof HTMLElement && document.activeElement !== document.body
+        ? document.activeElement
+        : shellRef.current;
       const shellRect = shellRef.current?.getBoundingClientRect();
       setContextMenu({
         kind: "route-gate",
@@ -9026,6 +9468,9 @@ function StoryCanvas({
       event.stopPropagation();
       clearPendingNodeClick();
       if (node.data.kind === "workspace") return;
+      contextMenuFocusRef.current = document.activeElement instanceof HTMLElement && document.activeElement !== document.body
+        ? document.activeElement
+        : shellRef.current;
       const selectedNodeIds = node.selected
         ? nodes.filter((candidate) => candidate.selected).map((candidate) => candidate.id)
         : [node.id];
@@ -9074,6 +9519,9 @@ function StoryCanvas({
       if (!point) {
         return;
       }
+      contextMenuFocusRef.current = document.activeElement instanceof HTMLElement && document.activeElement !== document.body
+        ? document.activeElement
+        : shellRef.current;
 
       const shellRect = shellRef.current?.getBoundingClientRect();
       const flowPosition = reactFlowInstance.screenToFlowPosition({
@@ -9108,7 +9556,9 @@ function StoryCanvas({
           { id: "normal", label: "Normal" },
           { id: "final", label: "Final", terminal: true },
         ];
+  const isNestedCanvas = activeScope?.kind === "event" || activeScope?.kind === "dialogue";
   const minimapNodeColor = useCallback((node: StoryCanvasNode) => {
+    if (node.data.kind === "workspace") return "var(--wn-editor-bg)";
     if (typeof node.data.minimapColor === "string")
       return node.data.minimapColor;
     if (typeof node.data.accentColor === "string") return node.data.accentColor;
@@ -9120,6 +9570,8 @@ function StoryCanvas({
     return "var(--wn-muted)";
   }, []);
   const minimapNodeStrokeColor = useCallback((node: StoryCanvasNode) => {
+    if (typeof node.data.details?.minimapStrokeColor === "string") return node.data.details.minimapStrokeColor;
+    if (node.data.kind === "workspace") return "var(--wn-accent)";
     if (typeof node.data.accentColor === "string") return node.data.accentColor;
     if (node.data.kind === "event") return "var(--pb-event)";
     return "var(--wn-border)";
@@ -9159,11 +9611,63 @@ function StoryCanvas({
     },
     [onNavigateScope, onOpenEventScript],
   );
+  const startDirectedNodeHold = useCallback(
+    (event: { button: number; shiftKey: boolean; target: EventTarget | null }, node: StoryCanvasNode) => {
+      if (
+        !directedNodeOpening ||
+        event.button !== 0 ||
+        event.shiftKey ||
+        node.data.kind === "workspace" ||
+        (event.target instanceof Element && event.target.closest("input, textarea, select, button, [contenteditable=\"true\"]"))
+      ) {
+        return;
+      }
+      clearPendingNodeClick();
+      clearDirectedNodeHold();
+      const nodeSelection = { type: "node" as const, id: node.id };
+      const timer = window.setTimeout(() => {
+        if (directedNodeHoldRef.current?.nodeId !== node.id) return;
+        directedNodeHoldRef.current = undefined;
+        onOpenCanvasInspector(nodeSelection);
+      }, DIRECTED_NODE_OPEN_DELAY_MS);
+      directedNodeHoldRef.current = { nodeId: node.id, timer };
+    },
+    [clearDirectedNodeHold, clearPendingNodeClick, directedNodeOpening, onOpenCanvasInspector],
+  );
+  const nodeForPointerTarget = useCallback(
+    (target: EventTarget | null) => {
+      const nodeElement = target instanceof Element
+        ? target.closest<HTMLElement>(".react-flow__node")
+        : null;
+      const nodeId = nodeElement?.dataset.id;
+      return nodeId ? nodes.find((node) => node.id === nodeId) : undefined;
+    },
+    [nodes],
+  );
+  useEffect(() => {
+    if (!directedNodeOpening || !shellRef.current) return;
+    const shell = shellRef.current;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (event.button !== 0) return;
+      const node = nodeForPointerTarget(event.target);
+      if (node) startDirectedNodeHold(event, node);
+    };
+    const handlePointerUp = () => clearDirectedNodeHold();
+    shell.addEventListener("pointerdown", handlePointerDown, true);
+    window.addEventListener("pointerup", handlePointerUp, true);
+    window.addEventListener("pointercancel", handlePointerUp, true);
+    return () => {
+      shell.removeEventListener("pointerdown", handlePointerDown, true);
+      window.removeEventListener("pointerup", handlePointerUp, true);
+      window.removeEventListener("pointercancel", handlePointerUp, true);
+    };
+  }, [clearDirectedNodeHold, directedNodeOpening, nodeForPointerTarget, startDirectedNodeHold]);
 
   return (
     <main
-      className={`canvas-shell ${activeScope?.kind === "event" ? "nested-scope" : ""} ${draggingEvent ? "dragging-event" : ""}`}
+      className={`canvas-shell ${activeScope?.kind === "event" || activeScope?.kind === "dialogue" ? "nested-scope" : ""} ${draggingEvent ? "dragging-event" : ""}`}
       ref={shellRef}
+      tabIndex={-1}
     >
       {showStatusMessages && message ? (
         <div className="canvas-message">{message}</div>
@@ -9254,6 +9758,8 @@ function StoryCanvas({
           onConnectEnd={openConnectionCreateMenu}
           onInit={setReactFlowInstance}
           onNodeDrag={(_, node) => {
+            clearDirectedNodeHold();
+            clearPendingNodeClick();
             draggedNodeRef.current = true;
             setDraggingEvent(node.data.kind === "event");
           }}
@@ -9270,46 +9776,36 @@ function StoryCanvas({
             if (node.data.kind === "workspace") return;
             if (event.target instanceof Element && event.target.closest("input, textarea, select, button, [contenteditable=\"true\"]")) return;
             if (draggedNodeRef.current || event.shiftKey) return;
-            const now = Date.now();
-            const pending = pendingNodeClickRef.current;
-            const clickCount =
-              pending?.nodeId === node.id &&
-              now - (pending.lastClickAt ?? 0) <= CANVAS_CLICK_SEQUENCE_WINDOW_MS
-                ? Math.min(pending.count + 1, 3)
-                : 1;
             const nodeSelection = { type: "node" as const, id: node.id };
-            clearPendingNodeClick();
-            if (clickCount === 1) {
-              onCanvasSelect(nodeSelection);
-              const timer = window.setTimeout(() => {
-                pendingNodeClickRef.current = undefined;
-              }, CANVAS_CLICK_SEQUENCE_WINDOW_MS);
-              pendingNodeClickRef.current = {
-                nodeId: node.id,
-                count: 1,
-                lastClickAt: now,
-                timer,
-              };
-            } else if (clickCount === 2) {
-              const timer = window.setTimeout(() => {
-                onOpenCanvasInspector(nodeSelection);
-                pendingNodeClickRef.current = undefined;
-              }, CANVAS_CLICK_SEQUENCE_WINDOW_MS);
-              pendingNodeClickRef.current = {
-                nodeId: node.id,
-                count: 2,
-                lastClickAt: now,
-                timer,
-              };
-            } else {
+            const clickCount = Math.max(event.detail || 1, 1);
+            clearDirectedNodeHold();
+            if (clickCount === 2) {
+              clearPendingNodeClick();
               openNodeCanvas(node);
+              return;
             }
+            if (clickCount > 2) {
+              clearPendingNodeClick();
+              return;
+            }
+            if (directedNodeOpening) {
+              clearPendingNodeClick();
+              onCanvasSelect(nodeSelection);
+              return;
+            }
+            clearPendingNodeClick();
+            onCanvasSelect(nodeSelection);
+            const timer = window.setTimeout(() => {
+              onOpenCanvasInspector(nodeSelection);
+              pendingNodeClickRef.current = undefined;
+            }, CANVAS_CLICK_SEQUENCE_WINDOW_MS);
+            pendingNodeClickRef.current = { nodeId: node.id, timer };
           }}
           onNodeContextMenu={openSelectionContextMenu}
           onEdgeClick={(event, edgeItem) => {
             setContextMenu(undefined);
             setEditingEdgeId(undefined);
-            const clickCount = Math.min(Math.max(event.detail || 1, 1), 3);
+            const clickCount = Math.max(event.detail || 1, 1);
             const edgeSelection = { type: "edge" as const, id: edgeItem.id };
             if (clickCount === 1) {
               onCanvasSelect(edgeSelection);
@@ -9338,15 +9834,28 @@ function StoryCanvas({
         >
           {minimapOpen ? (
             <MiniMap
+              className={isNestedCanvas ? "nested-scope-minimap" : undefined}
               pannable
               zoomable
               nodeColor={minimapNodeColor}
               nodeStrokeColor={minimapNodeStrokeColor}
               nodeStrokeWidth={3}
+              maskColor={isNestedCanvas ? "rgba(30, 41, 59, 0.22)" : undefined}
+              maskStrokeColor={isNestedCanvas ? "rgba(30, 41, 59, 0.48)" : undefined}
               position="bottom-left"
             />
           ) : null}
           <Controls position="bottom-left">
+            <button
+              type="button"
+              className={`react-flow__controls-button canvas-interaction-toggle${directedNodeOpening ? " active" : ""}`}
+              aria-pressed={directedNodeOpening}
+              onClick={() => setDirectedNodeOpening((enabled) => !enabled)}
+              title={directedNodeOpening ? "Directed opening enabled: hold a node for 0.75 seconds" : "Enable directed opening"}
+              aria-label={directedNodeOpening ? "Disable directed opening" : "Enable directed opening"}
+            >
+              <MousePointerClick size={14} aria-hidden="true" />
+            </button>
             <button
               type="button"
               className={`react-flow__controls-button ${minimapOpen ? "active" : ""}`}
@@ -9392,6 +9901,17 @@ function StoryCanvas({
               <span className="canvas-menu-label">
                 {contextMenu.nodeIds?.length ?? 0} selected node{(contextMenu.nodeIds?.length ?? 0) === 1 ? "" : "s"}
               </span>
+              <button
+                type="button"
+                onClick={() => {
+                  contextMenu.nodeIds?.forEach((id) =>
+                    onSelect({ type: "node", id }),
+                  );
+                  setContextMenu(undefined);
+                }}
+              >
+                Open inspectors
+              </button>
               {(() => {
                 const contextNode = contextMenu.contextNodeId
                   ? nodes.find((node) => node.id === contextMenu.contextNodeId)
@@ -9425,17 +9945,6 @@ function StoryCanvas({
                   </button>
                 );
               })()}
-              <button
-                type="button"
-                onClick={() => {
-                  contextMenu.nodeIds?.forEach((id) =>
-                    onSelect({ type: "node", id }),
-                  );
-                  setContextMenu(undefined);
-                }}
-              >
-                Open inspectors
-              </button>
               {activeScope?.kind === "event" && canCreateDialogueFromSelection(nodes, contextMenu.nodeIds ?? []) ? (
                 <button
                   type="button"
@@ -9492,6 +10001,92 @@ function StoryCanvas({
                 Insert Route Gate
               </button>
             </>
+          ) : contextMenu.kind === "connect-create" ? (
+            <>
+              <span className="canvas-menu-label">
+                {activeEventScope || activeDialogueScope
+                  ? "Create connected narrative node"
+                  : "Create connected event"}
+              </span>
+              {!activeDialogueScope ? (
+                <EventTypeMenuButton
+                  label="Events"
+                  options={eventTypeOptions}
+                  onSelect={(categoryId) => {
+                    if (contextMenu.sourceNodeId) {
+                      if (activeEventScope) {
+                        onCreateConnectedNestedEvent(
+                          activeEventScope.id,
+                          contextMenu.sourceNodeId,
+                          categoryId,
+                          positionForNewNode(
+                            { x: contextMenu.flowX, y: contextMenu.flowY },
+                            "event",
+                          ),
+                        );
+                      } else {
+                        onCreateConnectedEvent(
+                          contextMenu.sourceNodeId,
+                          categoryId,
+                          positionForNewNode(
+                            { x: contextMenu.flowX, y: contextMenu.flowY },
+                            "event",
+                          ),
+                        );
+                      }
+                    }
+                    setContextMenu(undefined);
+                  }}
+                />
+              ) : null}
+              {activeScope?.kind === "event" || activeDialogueScope
+                ? (() => {
+                    const scope = activeScope?.kind === "event"
+                      ? activeScope
+                      : activeDialogueScope;
+                    const sourceNodeId = contextMenu.sourceNodeId;
+                    if (!scope || !sourceNodeId) return null;
+                    const connectNarrativeNode = (
+                      kind: ConnectedNarrativeNodeKind,
+                      nodeKind: StoryCanvasNodeData["kind"],
+                    ) => {
+                      onCreateConnectedNarrativeNode(
+                        scope,
+                        sourceNodeId,
+                        kind,
+                        positionForNewNode(
+                          { x: contextMenu.flowX, y: contextMenu.flowY },
+                          nodeKind,
+                        ),
+                      );
+                      setContextMenu(undefined);
+                    };
+                    return (
+                      <>
+                        <button type="button" onClick={() => connectNarrativeNode("decision", "decision")}>
+                          Decision
+                        </button>
+                        <button type="button" onClick={() => connectNarrativeNode("speechBeat", "speechBeat")}>
+                          Speech Beat
+                        </button>
+                        <button type="button" onClick={() => connectNarrativeNode("directionBeat", "directionBeat")}>
+                          Director Direction
+                        </button>
+                        {activeEventScope ? (
+                          <>
+                            <button type="button" onClick={() => connectNarrativeNode("dialogue", "dialogue")}>
+                              Dialogue
+                            </button>
+                            <button type="button" onClick={() => connectNarrativeNode("dialogueStart", "dialogueStart")}>
+                              Dialogue Trigger
+                            </button>
+                          </>
+                        ) : null}
+                      </>
+                    );
+                  })()
+                : null}
+            </>
           ) : activeDialogueScope ? (
             <>
               <span className="canvas-menu-label">Create inside dialogue</span>
@@ -9509,27 +10104,27 @@ function StoryCanvas({
                   );
                   setContextMenu(undefined);
                 }}
-                >
-                  Speech Beat
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    onCreateDialogueBeat(
-                      activeDialogueScope.eventId,
-                      activeDialogueScope.id,
-                      "direction",
-                      positionForNewNode(
-                        { x: contextMenu.flowX, y: contextMenu.flowY },
-                        "directionBeat",
-                      ),
-                    );
-                    setContextMenu(undefined);
-                  }}
-                >
-                  Director Direction
-                </button>
-                <button
+              >
+                Speech Beat
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  onCreateDialogueBeat(
+                    activeDialogueScope.eventId,
+                    activeDialogueScope.id,
+                    "direction",
+                    positionForNewNode(
+                      { x: contextMenu.flowX, y: contextMenu.flowY },
+                      "directionBeat",
+                    ),
+                  );
+                  setContextMenu(undefined);
+                }}
+              >
+                Director Direction
+              </button>
+              <button
                 type="button"
                 onClick={() => {
                   onCreateDecision(
@@ -9545,36 +10140,6 @@ function StoryCanvas({
               >
                 Decision
               </button>
-            </>
-          ) : contextMenu.kind === "connect-create" ? (
-            <>
-              <span className="canvas-menu-label">Create connected event</span>
-              <EventTypeMenuButton
-                label="Events"
-                options={eventTypeOptions}
-                onSelect={(categoryId) => {
-                  if (contextMenu.sourceNodeId) {
-                    if (activeEventScope) {
-                      onCreateNestedEvent(activeEventScope.id, categoryId, {
-                        ...positionForNewNode(
-                          { x: contextMenu.flowX, y: contextMenu.flowY },
-                          "event",
-                        ),
-                      });
-                    } else {
-                      onCreateConnectedEvent(
-                        contextMenu.sourceNodeId,
-                        categoryId,
-                        positionForNewNode(
-                          { x: contextMenu.flowX, y: contextMenu.flowY },
-                          "event",
-                        ),
-                      );
-                    }
-                  }
-                  setContextMenu(undefined);
-                }}
-              />
             </>
           ) : (
             <>
@@ -9725,6 +10290,7 @@ function StoryCanvas({
         onLoadGroup={onLoadEventInspectorTabGroup}
         onDeleteGroup={onDeleteEventInspectorTabGroup}
         onSelect={onSelect}
+        onLocateInspectorTab={locateInspectorSelection}
         inspectorTabs={inspectorTabs}
         expandedInspectorTabId={expandedInspectorTabId}
         inspectorMaximized={inspectorMaximized}
@@ -9922,6 +10488,10 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
   >(undefined);
   const projectRevisionRef = useRef(0);
   const savedRevisionRef = useRef(0);
+  const pendingPathSelectionRef = useRef<{
+    scopeKey: string;
+    selection: Selection;
+  } | undefined>(undefined);
 
   useEffect(() => {
     if (!settings.inspectorDebugEnabled || !selection || !project) {
@@ -9969,6 +10539,7 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
         nodeColors: settingsRef.current.nodeColors,
         scope: normalizedScope,
         gridSize: settingsRef.current.canvasBackground.gridSize,
+        authoringDisplay: settingsRef.current.authoringDisplay,
       });
       if (options.dirty || options.revision) {
         projectRevisionRef.current += 1;
@@ -10042,6 +10613,7 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
         nodeColors: settingsRef.current.nodeColors,
         scope: normalizedScope,
         gridSize: settingsRef.current.canvasBackground.gridSize,
+        authoringDisplay: settingsRef.current.authoringDisplay,
       });
       workspaceRef.current = nextWorkspace;
       projectRef.current = activeProjectWithScope;
@@ -10163,6 +10735,7 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
           nodeColors: settingsRef.current.nodeColors,
           scope: snapshotScope,
           gridSize: settingsRef.current.canvasBackground.gridSize,
+          authoringDisplay: settingsRef.current.authoringDisplay,
         });
         setProject(snapshot.project);
         setActiveScopeState(snapshotScope);
@@ -10280,7 +10853,7 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
   );
 
   const changeAuxiliaryPanel = useCallback(
-    (nodeId: string, panel: "directorNote" | "sceneImage", open: boolean) => {
+    (nodeId: string, panel: "directorNote" | "sceneImage" | "coverImage" | "description", open: boolean) => {
       const currentProject = projectRef.current;
       if (!currentProject) return;
       commitCanvasAction(
@@ -11088,12 +11661,13 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
       nodeColors: settings.nodeColors,
       scope,
       gridSize: settings.canvasBackground.gridSize,
+      authoringDisplay: settings.authoringDisplay,
     });
     setActiveScopeState(scope);
     setNodes(model.nodes);
     setEdges(model.edges);
     setFiles(model.files);
-  }, [settings.nodeColors]);
+  }, [settings.authoringDisplay, settings.nodeColors]);
 
   const changeTheme = useCallback((theme: ThemeId) => {
     setSettings((current) => ({ ...current, theme }));
@@ -11218,6 +11792,19 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
   const changeShowStatusMessages = useCallback((value: boolean) => {
     setSettings((current) => ({ ...current, showStatusMessages: value }));
   }, []);
+
+  const changeAuthoringDisplay = useCallback(
+    (updates: Partial<AuthoringDisplaySettings>) => {
+      setSettings((current) => ({
+        ...current,
+        authoringDisplay: normalizeAuthoringDisplaySettings({
+          ...current.authoringDisplay,
+          ...updates,
+        }),
+      }));
+    },
+    [],
+  );
 
   const changeNodeColors = useCallback(
     (updates: Partial<NodeColorSettings>) => {
@@ -11585,6 +12172,8 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
 
   const closeAllInspectorTabs = useCallback(() => {
     setEventInspector((current) => closeAllEventInspectorTabs(current));
+    setInspectorTabs((current) => current.filter((tab) => tab.mode === "debug"));
+    setExpandedInspectorTabId(undefined);
   }, []);
 
   const closeInspectorTabsAbove = useCallback(
@@ -11711,6 +12300,18 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
     },
     [nodes, openEventInspectorForEvent],
   );
+
+  useEffect(() => {
+    const pending = pendingPathSelectionRef.current;
+    if (!pending || !activeScope || canvasScopeKey(activeScope) !== pending.scopeKey) {
+      return;
+    }
+    if (!nodes.some((node) => node.id === pending.selection.id)) {
+      return;
+    }
+    pendingPathSelectionRef.current = undefined;
+    selectWithEventDraftGuard(pending.selection);
+  }, [activeScope, nodes, selectWithEventDraftGuard]);
 
   const openInspectorTab = useCallback(
     (id: string) => {
@@ -11925,6 +12526,47 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
     }
   }, [commitStructuralAction, fileState.universePath]);
 
+  const importEventCoverImage = useCallback(async (eventId: string) => {
+    if (!fileState.universePath) {
+      setMessage("Open a universe before importing event cover images.");
+      return;
+    }
+    try {
+      const imported = await importSceneImages(fileState.universePath);
+      if (imported.length === 0) return;
+      const current = projectRef.current;
+      if (!current) return;
+      const event = current.events.find((candidate) => candidate.id === eventId);
+      if (!event) {
+        setError("Event not found while importing the cover image.");
+        return;
+      }
+      const importedAt = new Date().toISOString();
+      const registered = imported.map((asset) => ({
+        ...asset,
+        id: `asset:${crypto.randomUUID()}`,
+        origin: "uncanon" as const,
+        importedAt,
+      }));
+      const withAssets: BranchingProject = {
+        ...current,
+        assets: [...(current.assets ?? []), ...registered],
+      };
+      const result = mutations.updateEvent(withAssets, eventId, {
+        coverImage: {
+          id: event.coverImage?.id ?? `event-cover:${crypto.randomUUID()}`,
+          assetId: registered[0].id,
+        },
+      });
+      await commitStructuralAction("Set event cover image", {
+        project: result.project,
+        message: "Set event cover image.",
+      });
+    } catch (assetError) {
+      setError(assetError instanceof Error ? assetError.message : String(assetError));
+    }
+  }, [commitStructuralAction, fileState.universePath]);
+
   useEffect(() => {
     if (!desktopRuntime || !fileState.universePath) return;
     let cancelled = false;
@@ -12119,6 +12761,14 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
     if (suiteChrome && !suiteChrome.active) return;
 
     const handleKeyDown = (event: KeyboardEvent) => {
+      const target = event.target;
+      const editingText = target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement ||
+        (target instanceof HTMLElement && target.isContentEditable);
+      if (editingText && (shortcutMatches(event, "Mod+Z") || shortcutMatches(event, "Mod+Shift+Z"))) {
+        return;
+      }
       if (shortcutMatches(event, "Mod+Z")) {
         event.preventDefault();
         undoProject();
@@ -12174,6 +12824,7 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
         nodeColors: settingsRef.current.nodeColors,
         scope: normalizedScope,
         gridSize: settingsRef.current.canvasBackground.gridSize,
+        authoringDisplay: settingsRef.current.authoringDisplay,
       });
       projectRef.current = nextProject;
       setProject(nextProject);
@@ -12190,12 +12841,14 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
 
   const navigatePathTreeNode = useCallback(
     (node: PathTreeNode) => {
-      navigateCanvasScope(node.scope, { type: "node", id: node.selectId });
-      if (node.eventId) {
-        openEventInspectorForEvent(node.eventId);
-      }
+      const nextSelection = { type: "node" as const, id: node.selectId };
+      pendingPathSelectionRef.current = {
+        scopeKey: canvasScopeKey(node.scope),
+        selection: nextSelection,
+      };
+      navigateCanvasScope(node.scope, nextSelection);
     },
-    [navigateCanvasScope, openEventInspectorForEvent],
+    [navigateCanvasScope],
   );
 
   const enterEventScope = useCallback(
@@ -12663,6 +13316,139 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
       );
     },
     [runCanvasMutation],
+  );
+
+  const createConnectedNestedEvent = useCallback(
+    (
+      parentEventId: string,
+      sourceNodeId: string,
+      type: EventType = "normal",
+      position?: { x: number; y: number },
+    ) => {
+      if (!isTauriRuntime()) {
+        setMessage(
+          "Preview web: no guarda en universo. Abre Everend PathBranching con Tauri para crear microeventos persistentes.",
+        );
+        return;
+      }
+      const currentProject = projectRef.current;
+      if (!currentProject || workspaceRef.current?.createdDefaultStory) {
+        setMessage(
+          "Create an Everend PathBranching story before adding nested events.",
+        );
+        return;
+      }
+      const snap = settingsRef.current.canvasBackground;
+      const snappedPosition = position
+        ? snapCanvasPoint(position, snap.snapToGrid, snap.gridSize)
+        : undefined;
+      const created = mutations.createNestedEvent(
+        currentProject,
+        parentEventId,
+        type,
+        snappedPosition,
+      );
+      const targetEventId =
+        created.selection?.type === "node" ? created.selection.id : undefined;
+      if (!targetEventId || created.project === currentProject) {
+        setMessage(created.message ?? "Could not create a connected nested event.");
+        return;
+      }
+      const route = mutations.createInternalTransition(
+        created.project,
+        parentEventId,
+        sourceNodeId,
+        targetEventId,
+      );
+      runCanvasMutation(route, "Created connected nested event");
+    },
+    [runCanvasMutation],
+  );
+
+  const createConnectedNarrativeNode = useCallback(
+    (
+      scope: Extract<CanvasScope, { kind: "event" | "dialogue" }>,
+      sourceNodeId: string,
+      kind: ConnectedNarrativeNodeKind,
+      position: CanvasPoint,
+    ) => {
+      if (!isTauriRuntime()) {
+        setMessage(
+          "Preview web: no guarda en universo. Abre Everend PathBranching con Tauri para crear nodos persistentes.",
+        );
+        return;
+      }
+      const currentProject = projectRef.current;
+      if (!currentProject || workspaceRef.current?.createdDefaultStory) {
+        setMessage(
+          "Create an Everend PathBranching story before adding narrative nodes.",
+        );
+        return;
+      }
+
+      const eventId = scope.kind === "event" ? scope.id : scope.eventId;
+      const sourceProject =
+        eventDraft?.eventId === eventId
+          ? applyEventDraftToProject(currentProject, eventDraft)
+          : currentProject;
+      if (eventDraft?.eventId === eventId) {
+        setEventDraft(undefined);
+      }
+
+      const created = (() => {
+        switch (kind) {
+          case "decision":
+            return mutations.createDecision(
+              sourceProject,
+              eventId,
+              scope.kind === "dialogue" ? scope.id : undefined,
+            );
+          case "dialogue":
+            return mutations.createDialogue(sourceProject, eventId);
+          case "speechBeat":
+          case "directionBeat":
+            return scope.kind === "dialogue"
+              ? mutations.createDialogueBeat(
+                  sourceProject,
+                  eventId,
+                  scope.id,
+                  kind === "speechBeat" ? "speech" : "direction",
+                )
+              : mutations.createEventDialogueBeat(
+                  sourceProject,
+                  eventId,
+                  kind === "speechBeat" ? "speech" : "direction",
+                );
+          case "dialogueStart":
+            return mutations.createDialogueStart(sourceProject, eventId);
+        }
+      })();
+      const positioned = positionMutationNode(
+        created,
+        snapCanvasPoint(
+          position,
+          settingsRef.current.canvasBackground.snapToGrid,
+          settingsRef.current.canvasBackground.gridSize,
+        ),
+        scope,
+      );
+      const targetNodeId =
+        positioned.selection?.type === "node" ? positioned.selection.id : undefined;
+      if (!targetNodeId || positioned.project === currentProject) {
+        setMessage(positioned.message ?? "Could not create the connected narrative node.");
+        return;
+      }
+      runCanvasMutation(
+        mutations.createInternalTransition(
+          positioned.project,
+          eventId,
+          sourceNodeId,
+          targetNodeId,
+        ),
+        "Created connected narrative node",
+      );
+    },
+    [eventDraft, runCanvasMutation],
   );
 
   const createBoundaryRoute = useCallback(
@@ -15386,6 +16172,7 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
       findings={findings}
       theme={activeTheme}
       onUpdateEventCategories={updateEventCategories}
+      onAuthoringDisplayChange={changeAuthoringDisplay}
       onCanvasBackgroundChange={changeCanvasBackground}
       onNodeColorChange={changeNodeColors}
       onThemeChange={changeTheme}
@@ -15570,12 +16357,6 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
             onCollapsedChange={(collapsed) => setPanelCollapsedState("assets", collapsed)}
             onContextMenu={openPanelContextMenu}
             onImport={() => void importAssets()}
-            onCreateScript={createScriptDocument}
-            onUpdateScript={updateScriptDocument}
-            onAddScriptBlock={createScriptBlock}
-            onUpdateScriptBlock={updateScriptBlock}
-            onInsertScriptBlock={insertScriptBlock}
-            focusScriptBlock={focusedScriptBlock}
             selected={selection}
             onSelect={selectWithEventDraftGuard}
             onCreateEntity={createExplorerEntity}
@@ -15592,6 +16373,8 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
             selected={selection}
             onSelect={selectWithEventDraftGuard}
             onCreateProperty={createExplorerProperty}
+            onUpdateLocalExplorerProperty={updateLocalExplorerProperty}
+            onUpdateLogicPropertyOverride={updateLogicPropertyOverride}
           /> : null}
           {panelVisibility.outline ? <FilesPanel
             project={project}
@@ -15692,6 +16475,7 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
             expandedInspectorTabId={expandedInspectorTabId}
             inspectorMaximized={inspectorMaximized}
             canvasBackground={settings.canvasBackground}
+            authoringDisplay={settings.authoringDisplay}
             onCanvasBackgroundChange={changeCanvasBackground}
             onNodesChange={handleNodesChange}
             onEdgesChange={handleEdgesChange}
@@ -15706,6 +16490,8 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
             onToggleData={() => setDataOpen((open) => !open)}
             onCreateEvent={createEvent}
             onCreateNestedEvent={createNestedEvent}
+            onCreateConnectedNestedEvent={createConnectedNestedEvent}
+            onCreateConnectedNarrativeNode={createConnectedNarrativeNode}
             onCreateConnectedEvent={createConnectedEvent}
             onUpdateSequence={updateSequence}
             onUpdateBranch={updateBranch}
@@ -15720,6 +16506,7 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
             onUpdateDialogueBeat={updateDialogueBeat}
             onUpdateEventDialogueBeat={updateEventDialogueBeat}
             onImportSceneImage={importSceneImageForBeat}
+            onImportEventCoverImage={importEventCoverImage}
             onAuxiliaryPanelChange={changeAuxiliaryPanel}
             onUpdateScriptBlock={updateCanvasScriptBlock}
             onUpdateLocalizedText={updateCanvasLocalizedText}
@@ -15790,10 +16577,7 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
             onDeleteEventInspectorTabGroup={deleteInspectorTabGroup}
             onOpenInspectorTab={openInspectorTab}
             onCloseInspectorTab={closeInspectorTab}
-            onCloseAllInspectorTabs={() => {
-              setInspectorTabs((current) => current.filter((tab) => tab.mode === "debug"));
-              setExpandedInspectorTabId(undefined);
-            }}
+            onCloseAllInspectorTabs={closeAllInspectorTabs}
             onDisableInspectorDebug={() => changeInspectorDebugEnabled(false)}
             onToggleInspectorMaximized={() => setInspectorMaximized((current) => !current)}
             onSaveManualInspector={() => {

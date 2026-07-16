@@ -20,6 +20,7 @@ import type {
 import { conditionInputsFromConsequences, walkConditions } from "./logic.js";
 import { scriptBlockTextKey } from "./localization.js";
 import { canvasScopeKey } from "./storySelection.js";
+import { automaticEventName, automaticNarrativeName } from "./narrativeNaming.js";
 
 export type MutationSelection =
   | { type: "node"; id: string }
@@ -387,7 +388,7 @@ export function createEvent(
     : undefined;
   const newEvent: EventNode = {
     id: eventId,
-    name: safeType === "final" ? "Final Event" : "New Event",
+    name: automaticEventName(project, safeType, undefined, targetBranch?.id),
     type: safeType,
     text: { format: "plain", content: "" },
     branchRef: targetBranch?.id,
@@ -453,7 +454,7 @@ export function createNestedEvent(
   );
   const newEvent: EventNode = {
     id: eventId,
-    name: safeType === "final" ? "Final Microevent" : "New Microevent",
+    name: automaticEventName(project, safeType, parentEventId, parentEvent.branchRef ?? undefined),
     type: safeType,
     parentEventId,
     childEventIds: [],
@@ -550,7 +551,7 @@ export function createDecision(
   );
   const decision: Decision = {
     id: decisionId,
-    name: "New Decision",
+    name: automaticNarrativeName(project, eventId, "Decision", (event.decisions ?? []).length + 1),
     description: "",
     type: "dialogue",
     optionStyle: "visibleText",
@@ -660,7 +661,8 @@ export function createOutcome(
   );
   const outcome: Outcome = {
     id: outcomeId,
-    name: "New Outcome",
+    name: automaticNarrativeName(project, eventId, "Option", decision.outcomes.length + 1),
+    visibleText: "",
     description: "",
     requiredCanonRefs: [],
     consequences: [],
@@ -732,7 +734,7 @@ export function createDialogue(
   );
   const dialogue: DialogueNode = {
     id: dialogueId,
-    title: "New Dialogue",
+    title: automaticNarrativeName(project, eventId, "Dialogue", (event.dialogues ?? []).length + 1),
     text: { format: "plain", content: "" },
     canonRefs: [],
     beats: [],
@@ -767,7 +769,7 @@ export function groupDialogueMembers(
   );
   const dialogue: DialogueNode = {
     id: dialogueId,
-    title: "New Dialogue",
+    title: automaticNarrativeName(project, eventId, "Dialogue", (event.dialogues ?? []).length + 1),
     text: { format: "plain", content: "" },
     canonRefs: [],
     beats: selectedBeats,

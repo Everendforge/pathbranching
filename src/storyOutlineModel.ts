@@ -1,4 +1,4 @@
-import type { Branch, BranchingProject, CanvasScope, EventNode, Sequence, Transition } from "./domain.js";
+import type { Branch, BranchingProject, CanvasScope, Decision, DialogueBeat, EventNode, Outcome, ScriptBlock, Sequence, Transition } from "./domain.js";
 import { conditionCount } from "./logic.js";
 
 export type StoryOutlineTab = "sequence" | "branches" | "paths";
@@ -224,7 +224,7 @@ export function buildEventDependencyOutline(project: BranchingProject, sequenceI
     });
 }
 
-export type PathTreeNodeKind = "event" | "decision" | "dialogue";
+export type PathTreeNodeKind = "event" | "decision" | "dialogue" | "beat" | "trigger" | "outcome";
 
 export type PathTreeNode = {
   id: string;
@@ -238,6 +238,74 @@ export type PathTreeNode = {
   children: PathTreeNode[];
 };
 
+function scriptBlockForBeat(project: BranchingProject, beat: DialogueBeat): ScriptBlock | undefined {
+  return project.scriptDocuments
+    ?.find((script) => script.id === beat.blockRef.scriptId)
+    ?.blocks.find((block) => block.id === beat.blockRef.blockId);
+}
+
+function beatPathNode(
+  project: BranchingProject,
+  event: EventNode,
+  beat: DialogueBeat,
+  scope: CanvasScope,
+  index: number,
+  dialogueId?: string,
+): PathTreeNode {
+  const block = scriptBlockForBeat(project, beat);
+  const content = block?.content.trim();
+  const kindLabel = beat.kind === "speech" ? "Speech Beat" : "Direction";
+  return {
+    id: `beat:${event.id}:${beat.id}`,
+    kind: "beat",
+    label: content ? content.slice(0, 80) : `${kindLabel} ${index + 1}`,
+    subtitle: `${kindLabel}${dialogueId ? " · Dialogue" : ""}`,
+    badges: block?.characterRef || block?.speakerRef ? [block.characterRef ?? block.speakerRef ?? ""] : [],
+    scope,
+    selectId: `beat:${event.id}:${beat.id}`,
+    eventId: event.id,
+    children: [],
+  };
+}
+
+function outcomePathNode(
+  event: EventNode,
+  decision: Decision,
+  outcome: Outcome,
+  index: number,
+  scope: CanvasScope,
+): PathTreeNode {
+  return {
+    id: `outcome:${event.id}:${decision.id}:${outcome.id}`,
+    kind: "outcome",
+    label: (outcome.visibleText ?? outcome.name).trim() || `Option ${String.fromCharCode(65 + index)}`,
+    subtitle: outcome.name,
+    badges: outcome.availability ? ["conditional"] : [],
+    scope,
+    selectId: `outcome:${event.id}:${decision.id}:${outcome.id}`,
+    eventId: event.id,
+    children: [],
+  };
+}
+
+function decisionPathNode(
+  event: EventNode,
+  decision: Decision,
+  scope: CanvasScope,
+): PathTreeNode {
+  return {
+    id: `decision:${event.id}:${decision.id}`,
+    kind: "decision",
+    label: decision.name,
+    subtitle: `${decision.outcomes.length} outcome${decision.outcomes.length === 1 ? "" : "s"}`,
+    badges: [decision.type],
+    scope,
+    selectId: `decision:${event.id}:${decision.id}`,
+    eventId: event.id,
+    children: decision.outcomes.map((outcome, index) => outcomePathNode(event, decision, outcome, index, scope)),
+  };
+}
+
 function buildEventPathNode(project: BranchingProject, event: EventNode, scope: CanvasScope, visited: Set<string>): PathTreeNode {
   const nestedScope: CanvasScope = { kind: "event", id: event.id };
   const childEvents = visited.has(event.id)
@@ -249,37 +317,40 @@ function buildEventPathNode(project: BranchingProject, event: EventNode, scope: 
 
   const children: PathTreeNode[] = [
     ...childEvents.map((child) => buildEventPathNode(project, child, nestedScope, nextVisited)),
-    ...(event.decisions ?? []).filter((decision) => !decision.dialogueId).map((decision): PathTreeNode => ({
-      id: `decision:${event.id}:${decision.id}`,
-      kind: "decision",
-      label: decision.name,
-      subtitle: `${decision.outcomes.length} outcome${decision.outcomes.length === 1 ? "" : "s"}`,
-      badges: [decision.type],
+    ...(event.dialogueStarts ?? []).map((start): PathTreeNode => ({
+      id: `dialogue-start:${event.id}:${start.id}`,
+      kind: "trigger",
+      label: start.source?.kind === "canonRef"
+        ? project.canonRefs.find((ref) => ref.id === start.source?.id)?.label ?? start.source.id
+        : start.source?.kind === "dataObject"
+          ? project.projectDataObjects?.find((item) => item.id === start.source?.id)?.name ?? start.source.id
+          : "Choose an interactable source",
+      subtitle: "Dialogue Trigger",
+      badges: start.availability ? ["conditional"] : [],
       scope: nestedScope,
-      selectId: `decision:${event.id}:${decision.id}`,
+      selectId: `dialogue-start:${event.id}:${start.id}`,
+      eventId: event.id,
       children: [],
     })),
+    ...(event.dialogueBeats ?? []).map((beat, index) => beatPathNode(project, event, beat, nestedScope, index)),
+    ...(event.decisions ?? []).filter((decision) => !decision.dialogueId).map((decision) => decisionPathNode(event, decision, nestedScope)),
     ...(event.dialogues ?? []).map((dialogue): PathTreeNode => {
       const dialogueScope: CanvasScope = { kind: "dialogue", id: dialogue.id, eventId: event.id };
       const dialogueDecisions = (event.decisions ?? []).filter((decision) => decision.dialogueId === dialogue.id);
+      const dialogueBeats = dialogue.beats ?? [];
       return {
         id: `dialogue:${event.id}:${dialogue.id}`,
         kind: "dialogue",
         label: dialogue.title,
-        subtitle: `${dialogue.beats?.length ?? 0} beats`,
+        subtitle: `${dialogueBeats.length} beat${dialogueBeats.length === 1 ? "" : "s"}`,
         badges: dialogueDecisions.length ? [`${dialogueDecisions.length} decisions`] : [],
         scope: dialogueScope,
         selectId: `dialogue-boundary:${event.id}:${dialogue.id}:input`,
-        children: dialogueDecisions.map((decision) => ({
-          id: `decision:${event.id}:${decision.id}`,
-          kind: "decision" as const,
-          label: decision.name,
-          subtitle: `${decision.outcomes.length} outcomes`,
-          badges: [decision.type],
-          scope: dialogueScope,
-          selectId: `decision:${event.id}:${decision.id}`,
-          children: [],
-        })),
+        eventId: event.id,
+        children: [
+          ...dialogueBeats.map((beat, index) => beatPathNode(project, event, beat, dialogueScope, index, dialogue.id)),
+          ...dialogueDecisions.map((decision) => decisionPathNode(event, decision, dialogueScope)),
+        ],
       };
     }),
   ];

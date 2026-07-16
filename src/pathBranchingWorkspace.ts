@@ -278,6 +278,7 @@ type ModularStoryFile = {
   sourceVault?: BranchingProject["sourceVault"];
   dataClasses?: BranchingProject["dataClasses"];
   projectDataObjects?: BranchingProject["projectDataObjects"];
+  assets?: BranchingProject["assets"];
   canonEditSuggestions?: BranchingProject["canonEditSuggestions"];
   projectionRules?: BranchingProject["projectionRules"];
   graphModules?: BranchingProject["graphModules"];
@@ -440,6 +441,7 @@ function parseModularStoryProject(
       sourceVault: parsedStory.sourceVault,
       dataClasses: parsedStory.dataClasses,
       projectDataObjects: parsedStory.projectDataObjects,
+      assets: parsedStory.assets ?? [],
       canonEditSuggestions: parsedStory.canonEditSuggestions,
       projectionRules: parsedStory.projectionRules,
       graphModules: parsedStory.graphModules,
@@ -636,6 +638,7 @@ export function serializeModularStoryFiles(
     sourceVault: project.sourceVault,
     dataClasses: project.dataClasses,
     projectDataObjects: project.projectDataObjects,
+    assets: project.assets ?? [],
     canonEditSuggestions: project.canonEditSuggestions,
     projectionRules: project.projectionRules,
     graphModules: project.graphModules,

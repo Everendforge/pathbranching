@@ -2,6 +2,7 @@ import {
   BaseEdge,
   EdgeLabelRenderer,
   getBezierPath,
+  getStraightPath,
   type EdgeProps,
 } from "@xyflow/react";
 import { useEffect, useRef, useState } from "react";
@@ -25,6 +26,37 @@ function routePreview(value: unknown): RoutePreview | undefined {
   return value && typeof value === "object" ? value as RoutePreview : undefined;
 }
 
+function entryArrowheads(sourceX: number, sourceY: number, targetX: number, targetY: number) {
+  const deltaX = targetX - sourceX;
+  const deltaY = targetY - sourceY;
+  const length = Math.hypot(deltaX, deltaY);
+  if (length < 1) return [];
+
+  const unitX = deltaX / length;
+  const unitY = deltaY / length;
+  const normalX = -unitY;
+  const normalY = unitX;
+  const arrowSize = 7;
+  const baseWidth = 4.5;
+  const start = Math.min(20, length * 0.2);
+  const end = Math.max(start, length - 16);
+  const count = Math.max(3, Math.min(16, Math.floor((end - start) / 22) + 1));
+
+  return Array.from({ length: count }, (_, index) => {
+    const distance = count === 1 ? (start + end) / 2 : start + ((end - start) * index) / (count - 1);
+    const centerX = sourceX + unitX * distance;
+    const centerY = sourceY + unitY * distance;
+    const tipX = centerX + unitX * arrowSize;
+    const tipY = centerY + unitY * arrowSize;
+    const baseX = centerX - unitX * arrowSize;
+    const baseY = centerY - unitY * arrowSize;
+    return {
+      id: `${index}`,
+      points: `${tipX},${tipY} ${baseX + normalX * baseWidth},${baseY + normalY * baseWidth} ${baseX - normalX * baseWidth},${baseY - normalY * baseWidth}`,
+    };
+  });
+}
+
 export function EditableCanvasEdge({
   sourceX,
   sourceY,
@@ -38,15 +70,17 @@ export function EditableCanvasEdge({
 }: EdgeProps<StoryCanvasEdge>) {
   const edgeData = data as EditableCanvasEdgeData | undefined;
   const connectionPadding = Number(edgeData?.connectionPadding ?? 0);
-  const [edgePath, labelX, labelY] = getBezierPath({
+  const isEntryEdge = edgeData?.kind === "entry";
+  const [edgePath, labelX, labelY] = (isEntryEdge ? getStraightPath : getBezierPath)({
     sourceX,
     sourceY,
     sourcePosition,
     targetX,
     targetY,
     targetPosition,
-    curvature: Math.min(0.85, 0.25 + connectionPadding / 128),
+    ...(isEntryEdge ? {} : { curvature: Math.min(0.85, 0.25 + connectionPadding / 128) }),
   });
+  const arrowheads = isEntryEdge ? entryArrowheads(sourceX, sourceY, targetX, targetY) : [];
   const editing = edgeData?.editing === true;
   const label =
     typeof edgeData?.customLabel === "string"
@@ -80,10 +114,20 @@ export function EditableCanvasEdge({
         markerEnd={markerEnd}
         style={{
           ...style,
-          stroke: edgeData?.inspectorState ? "var(--wn-accent)" : style?.stroke,
+          stroke: isEntryEdge
+            ? "var(--pb-start)"
+            : edgeData?.inspectorState
+              ? "var(--wn-accent)"
+              : style?.stroke,
+          strokeLinecap: "round",
           strokeWidth: edgeData?.inspectorState === "expanded" ? 3 : edgeData?.inspectorState ? 2.25 : style?.strokeWidth,
         }}
       />
+      {arrowheads.length > 0 ? (
+        <g className="canvas-entry-arrowheads" aria-hidden="true">
+          {arrowheads.map((arrowhead) => <polygon key={arrowhead.id} points={arrowhead.points} />)}
+        </g>
+      ) : null}
       {editing || label || previewLabel ? (
         <EdgeLabelRenderer>
           <div

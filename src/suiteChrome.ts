@@ -6,6 +6,32 @@ export type SuiteSettings = {
   style: string;
   onStyleChange: (style: string) => void;
   onToggleStyleMode: () => void;
+  update: SuiteUpdateControls;
+};
+
+export type SuiteUpdateStatus =
+  | "idle"
+  | "checking"
+  | "up-to-date"
+  | "available"
+  | "downloading"
+  | "error";
+
+export type SuiteUpdateControls = {
+  appName: string;
+  currentVersion: string;
+  identifier: string;
+  platform: string;
+  status: SuiteUpdateStatus;
+  availableVersion?: string;
+  releaseNotes?: string;
+  progress?: number;
+  downloadedBytes?: number;
+  contentLength?: number;
+  lastCheckedAt?: string;
+  error?: string;
+  onCheck: () => void;
+  onInstall: () => void;
 };
 
 export type SuiteChrome = {

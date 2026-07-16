@@ -60,6 +60,17 @@ export type CanvasBackgroundSettings = {
 
 export type CanvasLayoutMode = "branching" | "timeline" | "branches";
 
+export type AuthoringDisplaySettings = {
+  showDecisionCount: boolean;
+  showOutcomeCount: boolean;
+  showDialogueCount: boolean;
+  showCharacterCount: boolean;
+  showWordCount: boolean;
+  speechBeatCounterEnabled: boolean;
+  speechBeatCounterUnit: "words" | "characters";
+  speechBeatCounterTarget: number;
+};
+
 export type NodeColorSettings = {
   sequence: string;
   start: string;
@@ -94,8 +105,8 @@ export type EventInspectorTabGroup = {
 
 export const DEFAULT_CANVAS_BACKGROUND_SETTINGS: CanvasBackgroundSettings = {
   showDots: true,
-  showGrid: false,
-  snapToGrid: false,
+  showGrid: true,
+  snapToGrid: true,
   gridSize: 24,
   opacity: 0.5,
   connectionPadding: 18,
@@ -113,6 +124,17 @@ export const DEFAULT_NODE_COLOR_SETTINGS: NodeColorSettings = {
   inkSection: "#8d93ff",
   knowledge: "#7ca83a",
   runtimeAction: "#d45d78",
+};
+
+export const DEFAULT_AUTHORING_DISPLAY_SETTINGS: AuthoringDisplaySettings = {
+  showDecisionCount: true,
+  showOutcomeCount: true,
+  showDialogueCount: true,
+  showCharacterCount: true,
+  showWordCount: false,
+  speechBeatCounterEnabled: true,
+  speechBeatCounterUnit: "characters",
+  speechBeatCounterTarget: 120,
 };
 
 export type PathBranchingWorkspaceSession = {
@@ -148,6 +170,7 @@ export type AppSettings = {
   lastView?: AppView;
   canvasBackground: CanvasBackgroundSettings;
   canvasLayout: CanvasLayoutMode;
+  authoringDisplay: AuthoringDisplaySettings;
   nodeColors: NodeColorSettings;
   worldnotionBridge: WorldNotionBridgeSettings;
   workspaceSessions?: Record<string, PathBranchingWorkspaceSession>;
@@ -156,6 +179,28 @@ export type AppSettings = {
   inspectorDebugEnabled: boolean;
   showStatusMessages: boolean;
 };
+
+export function normalizeAuthoringDisplaySettings(value: unknown): AuthoringDisplaySettings {
+  const settings = value && typeof value === "object"
+    ? (value as Partial<AuthoringDisplaySettings>)
+    : {};
+  const hasCharacterCountSetting = typeof settings.showCharacterCount === "boolean";
+  const target = typeof settings.speechBeatCounterTarget === "number" && Number.isFinite(settings.speechBeatCounterTarget)
+    ? Math.min(2000, Math.max(1, Math.round(settings.speechBeatCounterTarget)))
+    : DEFAULT_AUTHORING_DISPLAY_SETTINGS.speechBeatCounterTarget;
+  return {
+    showDecisionCount: typeof settings.showDecisionCount === "boolean" ? settings.showDecisionCount : DEFAULT_AUTHORING_DISPLAY_SETTINGS.showDecisionCount,
+    showOutcomeCount: typeof settings.showOutcomeCount === "boolean" ? settings.showOutcomeCount : DEFAULT_AUTHORING_DISPLAY_SETTINGS.showOutcomeCount,
+    showDialogueCount: typeof settings.showDialogueCount === "boolean" ? settings.showDialogueCount : DEFAULT_AUTHORING_DISPLAY_SETTINGS.showDialogueCount,
+    showCharacterCount: typeof settings.showCharacterCount === "boolean" ? settings.showCharacterCount : DEFAULT_AUTHORING_DISPLAY_SETTINGS.showCharacterCount,
+    showWordCount: hasCharacterCountSetting && typeof settings.showWordCount === "boolean"
+      ? settings.showWordCount
+      : DEFAULT_AUTHORING_DISPLAY_SETTINGS.showWordCount,
+    speechBeatCounterEnabled: typeof settings.speechBeatCounterEnabled === "boolean" ? settings.speechBeatCounterEnabled : DEFAULT_AUTHORING_DISPLAY_SETTINGS.speechBeatCounterEnabled,
+    speechBeatCounterUnit: settings.speechBeatCounterUnit === "words" ? "words" : "characters",
+    speechBeatCounterTarget: target,
+  };
+}
 
 export function normalizeCanvasBackgroundSettings(
   value: unknown,
@@ -307,6 +352,7 @@ export function loadSettings(): AppSettings {
         parsed.canvasBackground,
       ),
       canvasLayout: normalizeCanvasLayoutMode(parsed.canvasLayout),
+      authoringDisplay: normalizeAuthoringDisplaySettings(parsed.authoringDisplay),
       nodeColors: normalizeNodeColorSettings(parsed.nodeColors),
       worldnotionBridge: normalizeWorldNotionBridgeSettings(
         parsed.worldnotionBridge,
@@ -336,6 +382,7 @@ export function loadSettings(): AppSettings {
       lastView: "home",
       canvasBackground: DEFAULT_CANVAS_BACKGROUND_SETTINGS,
       canvasLayout: "branching",
+      authoringDisplay: DEFAULT_AUTHORING_DISPLAY_SETTINGS,
       nodeColors: normalizeNodeColorSettings(undefined),
       worldnotionBridge: normalizeWorldNotionBridgeSettings(undefined),
       workspaceSessions: {},

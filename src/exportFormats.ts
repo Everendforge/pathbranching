@@ -91,7 +91,7 @@ function consequenceComment(consequences: Consequence[] | undefined) {
 function outcomeLine(project: BranchingProject, ownerEvent: EventNode, outcome: Outcome) {
   const transition = ownerEvent.transitions?.find((candidate) => candidate.from.endsWith(`:${outcome.id}`));
   const target = transition ? ` -> ${inkSafeId(transition.to)}` : "";
-  return `  * ${outcome.name}${target}${conditionComment(outcome.conditions)}${consequenceComment(outcome.consequences)}`;
+  return `  * ${outcome.visibleText?.trim() || outcome.name}${target}${conditionComment(outcome.conditions)}${consequenceComment(outcome.consequences)}`;
 }
 
 function decisionLines(project: BranchingProject, event: EventNode, decision: Decision) {

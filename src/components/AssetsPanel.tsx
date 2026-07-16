@@ -1,8 +1,7 @@
-import { BookOpen, ChevronDown, ChevronRight, CircleDot, FileImage, FileText, Film, FolderUp, MapPin, MoreHorizontal, Music, Package, Plus, ScrollText, Search, Trash2, UserRound } from "lucide-react";
-import { useDeferredValue, useEffect, useMemo, useState, type ComponentType, type CSSProperties, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import { BookOpen, ChevronDown, ChevronRight, CircleDot, FileImage, FileText, Film, FolderUp, MapPin, MoreHorizontal, Music, Package, Plus, Search, Trash2, UserRound } from "lucide-react";
+import { useDeferredValue, useMemo, useState, type ComponentType, type CSSProperties, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import type { Selection } from "../appTypes.js";
-import type { AssetKind, BranchingProject, CanonRef, LocalExplorerEntity, ProjectAsset, ProjectDataObject, ScriptBlock } from "../domain.js";
-import { canonRefHasRole } from "../integrationConfig.js";
+import type { AssetKind, BranchingProject, CanonRef, LocalExplorerEntity, ProjectAsset, ProjectDataObject } from "../domain.js";
 import { WorkspaceSidePanel } from "./WorkspaceSidePanel.js";
 
 const kinds: Array<{ id: AssetKind | "all"; label: string }> = [
@@ -77,12 +76,6 @@ export function AssetsPanel({
   onCollapsedChange,
   onContextMenu,
   onImport,
-  onCreateScript,
-  onUpdateScript,
-  onAddScriptBlock,
-  onUpdateScriptBlock,
-  onInsertScriptBlock,
-  focusScriptBlock,
   selected,
   onSelect,
   onCreateEntity,
@@ -94,12 +87,6 @@ export function AssetsPanel({
   onCollapsedChange: (collapsed: boolean) => void;
   onContextMenu: (event: ReactMouseEvent<HTMLElement>) => void;
   onImport: () => void;
-  onCreateScript: () => void;
-  onUpdateScript: (scriptId: string, updates: { name?: string }) => void;
-  onAddScriptBlock: (scriptId: string, kind: ScriptBlock["kind"]) => void;
-  onUpdateScriptBlock: (scriptId: string, blockId: string, updates: Partial<ScriptBlock>) => void;
-  onInsertScriptBlock: (scriptId: string, blockId: string, eventId: string, dialogueId: string) => void;
-  focusScriptBlock?: { scriptId: string; blockId: string };
   selected?: Selection;
   onSelect: (selection: Selection) => void;
   onCreateEntity: (type: string) => void;
@@ -109,13 +96,11 @@ export function AssetsPanel({
   const [query, setQuery] = useState("");
   const [kind, setKind] = useState<AssetKind | "all">("all");
   const [origin, setOrigin] = useState<"all" | ProjectAsset["origin"]>("all");
-  const [view, setView] = useState<"items" | "files" | "scripts">("items");
+  const [view, setView] = useState<"items" | "files">("items");
   const [itemFilter, setItemFilter] = useState<"all" | "canon" | "local" | "data">("all");
   const [newEntityType, setNewEntityType] = useState("concept");
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => new Set());
   const [actionsForId, setActionsForId] = useState<string>();
-  const [selectedScriptId, setSelectedScriptId] = useState<string>();
-  const [dialogueTarget, setDialogueTarget] = useState("");
   const deferredQuery = useDeferredValue(query.trim().toLowerCase());
   const assets = useMemo(
     () => (project.assets ?? []).filter((asset) =>
@@ -124,28 +109,6 @@ export function AssetsPanel({
       (!deferredQuery || `${asset.name} ${asset.path} ${asset.tags?.join(" ") ?? ""}`.toLowerCase().includes(deferredQuery)),
     ),
     [deferredQuery, kind, origin, project.assets],
-  );
-  const scripts = project.scriptDocuments ?? [];
-  const selectedScript = scripts.find((script) => script.id === selectedScriptId) ?? scripts[0];
-  useEffect(() => {
-    if (!focusScriptBlock) return;
-    setView("scripts");
-    setSelectedScriptId(focusScriptBlock.scriptId);
-    const frame = window.requestAnimationFrame(() => {
-      const key = `${focusScriptBlock.scriptId}:${focusScriptBlock.blockId}`;
-      document.querySelector(`[data-script-block-key="${CSS.escape(key)}"]`)?.scrollIntoView({
-        block: "center",
-        behavior: "smooth",
-      });
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [focusScriptBlock]);
-  const speakers = project.canonRefs.filter((ref) => canonRefHasRole(project, ref, "speaker"));
-  const dialogueTargets = project.events.flatMap((event) =>
-    (event.dialogues ?? []).map((dialogue) => ({
-      value: `${event.id}|${dialogue.id}`,
-      label: `${event.name} · ${dialogue.title}`,
-    })),
   );
   const allExplorerRows = useMemo(() => explorerRows(project), [project]);
   const explorerTypes = useMemo(() => Array.from(new Set(["concept", ...allExplorerRows.filter((row) => row.kind !== "data").map((row) => row.type), ...(project.localExplorerTypes ?? []).map((type) => type.id)])).sort((left, right) => left.localeCompare(right)), [allExplorerRows, project.localExplorerTypes]);
@@ -175,7 +138,6 @@ export function AssetsPanel({
       <div className="explorer-view-tabs" role="tablist" aria-label="Asset views">
         <button type="button" className={view === "items" ? "active" : ""} onClick={() => setView("items")}>Items</button>
         <button type="button" className={view === "files" ? "active" : ""} onClick={() => setView("files")}>Files</button>
-        <button type="button" className={view === "scripts" ? "active" : ""} onClick={() => setView("scripts")}>Scripts</button>
       </div>
       {view === "items" ? (
         <>
@@ -215,7 +177,7 @@ export function AssetsPanel({
             {explorerGroups.length === 0 ? <span className="empty-line">No items match this search.</span> : null}
           </div>
         </>
-      ) : view === "files" ? (
+      ) : (
         <>
           <div className="panel-toolbar asset-toolbar">
             <label className="asset-search"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search assets" /></label>
@@ -237,64 +199,6 @@ export function AssetsPanel({
             {assets.length === 0 ? <p className="panel-empty">No matching assets. Imported files remain UnCanon until an explicit publication flow exists.</p> : null}
           </div>
         </>
-      ) : (
-        <div className="script-assets-view">
-          <div className="panel-toolbar">
-            <strong>Structured scripts</strong>
-            <button type="button" onClick={onCreateScript}><Plus size={14} /> Script</button>
-          </div>
-          <div className="script-document-tabs">
-            {scripts.map((script) => (
-              <button key={script.id} type="button" className={selectedScript?.id === script.id ? "active" : ""} onClick={() => setSelectedScriptId(script.id)}>
-                <ScrollText size={13} /> {script.name}
-              </button>
-            ))}
-          </div>
-          {selectedScript ? (
-            <div className="script-document-editor">
-              <label className="field-label">
-                Script name
-                <input value={selectedScript.name} onChange={(event) => onUpdateScript(selectedScript.id, { name: event.target.value })} />
-              </label>
-              <div className="script-block-actions">
-                {(["scene", "direction", "speech", "annotation"] as const).map((blockKind) => (
-                  <button key={blockKind} type="button" onClick={() => onAddScriptBlock(selectedScript.id, blockKind)}>+ {blockKind}</button>
-                ))}
-              </div>
-              <div className="script-block-list">
-                {selectedScript.blocks.map((block) => (
-                  <article className={`script-block ${block.kind}`} data-script-block-key={`${selectedScript.id}:${block.id}`} key={block.id}>
-                    <span>{block.kind}</span>
-                    {block.kind === "speech" ? (
-                      <select value={block.speakerRef ?? ""} onChange={(event) => onUpdateScriptBlock(selectedScript.id, block.id, { speakerRef: event.target.value || undefined })}>
-                        <option value="">Narrador</option>
-                        {speakers.map((speaker) => <option key={speaker.id} value={speaker.id}>{speaker.label ?? speaker.id}</option>)}
-                      </select>
-                    ) : null}
-                    <textarea rows={block.kind === "scene" ? 2 : 4} value={block.content} onChange={(event) => onUpdateScriptBlock(selectedScript.id, block.id, { content: event.target.value })} />
-                    <div className="script-block-insert">
-                      <select value={dialogueTarget} onChange={(event) => setDialogueTarget(event.target.value)} aria-label="Dialogue target">
-                        <option value="">Insert into dialogue…</option>
-                        {dialogueTargets.map((target) => <option key={target.value} value={target.value}>{target.label}</option>)}
-                      </select>
-                      <button
-                        type="button"
-                        disabled={!dialogueTarget}
-                        onClick={() => {
-                          const [eventId, dialogueId] = dialogueTarget.split("|");
-                          if (eventId && dialogueId) onInsertScriptBlock(selectedScript.id, block.id, eventId, dialogueId);
-                        }}
-                      >
-                        Insert node
-                      </button>
-                    </div>
-                  </article>
-                ))}
-                {selectedScript.blocks.length === 0 ? <p className="panel-empty">Add a structured block, then insert it into a dialogue canvas.</p> : null}
-              </div>
-            </div>
-          ) : <p className="panel-empty">Create a script to build the shared narrative text raccord.</p>}
-        </div>
       )}
     </WorkspaceSidePanel>
   );

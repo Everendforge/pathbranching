@@ -469,6 +469,28 @@ export function validateProject(project: BranchingProject): ValidationFinding[] 
     if (event.locationRef) {
       validateCanonRef(findings, canonIds, event.id, event.locationRef, `Event "${event.id}" location`);
     }
+    if (event.coverImage) {
+      const asset = project.assets?.find((candidate) => candidate.id === event.coverImage?.assetId);
+      if (!asset) {
+        findings.push(
+          finding(
+            "missing_event_cover_image",
+            "error",
+            `Event "${event.id}" references missing cover image asset "${event.coverImage.assetId}".`,
+            { id: event.id, ref: event.coverImage.assetId },
+          ),
+        );
+      } else if (asset.kind !== "image") {
+        findings.push(
+          finding(
+            "invalid_event_cover_image",
+            "error",
+            `Event "${event.id}" cover image asset "${event.coverImage.assetId}" is not an image.`,
+            { id: event.id, ref: event.coverImage.assetId },
+          ),
+        );
+      }
+    }
 
     const presentEntityIds = event.presentEntityRefs ?? event.canonRefs ?? [];
     presentEntityIds.forEach((canonRef) => {

@@ -38,11 +38,14 @@ let project = {
 };
 
 project = createSequence(project, "Opening Route").project;
-project = createEvent(project, "normal", { x: 340, y: 140 }).project;
+const eventMutation = createEvent(project, "normal", { x: 340, y: 140 });
+project = eventMutation.project;
 
-const editedEvent = project.events.find((event) => event.name === "New Event");
+const editedEvent = eventMutation.selection?.type === "node"
+  ? project.events.find((event) => event.id === eventMutation.selection.id)
+  : undefined;
 if (!editedEvent) {
-  throw new Error("Expected structural createEvent action to produce a New Event.");
+  throw new Error("Expected structural createEvent action to produce an event.");
 }
 
 let draft = createEventDraftFromSelection(project, { type: "node", id: editedEvent.id }, "text");

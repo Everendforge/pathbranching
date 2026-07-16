@@ -103,9 +103,10 @@ if (!createdSequence) {
   throw new Error("Expected createSequence to add a named sequence before serialization.");
 }
 
-const createdEvent = eventMutation.project.events.find((event) => event.name === "New Event");
+const createdEventId = eventMutation.selection?.type === "node" ? eventMutation.selection.id : undefined;
+const createdEvent = eventMutation.project.events.find((event) => event.id === createdEventId);
 if (!createdEvent) {
-  throw new Error("Expected createEvent to add a New Event before serialization.");
+  throw new Error("Expected createEvent to add an event before serialization.");
 }
 
 const reloadedSequence = reloadedWorkspace.activeProject.sequences.find((sequence) => sequence.id === createdSequence.id);

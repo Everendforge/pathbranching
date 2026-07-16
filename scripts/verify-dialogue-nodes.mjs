@@ -154,7 +154,10 @@ groupedProject = detachDialogueMembers(groupedProject, eventId, groupedDialogue.
 assert.ok(groupedProject.events[0].dialogueBeats.some((beat) => beat.id === groupedBeatId), "Detaching must restore the beat to the event.");
 assert.equal(groupedProject.events[0].decisions[0].dialogueId, undefined, "Detaching must restore the Decision to the event.");
 const triggerCanvas = buildStoryCanvasModel(groupedProject, { scope: { kind: "event", id: eventId } });
-assert.ok(triggerCanvas.nodes.some((node) => node.id === triggerNodeId && node.data.title === "Dialogue Trigger"), "Expected the trigger to render independently from Dialogue containers.");
+assert.ok(
+  triggerCanvas.nodes.some((node) => node.id === triggerNodeId && node.data.title.includes("Dialogue Trigger")),
+  "Expected the trigger to render independently from Dialogue containers.",
+);
 assert.ok(triggerCanvas.edges.some((edge) => edge.source === triggerNodeId && edge.target === `decision:${eventId}:${groupedDecisionId}`), "Expected the trigger connection to render on the event subcanvas.");
 
 const sceneBeatId = groupedProject.events[0].dialogueBeats[0].id;
@@ -171,6 +174,21 @@ groupedProject = normalizeProject({
 assert.equal(groupedProject.events[0].dialogueBeats.find((beat) => beat.id === sceneBeatId)?.sceneImage?.assetId, "asset:scene-one", "Expected one scene image to persist on the speech beat.");
 const sceneRuntimeBeat = exportRuntimePackage(groupedProject).nodes.find((node) => node.id === `beat:${eventId}:${sceneBeatId}`);
 assert.equal(sceneRuntimeBeat?.sceneImage?.path, ".everend/assets/image/one.png", "Expected runtime export to retain the relative scene-image path.");
+const coverProject = normalizeProject({
+  ...groupedProject,
+  events: groupedProject.events.map((event) => event.id === eventId
+    ? { ...event, coverImage: { id: "event-cover:one", assetId: "asset:scene-one" } }
+    : event),
+});
+const coverRuntimeEvent = exportRuntimePackage(coverProject).nodes.find((node) => node.id === eventId);
+assert.equal(coverRuntimeEvent?.coverImage?.path, ".everend/assets/image/one.png", "Expected event cover images to reach runtime export.");
+const missingCoverProject = normalizeProject({
+  ...coverProject,
+  events: coverProject.events.map((event) => event.id === eventId
+    ? { ...event, coverImage: { id: "event-cover:missing", assetId: "asset:missing" } }
+    : event),
+});
+assert.ok(validateProject(missingCoverProject).some((finding) => finding.code === "missing_event_cover_image"), "Expected a missing event cover asset to fail validation.");
 const missingSceneImageProject = updateEventDialogueBeat(groupedProject, eventId, sceneBeatId, { sceneImage: { id: "scene-image:missing", assetId: "asset:missing" } }).project;
 assert.ok(validateProject(missingSceneImageProject).some((finding) => finding.code === "missing_scene_image"), "Expected a missing scene-image asset to fail validation.");
 const invalidSceneImageProject = normalizeProject({

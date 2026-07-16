@@ -1,6 +1,7 @@
 import type {
   BranchingProject,
   CanonRef,
+  ExplorerPropertyOption,
   LocalExplorerProperty,
   LocalExplorerType,
 } from "./domain.js";
@@ -24,6 +25,8 @@ export type CanonExplorerProperty = {
   path: string[];
   description?: string;
   appliesToTypes?: string[];
+  required?: boolean;
+  options?: ExplorerPropertyOption[];
   children: CanonExplorerProperty[];
 };
 
@@ -70,6 +73,21 @@ function textArray(value: unknown) {
     : undefined;
 }
 
+function propertyOptions(value: unknown): ExplorerPropertyOption[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const options = value.flatMap((candidate) => {
+    const option = record(candidate);
+    const optionValue = text(option?.value);
+    if (!optionValue) return [];
+    return [{
+      value: optionValue,
+      label: text(option?.label) ?? optionValue,
+      color: text(option?.color),
+    }];
+  });
+  return options.length ? options : undefined;
+}
+
 export function canonExplorerTypes(
   config: UnknownRecord | undefined,
 ): CanonExplorerType[] {
@@ -102,6 +120,8 @@ export function canonExplorerProperties(
     const id = text(definition?.id);
     if (!id) return undefined;
     const path = [...parentPath, id];
+    const required = definition?.required === true;
+    const options = propertyOptions(definition?.options);
     return {
       id,
       label: text(definition?.label) ?? id,
@@ -111,6 +131,8 @@ export function canonExplorerProperties(
       // WorldNotion v3 stores the type scope in `appliesTo`. Keep the older
       // spelling for imports created before the parent/child property model.
       appliesToTypes: textArray(definition?.appliesTo) ?? textArray(definition?.appliesToTypes),
+      ...(required ? { required: true } : {}),
+      ...(options ? { options } : {}),
       children: Array.isArray(definition?.children)
         ? definition.children
             .map((child) => parse(child, path))

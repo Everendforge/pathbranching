@@ -14,7 +14,10 @@ import type {
   ValidationFinding,
 } from "../domain.js";
 import { conditionCount, conditionLabels, consequenceLabel, walkConditions } from "../logic.js";
+import { blockValues, localizedValue } from "../localization.js";
 import { activeCanvasScope, canvasScopeKey } from "../storySelection.js";
+import { automaticNarrativeName } from "../narrativeNaming.js";
+import type { AuthoringDisplaySettings } from "../workspaceSettings.js";
 
 export type StoryCanvasNodeKind =
   | "sequence"
@@ -36,6 +39,11 @@ export type StoryCanvasNodeKind =
   | "runtimeAction"
   | "missingRef";
 
+export type CanvasInfoBadge = {
+  kind: "decisions" | "outcomes" | "dialogues" | "characters" | "words";
+  count: number;
+};
+
 export type StoryCanvasEdgeKind =
   | "entry"
   | "boundary"
@@ -52,6 +60,7 @@ export type StoryCanvasNodeData = {
   storyObjectId: string;
   badges: string[];
   summaryBadges?: string[];
+  infoBadges?: CanvasInfoBadge[];
   details?: Record<string, unknown>;
   collapsed?: boolean;
   isContainer?: boolean;
@@ -117,6 +126,7 @@ export type StoryCanvasModelOptions = {
   nodeColors?: StoryCanvasNodeColors;
   scope?: CanvasScope;
   gridSize?: number;
+  authoringDisplay?: AuthoringDisplaySettings;
 };
 
 function hashString(value: string) {
@@ -168,6 +178,7 @@ function pushNode(
     isContainer?: boolean;
     nodeColors?: StoryCanvasNodeColors;
     summaryBadges?: string[];
+    infoBadges?: CanvasInfoBadge[];
     scope?: CanvasScope;
     autoPosition?: boolean;
     draggable?: boolean;
@@ -192,6 +203,7 @@ function pushNode(
       storyObjectId: id,
       badges,
       summaryBadges: options.summaryBadges,
+      infoBadges: options.infoBadges,
       details,
       accentColor: typeof details.accentColor === "string" ? details.accentColor : nodeColor(kind, { nodeColors: options.nodeColors }),
       branchColor: typeof details.branchColor === "string" ? details.branchColor : undefined,
@@ -254,7 +266,8 @@ function decisionOutcomeNodeId(eventId: string, decisionId: string, outcomeId: s
 function decisionOptions(eventId: string, decision: NonNullable<EventNode["decisions"]>[number]) {
   return decision.outcomes.map((outcome) => ({
     id: outcome.id,
-    name: outcome.name,
+    name: outcome.visibleText ?? outcome.name,
+    visibleText: outcome.visibleText,
     description: outcome.description,
     icon: outcome.icon,
     handleId: decisionOutcomeNodeId(eventId, decision.id, outcome.id),
@@ -430,27 +443,64 @@ function branchesForSequence(project: BranchingProject, sequenceId: string | und
 
 function eventBadges(project: BranchingProject, eventNode: EventNode) {
   const category = project.eventCategories?.find((item) => item.id === eventNode.type);
-  const terminal = eventNode.type === "final" || Boolean(category?.terminal);
   const canonRefCount = eventNode.canonRefs?.length ?? 0;
+  const categoryLabel = eventNode.type !== "normal"
+    ? category?.label ?? eventNode.type
+    : undefined;
   return [
-    ...(terminal ? ["terminal"] : []),
+    ...(categoryLabel ? [categoryLabel] : []),
     ...(canonRefCount > 0 ? [`${canonRefCount} refs`] : []),
     ...(eventNode.script ? ["ink"] : []),
-    ...(eventNode.decisions?.length ? [`${eventNode.decisions.length} decisions`] : []),
     ...(eventNode.unlocks?.length ? ["unlocks"] : []),
     ...logicBadges(eventNode.availability, eventNode.ruleSets?.length ?? 0),
     ...dataUseBadges(project, eventNode.availability),
   ];
 }
 
-function eventSummaryBadges(eventNode: EventNode) {
+function eventTextCounts(project: BranchingProject, eventNode: EventNode) {
+  const primaryLocale = project.localizationCatalog?.primaryLocale ?? "und";
+  const beats = [
+    ...(eventNode.dialogueBeats ?? []),
+    ...(eventNode.dialogues ?? []).flatMap((dialogue) => dialogue.beats ?? []),
+  ];
+  const seenBlocks = new Set<string>();
+  return beats.reduce((counts, beat) => {
+    const blockKey = `${beat.blockRef.scriptId}:${beat.blockRef.blockId}`;
+    if (seenBlocks.has(blockKey)) return counts;
+    seenBlocks.add(blockKey);
+    const document = project.scriptDocuments?.find((candidate) => candidate.id === beat.blockRef.scriptId);
+    const block = document?.blocks.find((candidate) => candidate.id === beat.blockRef.blockId);
+    if (!block) return counts;
+    const text = localizedValue(blockValues(project, beat.blockRef.scriptId, block, primaryLocale), primaryLocale, primaryLocale);
+    return {
+      words: counts.words + (text.trim() ? text.trim().split(/\s+/u).length : 0),
+      characters: counts.characters + Array.from(text).length,
+    };
+  }, { words: 0, characters: 0 });
+}
+
+function authoringDisplaySettings(options: StoryCanvasModelOptions) {
+  return {
+    showDecisionCount: options.authoringDisplay?.showDecisionCount ?? true,
+    showOutcomeCount: options.authoringDisplay?.showOutcomeCount ?? true,
+    showDialogueCount: options.authoringDisplay?.showDialogueCount ?? true,
+    showCharacterCount: options.authoringDisplay?.showCharacterCount ?? true,
+    showWordCount: options.authoringDisplay?.showWordCount ?? false,
+  };
+}
+
+function eventInfoBadges(project: BranchingProject, eventNode: EventNode, options: StoryCanvasModelOptions): CanvasInfoBadge[] {
+  const display = authoringDisplaySettings(options);
   const decisionCount = eventNode.decisions?.length ?? 0;
   const outcomeCount = eventNode.decisions?.reduce((count, decision) => count + decision.outcomes.length, 0) ?? 0;
-  const dialogueCount = eventNode.dialogues?.length ?? 0;
+  const dialogueCount = (eventNode.dialogues?.length ?? 0) + (eventNode.dialogueBeats?.length ?? 0);
+  const textCounts = eventTextCounts(project, eventNode);
   return [
-    `${decisionCount} decision${decisionCount === 1 ? "" : "s"}`,
-    ...(outcomeCount > 0 ? [`${outcomeCount} outcome${outcomeCount === 1 ? "" : "s"}`] : []),
-    ...(dialogueCount > 0 ? [`${dialogueCount} dialogue${dialogueCount === 1 ? "" : "s"}`] : []),
+    ...(display.showDecisionCount ? [{ kind: "decisions" as const, count: decisionCount }] : []),
+    ...(display.showOutcomeCount && outcomeCount > 0 ? [{ kind: "outcomes" as const, count: outcomeCount }] : []),
+    ...(display.showDialogueCount && dialogueCount > 0 ? [{ kind: "dialogues" as const, count: dialogueCount }] : []),
+    ...(display.showCharacterCount && textCounts.characters > 0 ? [{ kind: "characters" as const, count: textCounts.characters }] : []),
+    ...(display.showWordCount && textCounts.words > 0 ? [{ kind: "words" as const, count: textCounts.words }] : []),
   ];
 }
 
@@ -741,7 +791,7 @@ function addSubcanvasWorkspace(
     bounds.x,
     bounds.y,
     [],
-    { scope },
+    { scope, minimapColor: "var(--wn-editor-bg)", minimapStrokeColor: "var(--wn-accent)" },
     {
       scope,
       autoPosition: true,
@@ -924,7 +974,7 @@ function addEventSupportNodes(
       decision.name,
       decision.description ?? decision.id,
       820,
-      cursor.decisionY + decisionIndex * 190,
+      cursor.decisionY,
       [
         decision.type,
         `${decision.outcomes.length} outcomes`,
@@ -934,13 +984,11 @@ function addEventSupportNodes(
       { eventId: eventNode.id, decision, options: decisionOptions(eventNode.id, decision) },
       {
         nodeColors: options.nodeColors,
-        summaryBadges: [`${decision.outcomes.length} outcome${decision.outcomes.length === 1 ? "" : "s"}`],
         width: 300,
-        height: Math.max(126, 74 + decision.outcomes.length * 44),
       },
     );
 
-    cursor.decisionY += Math.max(190, decision.outcomes.length * 62);
+    cursor.decisionY += Math.max(220, 108 + decision.outcomes.length * 62);
   });
 
   addConsequenceNodes(project, nodes, edges, createdKnowledge, eventNode.id, eventNode.name, eventNode.unlocks, cursor, options);
@@ -1015,7 +1063,7 @@ function buildEventScopeModel(
       },
       {
         nodeColors: options.nodeColors,
-        summaryBadges: eventSummaryBadges(childEvent),
+        infoBadges: eventInfoBadges(project, childEvent, options),
         scope,
       },
     );
@@ -1034,7 +1082,7 @@ function buildEventScopeModel(
       decision.name,
       decision.description ?? decision.id,
       380,
-      420 + index * 168,
+      420 + index * 240,
       [
         decision.type,
         `${decision.outcomes.length} outcomes`,
@@ -1044,10 +1092,8 @@ function buildEventScopeModel(
       { eventId: eventNode.id, decision, options: decisionOptions(eventNode.id, decision) },
       {
         nodeColors: options.nodeColors,
-        summaryBadges: [`${decision.outcomes.length} outcome${decision.outcomes.length === 1 ? "" : "s"}`],
         scope,
         width: 300,
-        height: Math.max(126, 74 + decision.outcomes.length * 44),
       },
     );
   });
@@ -1068,7 +1114,12 @@ function buildEventScopeModel(
       nodes,
       nodeId,
       beat.kind === "speech" ? "speechBeat" : "directionBeat",
-      block?.content.trim().slice(0, 80) || (beat.kind === "speech" ? "New speech" : "New direction"),
+      block?.content.trim().slice(0, 80) || automaticNarrativeName(
+        project,
+        eventNode.id,
+        beat.kind === "speech" ? "Speech Beat" : "Director Direction",
+        index + 1,
+      ),
       beat.kind === "speech" ? speaker : "Stage direction",
       740,
       420 + index * 168,
@@ -1102,7 +1153,7 @@ function buildEventScopeModel(
         ? project.projectDataObjects?.find((item) => item.id === start.source?.id)?.name ?? start.source.id
         : undefined;
     const nodeId = `dialogue-start:${eventNode.id}:${start.id}`;
-    pushNode(
+      pushNode(
       project,
       nodes,
       nodeId,
@@ -1293,7 +1344,12 @@ function buildDialogueScopeModel(
       nodes,
       nodeId,
       beat.kind === "speech" ? "speechBeat" : "directionBeat",
-      block?.content.trim().slice(0, 80) || (beat.kind === "speech" ? "New speech" : "New direction"),
+      block?.content.trim().slice(0, 80) || automaticNarrativeName(
+        project,
+        eventNode.id,
+        beat.kind === "speech" ? "Speech Beat" : "Director Direction",
+        index + 1,
+      ),
       beat.kind === "speech" ? speaker : "Stage direction",
       330 + (index % 2) * 310,
       90 + Math.floor(index / 2) * 175,
@@ -1313,10 +1369,10 @@ function buildDialogueScopeModel(
       decision.name,
       decision.description ?? decision.id,
       340 + (index % 2) * 320,
-      460 + Math.floor(index / 2) * 180,
+      460 + Math.floor(index / 2) * 220,
       [decision.type, `${decision.outcomes.length} outcomes`, ...logicBadges(decision.availability, decision.ruleSets?.length ?? 0)],
       { eventId: eventNode.id, dialogueId: dialogue.id, decision, options: decisionOptions(eventNode.id, decision) },
-      { nodeColors: options.nodeColors, scope, width: 300, height: Math.max(126, 74 + decision.outcomes.length * 44) },
+      { nodeColors: options.nodeColors, scope, width: 300 },
     );
   });
 
@@ -1482,15 +1538,28 @@ export function buildStoryCanvasModel(project: BranchingProject, options: StoryC
         typeColor: eventTypeColor(project, eventNode, options),
         minimapColor: branchColor(branch, eventNode.branchRef, options) ?? eventTypeColor(project, eventNode, options),
         sequenceEntry,
+        showEventOverview: true,
       },
       {
         nodeColors: options.nodeColors,
-        summaryBadges: eventSummaryBadges(eventNode),
+        infoBadges: eventInfoBadges(project, eventNode, options),
         scope,
       },
     );
 
   });
+
+  if (sequence?.entryEventId && activeEventIds.has(sequence.entryEventId)) {
+    edges.push(
+      edge(
+        `edge:entry:start:${sequence.id}:${sequence.entryEventId}`,
+        `start:${sequence.id}`,
+        sequence.entryEventId,
+        "entry",
+        sequence.entryLabel?.trim() ?? "",
+      ),
+    );
+  }
 
   activeEvents.forEach((eventNode) => {
     eventNode.transitions?.forEach((transition) => {

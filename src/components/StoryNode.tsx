@@ -1,8 +1,8 @@
 import { Handle, NodeToolbar, Position, type NodeProps, type NodeTypes } from "@xyflow/react";
 import { useEffect, useRef, useState, type CSSProperties, type MouseEvent, type PointerEvent } from "react";
-import { BookOpen, CircleHelp, ImagePlus, Trash2, UserRound } from "lucide-react";
-import type { StoryCanvasNode, StoryCanvasNodeData } from "../canvas/storyCanvasModel.js";
-import type { SceneImageAttachment } from "../domain.js";
+import { AlignLeft, BookOpen, ChevronDown, ChevronUp, CircleDot, CircleHelp, FileText, GitBranch, ImagePlus, MessageSquare, Split, Trash2, UserRound, X } from "lucide-react";
+import type { CanvasInfoBadge, StoryCanvasNode, StoryCanvasNodeData } from "../canvas/storyCanvasModel.js";
+import type { Outcome, SceneImageAttachment } from "../domain.js";
 import type { LocaleNames } from "../localization.js";
 import { UNKNOWN_SPEAKER_REF, speakerLabel } from "../speakerRoles.js";
 
@@ -10,13 +10,68 @@ function badgeText(value: string) {
   return value.length > 22 ? `${value.slice(0, 19)}...` : value;
 }
 
+const infoBadgeLabels: Record<CanvasInfoBadge["kind"], string> = {
+  decisions: "Decisions",
+  outcomes: "Outcomes",
+  dialogues: "Dialogue elements",
+  characters: "Characters",
+  words: "Words",
+};
+
+function CanvasInfoBadges({ badges }: { badges: CanvasInfoBadge[] }) {
+  if (badges.length === 0) return null;
+  return (
+    <div className="node-info-badges" aria-label="Authoring counts">
+      {badges.map((badge) => {
+        const Icon = badge.kind === "decisions"
+          ? Split
+          : badge.kind === "outcomes"
+            ? CircleDot
+            : badge.kind === "dialogues"
+              ? MessageSquare
+              : badge.kind === "characters"
+                ? AlignLeft
+                : FileText;
+        return (
+          <span key={badge.kind} title={`${infoBadgeLabels[badge.kind]}: ${badge.count}`}>
+            <Icon size={11} aria-hidden="true" />
+            <b>{badge.count}</b>
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
 type DecisionOption = {
   id: string;
   name: string;
+  visibleText?: string;
   description?: string;
   icon?: string;
   handleId: string;
 };
+
+type DecisionQuickEditor = {
+  optionStyle: "visibleText" | "iconOnly";
+  onOptionStyleUpdate: (style: "visibleText" | "iconOnly") => void;
+  onOutcomeUpdate: (outcomeId: string, updates: Partial<Pick<Outcome, "visibleText">>) => void;
+  onCreateOutcome: () => void;
+  onDeleteOutcome: (outcomeId: string) => void;
+};
+
+function isDecisionQuickEditor(value: unknown): value is DecisionQuickEditor {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      ((value as DecisionQuickEditor).optionStyle === "visibleText" ||
+        (value as DecisionQuickEditor).optionStyle === "iconOnly") &&
+      typeof (value as DecisionQuickEditor).onOptionStyleUpdate === "function" &&
+      typeof (value as DecisionQuickEditor).onOutcomeUpdate === "function" &&
+      typeof (value as DecisionQuickEditor).onCreateOutcome === "function" &&
+      typeof (value as DecisionQuickEditor).onDeleteOutcome === "function",
+  );
+}
 
 function isDecisionOption(value: unknown): value is DecisionOption {
   return Boolean(
@@ -55,6 +110,35 @@ type BeatQuickEditor = {
   onCharacterUpdate: (characterRef?: string) => void;
   onCharacterVariantUpdate?: (variantId: string) => void;
 };
+
+type EventCoverImage = {
+  assetId: string;
+  name: string;
+  url?: string;
+};
+
+type EventQuickEditor = {
+  description: string;
+  coverImage?: EventCoverImage;
+  imageAssets: Array<{ id: string; name: string }>;
+  coverImageOpen?: boolean;
+  descriptionOpen?: boolean;
+  onDescriptionUpdate: (value: string) => void;
+  onCoverImageUpdate: (assetId?: string) => void;
+  onImportCoverImage?: () => void;
+  onAuxiliaryPanelChange: (panel: "coverImage" | "description", open: boolean) => void;
+};
+
+function isEventQuickEditor(value: unknown): value is EventQuickEditor {
+  return Boolean(
+    value && typeof value === "object" &&
+    typeof (value as EventQuickEditor).description === "string" &&
+    Array.isArray((value as EventQuickEditor).imageAssets) &&
+    typeof (value as EventQuickEditor).onDescriptionUpdate === "function" &&
+    typeof (value as EventQuickEditor).onCoverImageUpdate === "function" &&
+    typeof (value as EventQuickEditor).onAuxiliaryPanelChange === "function",
+  );
+}
 
 function isBeatQuickEditor(value: unknown): value is BeatQuickEditor {
   return Boolean(
@@ -132,9 +216,31 @@ function stopCanvasInteraction(event: { stopPropagation: () => void }) {
 function StoryNode({ id, data, selected }: NodeProps<StoryCanvasNode>) {
   const nodeData = data as StoryCanvasNodeData;
   const [openBeatMenu, setOpenBeatMenu] = useState(false);
+  const [editingDecisionOptionId, setEditingDecisionOptionId] = useState<string>();
+  const decisionEditorRef = useRef<HTMLDivElement>(null);
   const quickEditor = isBeatQuickEditor(nodeData.details?.quickEditor)
     ? nodeData.details.quickEditor
     : undefined;
+  const decisionEditor = isDecisionQuickEditor(nodeData.details?.decisionEditor)
+    ? nodeData.details.decisionEditor
+    : undefined;
+  useEffect(() => {
+    if (!editingDecisionOptionId) return;
+    const closeOnOutsidePointerDown = (event: globalThis.PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && decisionEditorRef.current?.contains(target)) return;
+      setEditingDecisionOptionId(undefined);
+    };
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") setEditingDecisionOptionId(undefined);
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointerDown, true);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePointerDown, true);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [editingDecisionOptionId]);
   const draftLocale = quickEditor?.activeLocale ?? quickEditor?.primaryLocale ?? "und";
   const draftExternalText = quickEditor?.values[draftLocale] ?? "";
   const directorNote = quickEditor?.directorNote ?? "";
@@ -151,7 +257,39 @@ function StoryNode({ id, data, selected }: NodeProps<StoryCanvasNode>) {
     element.textContent = draftExternalText;
   }, [draftExternalText, draftLocale]);
   const isEvent = nodeData.kind === "event";
-  const isFinalEvent = nodeData.kind === "event" && nodeData.badges.includes("terminal");
+  const showEventOverview = isEvent && nodeData.details?.showEventOverview === true;
+  const eventDetails = showEventOverview
+    ? nodeData.details?.event as { description?: string; type?: string } | undefined
+    : undefined;
+  const eventEditor = isEventQuickEditor(nodeData.details?.eventEditor)
+    ? nodeData.details.eventEditor
+    : undefined;
+  const eventCoverImage = showEventOverview
+    ? eventEditor?.coverImage ?? nodeData.details?.coverImage as EventCoverImage | undefined
+    : undefined;
+  const eventDescription = eventEditor?.description ?? eventDetails?.description ?? "";
+  const eventDescriptionVisible = eventEditor?.descriptionOpen ?? false;
+  const eventCoverToolsRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!eventEditor?.coverImageOpen) return;
+    const closeOnOutsidePointerDown = (event: globalThis.PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && eventCoverToolsRef.current?.contains(target)) return;
+      eventEditor.onAuxiliaryPanelChange("coverImage", false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointerDown, true);
+    return () => document.removeEventListener("pointerdown", closeOnOutsidePointerDown, true);
+  }, [eventEditor]);
+  const eventTypeBadgeCandidate = showEventOverview && eventDetails?.type && eventDetails.type !== "normal"
+    ? nodeData.badges.find((badge) => !/^\d+ decisions?$/.test(badge))
+    : undefined;
+  const eventTypeBadge = eventTypeBadgeCandidate && nodeData.details?.terminal !== true
+    ? eventTypeBadgeCandidate
+    : undefined;
+  const eventBranchTag = showEventOverview
+    ? nodeData.subtitle?.replace(/^Branch\s*·\s*/, "").trim()
+    : undefined;
+  const isFinalEvent = nodeData.kind === "event" && (nodeData.details?.terminal === true || nodeData.badges.includes("terminal"));
   const boundaryDirection =
     nodeData.kind === "boundary" && nodeData.details?.direction === "input"
       ? "input"
@@ -163,10 +301,6 @@ function StoryNode({ id, data, selected }: NodeProps<StoryCanvasNode>) {
     typeof nodeData.inspectorState === "string"
       ? ` inspector-${nodeData.inspectorState}`
       : "";
-  const sequenceEntryClass =
-    nodeData.details?.sequenceEntry || nodeData.details?.sequenceEntryEventId
-      ? " sequence-entry-puzzle"
-      : "";
   const canReceive = boundaryDirection
     ? boundaryDirection === "output"
     : nodeData.kind !== "start" && nodeData.kind !== "sequence" && nodeData.kind !== "missingRef" && nodeData.kind !== "dialogueStart";
@@ -177,6 +311,10 @@ function StoryNode({ id, data, selected }: NodeProps<StoryCanvasNode>) {
     ? nodeData.summaryBadges.filter((badge): badge is string => typeof badge === "string" && badge.length > 0)
     : [];
   const detailBadges = nodeData.badges.filter((badge) => !/^\d+ decisions?$/.test(badge));
+  const infoBadges = Array.isArray(nodeData.infoBadges) ? nodeData.infoBadges : [];
+  const eventOtherBadges = detailBadges.filter((badge) =>
+    badge !== eventTypeBadge && badge !== eventTypeBadgeCandidate,
+  );
   const colorStyle = {
     "--node-accent": typeof nodeData.accentColor === "string" ? nodeData.accentColor : undefined,
     "--node-branch": typeof nodeData.branchColor === "string" ? nodeData.branchColor : undefined,
@@ -203,7 +341,7 @@ function StoryNode({ id, data, selected }: NodeProps<StoryCanvasNode>) {
 
   if (nodeData.kind === "start") {
     return (
-      <div className={`story-node start${sequenceEntryClass}${focusClass}${inspectorFocusClass}${selected ? " selected" : ""}`} style={colorStyle}>
+      <div className={`story-node start${focusClass}${inspectorFocusClass}${selected ? " selected" : ""}`} style={colorStyle}>
         <span className="node-start-icon" aria-hidden="true" />
         <div className="node-start-title">{nodeData.title}</div>
         {canSource ? <Handle type="source" position={Position.Right} /> : null}
@@ -368,47 +506,145 @@ function StoryNode({ id, data, selected }: NodeProps<StoryCanvasNode>) {
 
   if (nodeData.kind === "decision") {
     const decision = nodeData.details?.decision as { optionStyle?: string } | undefined;
-    const optionStyle = decision?.optionStyle ?? "visibleText";
+    const optionStyle = decisionEditor?.optionStyle ?? (decision?.optionStyle === "iconOnly" ? "iconOnly" : "visibleText");
     const options = Array.isArray(nodeData.details?.options)
       ? nodeData.details.options.filter(isDecisionOption)
       : [];
-    const styleLabel =
-      optionStyle === "followUpText"
-        ? "next text"
-        : optionStyle === "iconOnly"
-          ? "icon only"
-          : "visible text";
 
     return (
       <div
+        ref={decisionEditorRef}
         className={`story-node decision decision-container${focusClass}${inspectorFocusClass}${selected ? " selected" : ""}`}
         style={colorStyle}
       >
         <Handle type="target" position={Position.Left} />
-        <div className="decision-header">
-          <div>
-            <div className="node-title">{nodeData.title}</div>
+        {decisionEditor ? (
+          <div className="decision-style-toggle nodrag nopan" role="group" aria-label="Decision option display">
+              <button
+                type="button"
+                className={optionStyle === "iconOnly" ? "active" : ""}
+                aria-pressed={optionStyle === "iconOnly"}
+                onPointerDown={stopCanvasInteraction}
+                onClick={(event) => {
+                  stopCanvasInteraction(event);
+                  decisionEditor.onOptionStyleUpdate("iconOnly");
+                }}
+              >
+                ICON
+              </button>
+              <button
+                type="button"
+                className={optionStyle === "visibleText" ? "active" : ""}
+                aria-pressed={optionStyle === "visibleText"}
+                onPointerDown={stopCanvasInteraction}
+                onClick={(event) => {
+                  stopCanvasInteraction(event);
+                  decisionEditor.onOptionStyleUpdate("visibleText");
+                }}
+              >
+                TEXT
+              </button>
           </div>
-          <span className="decision-style">{styleLabel}</span>
-        </div>
+        ) : (
+          <span className="decision-style">{optionStyle === "iconOnly" ? "ICON" : "TEXT"}</span>
+        )}
         {nodeData.subtitle ? <div className="node-subtitle">{nodeData.subtitle}</div> : null}
         <div className="decision-options">
           {options.map((option, index) => {
-            const label =
-              optionStyle === "followUpText"
-                ? option.description || option.name
-                : optionStyle === "iconOnly"
-                  ? option.icon || "◇"
-                  : option.name;
+            const optionLetter = String.fromCharCode(65 + index);
             return (
-              <div className="decision-option" key={option.id}>
-                <span className="decision-option-key">{String.fromCharCode(65 + index)}</span>
-                <span className={`decision-option-label ${optionStyle === "iconOnly" ? "icon" : ""}`}>{label}</span>
+              <div className={`decision-option${optionStyle === "iconOnly" ? " icon-mode" : ""}`} key={option.id}>
+                {decisionEditor ? (
+                  <button
+                    type="button"
+                    className="decision-option-delete nodrag nopan"
+                    aria-label={`Delete option ${optionLetter}`}
+                    title={`Delete option ${optionLetter}`}
+                    onPointerDown={stopCanvasInteraction}
+                    onClick={(event) => {
+                      stopCanvasInteraction(event);
+                      decisionEditor.onDeleteOutcome(option.id);
+                    }}
+                  >
+                    <Trash2 size={11} aria-hidden="true" />
+                  </button>
+                ) : null}
+                {optionStyle === "iconOnly" ? (
+                  <span className="decision-option-icon">{optionLetter}</span>
+                ) : (
+                  <>
+                    <span className="decision-option-key">{optionLetter}</span>
+                    {decisionEditor ? (
+                      <button
+                        type="button"
+                        className={`decision-option-edit-trigger nodrag nopan${(option.visibleText ?? option.name) ? "" : " empty"}`}
+                        title={(option.visibleText ?? option.name) || "Texto escrito..."}
+                        aria-label={`Edit visible text for option ${optionLetter}`}
+                        onPointerDown={stopCanvasInteraction}
+                        onClick={(event) => {
+                          stopCanvasInteraction(event);
+                          setEditingDecisionOptionId(option.id);
+                        }}
+                      >
+                        <span>{(option.visibleText ?? option.name) || "Texto escrito..."}</span>
+                      </button>
+                    ) : (
+                      <span className="decision-option-label">{option.visibleText ?? option.name}</span>
+                    )}
+                  </>
+                )}
+                {decisionEditor && editingDecisionOptionId === option.id ? (
+                  <div className="decision-option-editor-popover nodrag nopan">
+                    <div className="decision-option-editor-header">
+                      <strong>Option {optionLetter}</strong>
+                      <button
+                        type="button"
+                        aria-label="Close option editor"
+                        title="Close"
+                        onPointerDown={stopCanvasInteraction}
+                        onClick={(event) => {
+                          stopCanvasInteraction(event);
+                          setEditingDecisionOptionId(undefined);
+                        }}
+                      >
+                        <X size={12} aria-hidden="true" />
+                      </button>
+                    </div>
+                    <textarea
+                      className="decision-option-input nodrag nopan"
+                      rows={3}
+                      autoFocus
+                      value={option.visibleText ?? option.name}
+                      placeholder="Texto escrito..."
+                      aria-label={`Visible text for option ${optionLetter}`}
+                      onPointerDown={stopCanvasInteraction}
+                      onClick={stopCanvasInteraction}
+                      onKeyDown={(event) => {
+                        event.stopPropagation();
+                        if (event.key === "Escape") setEditingDecisionOptionId(undefined);
+                      }}
+                      onChange={(event) => decisionEditor.onOutcomeUpdate(option.id, { visibleText: event.target.value })}
+                    />
+                  </div>
+                ) : null}
                 <Handle id={option.handleId} type="source" position={Position.Right} />
               </div>
             );
           })}
           {options.length === 0 ? <span className="decision-empty">Add an outcome to create an option.</span> : null}
+          {decisionEditor ? (
+            <button
+              type="button"
+              className="decision-add-option nodrag nopan"
+              onPointerDown={stopCanvasInteraction}
+              onClick={(event) => {
+                stopCanvasInteraction(event);
+                decisionEditor.onCreateOutcome();
+              }}
+            >
+              + Add option
+            </button>
+          ) : null}
         </div>
       </div>
     );
@@ -469,19 +705,6 @@ function StoryNode({ id, data, selected }: NodeProps<StoryCanvasNode>) {
               <div className="speech-beat-director-panel">
                 <div className="speech-beat-director-panel-header">
                   <label htmlFor={`${id}-director-note`}>Director note</label>
-                  <button
-                    type="button"
-                    className="speech-beat-director-minimize"
-                    aria-label="Minimize director note"
-                    title="Minimize director note"
-                    onPointerDown={stopCanvasInteraction}
-                    onClick={(event) => {
-                      stopCanvasInteraction(event);
-                      setAuxiliaryPanelOpen("directorNote", false);
-                    }}
-                  >
-                    −
-                  </button>
                 </div>
                 <textarea
                   id={`${id}-director-note`}
@@ -614,66 +837,46 @@ function StoryNode({ id, data, selected }: NodeProps<StoryCanvasNode>) {
             <div className="speech-beat-scene-image-panel">
               <div className="speech-beat-scene-image-panel-header">
                 <span>Scene image</span>
-                <div>
+              </div>
+              {sceneImage ? (
+                <article className="speech-beat-scene-image-preview">
+                  {sceneImage.url ? <img src={sceneImage.url} alt={sceneImage.name} /> : <span className="speech-beat-scene-image-placeholder"><ImagePlus size={22} /></span>}
                   <button
                     type="button"
-                    className="speech-beat-scene-image-import"
+                    className="danger"
+                    aria-label={`Remove ${sceneImage.name}`}
+                    title="Remove scene image"
+                    onPointerDown={stopCanvasInteraction}
+                    onClick={(event) => {
+                      stopCanvasInteraction(event);
+                      quickEditor.onSceneImageUpdate?.();
+                    }}
+                  ><Trash2 size={13} /></button>
+                </article>
+              ) : (
+                <>
+                  <label className="speech-beat-scene-image-select">
+                    <span>Use an existing image</span>
+                    <select
+                      value=""
+                      onPointerDown={stopCanvasInteraction}
+                      onChange={(event) => quickEditor.onSceneImageUpdate?.(event.target.value || undefined)}
+                    >
+                      <option value="">Choose an image…</option>
+                      {imageAssets.map((asset) => <option key={asset.id} value={asset.id}>{asset.name}</option>)}
+                    </select>
+                  </label>
+                  <button
+                    type="button"
+                    className="speech-beat-scene-image-empty"
                     onPointerDown={stopCanvasInteraction}
                     onClick={(event) => {
                       stopCanvasInteraction(event);
                       quickEditor.onImportSceneImage?.();
                     }}
-                  ><ImagePlus size={13} /> Upload image</button>
-                  <button
-                    type="button"
-                    className="speech-beat-director-minimize"
-                    aria-label="Minimize scene images"
-                    title="Minimize scene images"
-                    onPointerDown={stopCanvasInteraction}
-                    onClick={(event) => {
-                      stopCanvasInteraction(event);
-                      setAuxiliaryPanelOpen("sceneImage", false);
-                    }}
-                  >−</button>
-                </div>
-              </div>
-              <label className="speech-beat-scene-image-select">
-                <span>Use an existing image</span>
-                <select
-                  value={sceneImage?.assetId ?? ""}
-                  onPointerDown={stopCanvasInteraction}
-                  onChange={(event) => quickEditor.onSceneImageUpdate?.(event.target.value || undefined)}
-                >
-                  <option value="">Choose an image…</option>
-                  {imageAssets.map((asset) => <option key={asset.id} value={asset.id}>{asset.name}</option>)}
-                </select>
-              </label>
-              {sceneImage ? (
-                <article className="speech-beat-scene-image-item">
-                  {sceneImage.url ? <img src={sceneImage.url} alt={sceneImage.name} /> : <span className="speech-beat-scene-image-placeholder"><ImagePlus size={18} /></span>}
-                  <span title={sceneImage.name}>{sceneImage.name}</span>
-                  <div className="speech-beat-scene-image-actions">
-                    <button
-                      type="button"
-                      className="danger"
-                      aria-label={`Remove ${sceneImage.name}`}
-                      onPointerDown={stopCanvasInteraction}
-                      onClick={(event) => {
-                        stopCanvasInteraction(event);
-                        quickEditor.onSceneImageUpdate?.();
-                      }}
-                    ><Trash2 size={13} /></button>
-                  </div>
-                </article>
-              ) : <button
-                type="button"
-                className="speech-beat-scene-image-empty"
-                onPointerDown={stopCanvasInteraction}
-                onClick={(event) => {
-                  stopCanvasInteraction(event);
-                  quickEditor.onImportSceneImage?.();
-                }}
-              ><ImagePlus size={16} /> Upload a PNG or JPEG image</button>}
+                  ><ImagePlus size={16} /> Upload a PNG or JPEG image</button>
+                </>
+              )}
             </div>
           </div>
         ) : null}
@@ -682,9 +885,171 @@ function StoryNode({ id, data, selected }: NodeProps<StoryCanvasNode>) {
     );
   }
 
+  if (showEventOverview) {
+    return (
+      <div
+        className={`story-node event event-overview${eventCoverImage ? " has-cover" : ""}${eventDescriptionVisible ? " has-description" : ""}${isFinalEvent ? " terminal" : ""}${focusClass}${inspectorFocusClass}${selected ? " selected" : ""}`}
+        style={colorStyle}
+      >
+        {canReceive ? <Handle type="target" position={Position.Left} /> : null}
+        {eventEditor ? (
+          <div ref={eventCoverToolsRef} className={`speech-beat-director-tools event-cover-tools nodrag nopan${eventEditor.coverImageOpen ? " open" : ""}`}>
+            <span className="speech-beat-director-pocket" aria-hidden="true" />
+            <button
+              type="button"
+              className={`speech-beat-director-toggle${eventCoverImage ? " has-note" : ""}`}
+              aria-label={eventCoverImage ? "Edit event cover image" : "Add event cover image"}
+              aria-expanded={eventEditor.coverImageOpen}
+              title={eventCoverImage ? "Edit event cover image" : "Add event cover image"}
+              onPointerDown={stopCanvasInteraction}
+              onClick={(event) => {
+                stopCanvasInteraction(event);
+                if (eventCoverImage) {
+                  eventEditor.onCoverImageUpdate(undefined);
+                } else {
+                  eventEditor.onAuxiliaryPanelChange("coverImage", !eventEditor.coverImageOpen);
+                }
+              }}
+            >
+              {eventCoverImage ? <X size={12} aria-hidden="true" /> : <ImagePlus size={13} aria-hidden="true" />}
+            </button>
+            {eventEditor.coverImageOpen ? (
+              <div className="speech-beat-director-panel event-cover-panel">
+                <label htmlFor={`${id}-event-cover`}>Cover image</label>
+                <select
+                  id={`${id}-event-cover`}
+                  value={eventCoverImage?.assetId ?? ""}
+                  onPointerDown={stopCanvasInteraction}
+                  onChange={(event) => eventEditor.onCoverImageUpdate(event.target.value || undefined)}
+                >
+                  <option value="">Choose an image…</option>
+                  {eventEditor.imageAssets.map((asset) => (
+                    <option key={asset.id} value={asset.id}>{asset.name}</option>
+                  ))}
+                </select>
+                {eventEditor.onImportCoverImage ? (
+                  <button
+                    type="button"
+                    className="event-cover-upload nodrag nopan"
+                    onPointerDown={stopCanvasInteraction}
+                    onClick={(event) => {
+                      stopCanvasInteraction(event);
+                      eventEditor.onImportCoverImage?.();
+                    }}
+                  >
+                    <ImagePlus size={14} aria-hidden="true" /> Upload a PNG or JPEG image
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+        {eventCoverImage ? (
+          <div className="event-cover-image">
+            {eventCoverImage.url ? (
+              <img src={eventCoverImage.url} alt={eventCoverImage.name} />
+            ) : (
+              <ImagePlus size={22} aria-hidden="true" />
+            )}
+          </div>
+        ) : null}
+        <div className="node-title">{nodeData.title}</div>
+        {eventTypeBadge ? (
+          <div className="node-badges event-type-tag">
+            <span>{badgeText(eventTypeBadge)}</span>
+          </div>
+        ) : null}
+        {eventBranchTag ? (
+          <div className="event-branch-tag" title={eventBranchTag}>
+            <GitBranch size={13} aria-hidden="true" />
+            <span>{eventBranchTag}</span>
+          </div>
+        ) : null}
+        {eventOtherBadges.length > 0 ? (
+          <div className="node-summary-badges">
+            {eventOtherBadges.slice(0, 4).map((badge) => (
+              <span key={badge}>{badgeText(badge)}</span>
+            ))}
+          </div>
+        ) : null}
+        <CanvasInfoBadges badges={infoBadges} />
+        {summaryBadges.length > 0 ? (
+          <div className="node-badges">
+            {summaryBadges.slice(0, 3).map((badge) => (
+              <span key={badge}>{badgeText(badge)}</span>
+            ))}
+          </div>
+        ) : null}
+        {eventEditor && eventDescriptionVisible ? (
+          <textarea
+            className="event-description-editor nodrag nopan"
+            aria-label="Event description"
+            value={eventEditor.description}
+            placeholder="Describe this event…"
+            onPointerDown={stopCanvasInteraction}
+            onClick={stopCanvasInteraction}
+            onKeyDown={(event) => event.stopPropagation()}
+            onChange={(event) => eventEditor.onDescriptionUpdate(event.target.value)}
+          />
+        ) : !eventEditor && eventDetails?.description ? (
+          <div className="event-description" title={eventDetails.description}>{eventDetails.description}</div>
+        ) : null}
+        {eventEditor ? (
+          <div className={`speech-beat-scene-image-tools event-description-tools nodrag nopan${eventEditor.descriptionOpen ? " open" : ""}`}>
+            <span className="speech-beat-scene-image-pocket" aria-hidden="true" />
+            <button
+              type="button"
+              className={`speech-beat-scene-image-toggle${eventDescription.trim() ? " has-images" : ""}`}
+              aria-label={eventDescription.trim() ? (eventDescriptionVisible ? "Hide event description" : "Show event description") : "Add event description"}
+              aria-expanded={eventEditor.descriptionOpen}
+              title={eventDescription.trim() ? (eventDescriptionVisible ? "Hide event description" : "Show event description") : "Add event description"}
+              onPointerDown={stopCanvasInteraction}
+              onClick={(event) => {
+                stopCanvasInteraction(event);
+                eventEditor.onAuxiliaryPanelChange("description", !eventEditor.descriptionOpen);
+              }}
+            >
+              {eventDescription.trim()
+                ? eventDescriptionVisible
+                  ? <ChevronDown size={13} aria-hidden="true" />
+                  : <ChevronUp size={13} aria-hidden="true" />
+                : <AlignLeft size={13} aria-hidden="true" />}
+            </button>
+          </div>
+        ) : null}
+        {canSource ? <Handle type="source" position={Position.Right} /> : null}
+      </div>
+    );
+  }
+
+  if (nodeData.kind === "dialogueStart") {
+    const portraitUrl = typeof nodeData.details?.dialogueTriggerPortraitUrl === "string"
+      ? nodeData.details.dialogueTriggerPortraitUrl
+      : undefined;
+    return (
+      <div
+        className={`story-node dialogueStart dialogue-trigger-node${focusClass}${inspectorFocusClass}${selected ? " selected" : ""}`}
+        style={colorStyle}
+      >
+        <div className="dialogue-trigger-portrait">
+          {portraitUrl ? (
+            <img src={portraitUrl} alt="" />
+          ) : (
+            <UserRound size={19} aria-hidden="true" />
+          )}
+        </div>
+        <div className="dialogue-trigger-copy">
+          <div className="node-title">{nodeData.title}</div>
+          {nodeData.subtitle ? <div className="node-subtitle">{nodeData.subtitle}</div> : null}
+        </div>
+        {canSource ? <Handle type="source" position={Position.Right} /> : null}
+      </div>
+    );
+  }
+
   return (
     <div
-      className={`story-node ${nodeData.kind}${sequenceEntryClass}${focusClass}${inspectorFocusClass}${isFinalEvent ? " terminal" : ""}${selected ? " selected" : ""}`}
+      className={`story-node ${nodeData.kind}${focusClass}${inspectorFocusClass}${isFinalEvent ? " terminal" : ""}${selected ? " selected" : ""}`}
       style={colorStyle}
     >
       {canReceive ? <Handle type="target" position={Position.Left} /> : null}
@@ -696,6 +1061,7 @@ function StoryNode({ id, data, selected }: NodeProps<StoryCanvasNode>) {
           ))}
         </div>
       ) : null}
+      <CanvasInfoBadges badges={infoBadges} />
       {nodeData.subtitle ? <div className="node-subtitle">{nodeData.subtitle}</div> : null}
       {detailBadges.length > 0 ? (
         <div className="node-badges">

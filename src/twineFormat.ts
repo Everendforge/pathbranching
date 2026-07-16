@@ -134,7 +134,7 @@ export function importTwineHtml(html: string, baseProject?: BranchingProject): B
   const events: EventNode[] = story.passages.map((passage) => {
     const eventId = eventIdByPassage.get(passage.name)!;
     const links = passageLinks(passage.content).filter((link) => eventIdByPassage.has(link.target));
-    const outcomes: Outcome[] = links.map((link, index) => ({ id: `twine:outcome:${passage.pid}:${index + 1}`, name: link.label, description: link.target }));
+  const outcomes: Outcome[] = links.map((link, index) => ({ id: `twine:outcome:${passage.pid}:${index + 1}`, name: link.label, visibleText: link.label, description: link.target }));
     const transitions: Transition[] = outcomes.map((outcome, index) => ({
       id: `twine:transition:${passage.pid}:${index + 1}`,
       from: `${eventId}:${outcome.id}`,

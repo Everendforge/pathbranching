@@ -84,12 +84,20 @@ export type LocalExplorerType = {
   updatedAt: string;
 };
 
+export type ExplorerPropertyOption = {
+  value: string;
+  label: string;
+  color?: string;
+};
+
 export type LocalExplorerProperty = {
   id: string;
   label: string;
   valueType: string;
   description?: string;
   appliesToTypes?: string[];
+  required?: boolean;
+  options?: ExplorerPropertyOption[];
   createdAt: string;
   updatedAt: string;
 };
@@ -378,6 +386,8 @@ export type EventNode = {
   legacyId?: string;
   name: string;
   description?: string;
+  /** Optional cover image shown on the parent sequence canvas. */
+  coverImage?: SceneImageAttachment;
   type: EventType;
   parentEventId?: string;
   childEventIds?: string[];
@@ -406,7 +416,7 @@ export type EventNode = {
 };
 
 export type DecisionType = "dialogue" | "dice" | "qte" | string;
-export type OutcomePresentationStyle = "visibleText" | "followUpText" | "iconOnly";
+export type OutcomePresentationStyle = "visibleText" | "iconOnly";
 
 export type Decision = {
   id: string;
@@ -480,6 +490,8 @@ export type BoundaryPortBinding = {
 export type Outcome = {
   id: string;
   name: string;
+  /** Text shown to the player when the decision uses visible text options. */
+  visibleText?: string;
   description?: string;
   icon?: string;
   requiredCanonRefs?: string[];
@@ -715,6 +727,8 @@ export type CanvasNodeAuthoringState = {
   auxiliaryPanels?: {
     directorNote?: boolean;
     sceneImage?: boolean;
+    coverImage?: boolean;
+    description?: boolean;
   };
 };
 
@@ -827,6 +841,7 @@ export type RuntimeNode = {
   speakerRef?: string;
   characterRef?: string;
   characterVariantId?: string;
+  coverImage?: RuntimeSceneImage;
   sceneImage?: RuntimeSceneImage;
   choices?: RuntimeChoice[];
   conditions?: ConditionInput;
@@ -887,6 +902,8 @@ export type ValidationFinding = {
     | "invalid_character_variant"
     | "missing_scene_image"
     | "invalid_scene_image"
+    | "missing_event_cover_image"
+    | "invalid_event_cover_image"
     | "invalid_dialogue_trigger"
     | "invalid_scope_transition";
   severity: ValidationSeverity;

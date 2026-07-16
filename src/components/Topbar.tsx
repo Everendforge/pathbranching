@@ -126,6 +126,18 @@ export function Topbar({
     };
   }, [forgeMenuOpen, historyMenuOpen, viewMenuOpen]);
 
+  const toggleHistoryMenu = () => {
+    setForgeMenuOpen(false);
+    setViewMenuOpen(false);
+    setHistoryMenuOpen((open) => !open);
+  };
+
+  const toggleViewMenu = () => {
+    setForgeMenuOpen(false);
+    setHistoryMenuOpen(false);
+    setViewMenuOpen((open) => !open);
+  };
+
   return (
     <header className="topbar dock-top-bar pathbranching-topbar" aria-label="Workspace controls">
       <div className="dock-top-left">
@@ -183,13 +195,20 @@ export function Topbar({
 
       <div className="dock-top-right">
         <div ref={historyMenuRef} className="topbar-view-menu">
-          <button type="button" title="History" onClick={() => setHistoryMenuOpen((open) => !open)} aria-expanded={historyMenuOpen}>
+          <button
+            type="button"
+            className={`topbar-menu-trigger ${historyMenuOpen ? "active" : ""}`}
+            title="History"
+            aria-haspopup="menu"
+            onClick={toggleHistoryMenu}
+            aria-expanded={historyMenuOpen}
+          >
             <History size={14} /><span>History</span>
           </button>
-          {historyMenuOpen ? <div className="panel-picker" role="menu">
+          {historyMenuOpen ? <div className="topbar-menu-popover panel-picker" role="menu">
             <strong>History</strong>
-            <button type="button" onClick={() => { onUndo(); setHistoryMenuOpen(false); }} disabled={!canUndo}><ArrowLeft size={14} /> Undo</button>
-            <button type="button" onClick={() => { onRedo(); setHistoryMenuOpen(false); }} disabled={!canRedo}><ArrowLeft size={14} style={{ transform: "scaleX(-1)" }} /> Redo</button>
+            <button className="topbar-menu-option" type="button" onClick={() => { onUndo(); setHistoryMenuOpen(false); }} disabled={!canUndo}><ArrowLeft size={14} /> Undo</button>
+            <button className="topbar-menu-option" type="button" onClick={() => { onRedo(); setHistoryMenuOpen(false); }} disabled={!canRedo}><ArrowLeft size={14} style={{ transform: "scaleX(-1)" }} /> Redo</button>
             {recentActions.length ? <>
               <span className="topbar-history-label">Recent actions</span>
               <div className="topbar-history-actions">
@@ -201,12 +220,19 @@ export function Topbar({
 
         <div className="dock-command-group" aria-label="Panels">
           {panelVisibility && onTogglePanelVisibility ? <div ref={viewMenuRef} className="topbar-view-menu">
-            <button type="button" title="View panels" onClick={() => setViewMenuOpen((open) => !open)} aria-expanded={viewMenuOpen}>
+            <button
+              type="button"
+              className={`topbar-menu-trigger ${viewMenuOpen ? "active" : ""}`}
+              title="View panels"
+              aria-haspopup="menu"
+              onClick={toggleViewMenu}
+              aria-expanded={viewMenuOpen}
+            >
               <Eye size={14} /><span>View</span>
             </button>
-            {viewMenuOpen ? <div className="panel-picker" role="menu">
+            {viewMenuOpen ? <div className="topbar-menu-popover panel-picker" role="menu">
               <strong>Panels</strong>
-              {(Object.keys(panelLabels) as WorkspacePanelId[]).map((panel) => <button key={panel} type="button" role="menuitemcheckbox" aria-checked={panelVisibility[panel]} onClick={() => onTogglePanelVisibility(panel)}>
+              {(Object.keys(panelLabels) as WorkspacePanelId[]).map((panel) => <button className="topbar-menu-option" key={panel} type="button" role="menuitemcheckbox" aria-checked={panelVisibility[panel]} onClick={() => onTogglePanelVisibility(panel)}>
                 <Check size={14} className={panelVisibility[panel] ? "visible" : "hidden"} /> {panelLabels[panel]}
               </button>)}
             </div> : null}
