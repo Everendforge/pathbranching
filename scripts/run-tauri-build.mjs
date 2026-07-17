@@ -26,7 +26,7 @@ if (platformBundles.length > 0) {
 const child = spawn(process.execPath, args, {
   cwd: rootDir,
   stdio: "inherit",
-  windowsHide: false,
+  windowsHide: true,
 });
 
 child.on("exit", (code, signal) => {

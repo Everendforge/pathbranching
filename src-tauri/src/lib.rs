@@ -7,7 +7,7 @@ use std::time::UNIX_EPOCH;
 use tauri::menu::{
     Menu, MenuItem, PredefinedMenuItem, Submenu, HELP_SUBMENU_ID, WINDOW_SUBMENU_ID,
 };
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
 
 #[derive(Serialize)]
@@ -458,6 +458,12 @@ fn read_universe(root: PathBuf) -> Result<UniverseReadResult, String> {
     })
 }
 
+fn allow_universe_asset_scope(app: &tauri::AppHandle, root: &Path) -> Result<(), String> {
+    app.asset_protocol_scope()
+        .allow_directory(root, true)
+        .map_err(|error| format!("Could not allow universe assets: {error}"))
+}
+
 #[tauri::command]
 fn bridge_status() -> BridgeStatus {
     BridgeStatus {
@@ -473,12 +479,17 @@ async fn open_universe_dialog(app: tauri::AppHandle) -> Result<Option<UniverseRe
         return Ok(None);
     };
     let path = folder_path.into_path().map_err(|error| error.to_string())?;
-    read_universe(path).map(Some)
+    let result = read_universe(path.clone())?;
+    allow_universe_asset_scope(&app, &path)?;
+    Ok(Some(result))
 }
 
 #[tauri::command]
-fn read_universe_folder(path: String) -> Result<UniverseReadResult, String> {
-    read_universe(PathBuf::from(path))
+fn read_universe_folder(app: tauri::AppHandle, path: String) -> Result<UniverseReadResult, String> {
+    let root = PathBuf::from(path);
+    let result = read_universe(root.clone())?;
+    allow_universe_asset_scope(&app, &root)?;
+    Ok(result)
 }
 
 #[tauri::command]
