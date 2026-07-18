@@ -1,5 +1,32 @@
 import type { ReactNode } from "react";
 
+export type SuiteLicenseStatus = "idle" | "activating" | "active" | "inactive" | "error";
+
+export type SuiteLicenseInstance = {
+  id: string;
+  name: string;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+export type SuiteLicenseControls = {
+  status: SuiteLicenseStatus;
+  licenseKey?: string;
+  instanceName?: string;
+  currentInstanceId?: string;
+  activationUsage?: number;
+  activationLimit?: number;
+  error?: string;
+  instances?: SuiteLicenseInstance[];
+  devicesStatus?: "idle" | "loading" | "error";
+  devicesError?: string;
+  onActivate: (licenseKey: string) => void;
+  onValidate: () => void;
+  onDeactivate: () => void;
+  onLoadDevices: () => void;
+  onDeactivateDevice: (instanceId: string) => void;
+};
+
 export type SuiteSettings = {
   primaryFont: string;
   onPrimaryFontChange: (font: string) => void;
@@ -7,6 +34,7 @@ export type SuiteSettings = {
   onStyleChange: (style: string) => void;
   onToggleStyleMode: () => void;
   update: SuiteUpdateControls;
+  license: SuiteLicenseControls;
 };
 
 export type SuiteUpdateStatus =
@@ -38,6 +66,7 @@ export type SuiteChrome = {
   active: boolean;
   sharedUniversePath?: string;
   onHome?: () => void;
+  onReload?: () => void;
   renderAppSwitcher: () => ReactNode;
   suiteSettings?: SuiteSettings;
 };
