@@ -1,6 +1,5 @@
-import type { BranchingProject, ConditionInput, Consequence, EventNode, RuleSet, RuleSetBinding, ScriptBlock, ValidationFinding } from "./domain.js";
+import type { BranchingProject, ConditionInput, Consequence, EventNode, ScriptBlock, ValidationFinding } from "./domain.js";
 import { conditionInputsFromConsequences, walkConditions } from "./logic.js";
-import { ruleSetPhasesByOwner, type RuleBindingOwnerKind } from "./ruleLibrary.js";
 import { mappingsForCanonRef } from "./integrationConfig.js";
 import { entitySupportsDialogueTrigger } from "./explorerSchema.js";
 import { isGenericSpeakerRef } from "./speakerRoles.js";
@@ -32,6 +31,24 @@ function findDuplicates(values: string[]): string[] {
 
 function isTerminalEventType(project: BranchingProject, type: string | undefined) {
   return Boolean(type && (type === "final" || project.eventCategories?.some((category) => category.id === type && category.terminal)));
+}
+
+/** Ids of entities (canon or local) whose entity type is marked grantable via LogicTypeOverride. */
+function grantableEntityIds(project: BranchingProject): Set<string> {
+  const grantableCanonTypes = new Set<string>();
+  const grantableLocalTypes = new Set<string>();
+  (project.logicTypeOverrides ?? []).forEach((override) => {
+    if (!override.grantable) return;
+    (override.source === "canon" ? grantableCanonTypes : grantableLocalTypes).add(override.typeId);
+  });
+  const ids = new Set<string>();
+  project.canonRefs.forEach((ref) => {
+    if (ref.kind && grantableCanonTypes.has(ref.kind)) ids.add(ref.id);
+  });
+  (project.localExplorerEntities ?? []).forEach((entity) => {
+    if (grantableLocalTypes.has(entity.type)) ids.add(entity.id);
+  });
+  return ids;
 }
 
 function validateCanonRef(
@@ -125,9 +142,9 @@ function validateConditionRefs(
       return;
     }
 
-    if (condition.type === "runtimeItem" && runtimeItemId && !projectRefs.dataObjectIds.has(runtimeItemId)) {
+    if (condition.type === "runtimeItem" && runtimeItemId && !projectRefs.grantableEntityIds.has(runtimeItemId)) {
       findings.push(
-        finding("missing_data_object", "warning", `${context} condition references missing runtime item "${runtimeItemId}".`, {
+        finding("missing_grantable_entity", "warning", `${context} condition references missing grantable entity "${runtimeItemId}".`, {
           id: ownerId,
           ref: runtimeItemId,
         }),
@@ -164,16 +181,14 @@ function validateConsequenceCanonRefs(
   consequences: Consequence[] | undefined,
 ) {
   consequences?.forEach((consequence) => {
-    if (consequence.type === "unlockCanonEntry" && typeof consequence.ref === "string") {
-      validateCanonRef(findings, canonIds, ownerId, consequence.ref, context);
-    }
-
-    const objectId = "objectId" in consequence && typeof consequence.objectId === "string" ? consequence.objectId : undefined;
-    if (consequence.type === "unlockDataObject" && objectId && !projectRefs.dataObjectIds.has(objectId)) {
+    if (
+      (consequence.type === "addGrantable" || consequence.type === "removeGrantable" || consequence.type === "editGrantable") &&
+      !projectRefs.grantableEntityIds.has(consequence.entityId)
+    ) {
       findings.push(
-        finding("missing_data_object", "error", `${context} references missing data object "${objectId}".`, {
+        finding("missing_grantable_entity", "error", `${context} references missing grantable entity "${consequence.entityId}".`, {
           id: ownerId,
-          ref: objectId,
+          ref: consequence.entityId,
         }),
       );
     }
@@ -192,49 +207,8 @@ type ProjectReferenceSets = {
   decisionIds: Set<string>;
   outcomeIds: Set<string>;
   dataObjectIds: Set<string>;
+  grantableEntityIds: Set<string>;
 };
-
-function validateRuleSets(
-  findings: ValidationFinding[],
-  projectRefs: ProjectReferenceSets,
-  canonIds: Set<string>,
-  ownerId: string,
-  context: string,
-  ruleSets: RuleSet[] | undefined,
-) {
-  ruleSets?.forEach((ruleSet) => {
-    if (!ruleSet.when) {
-      findings.push(
-        finding("invalid_rule_set", "error", `${context} rule set "${ruleSet.id}" is missing a when condition.`, {
-          id: ruleSet.id,
-        }),
-      );
-    }
-
-    validateConditionRefs(findings, projectRefs, canonIds, ruleSet.id, `${context} rule set "${ruleSet.id}"`, ruleSet.when);
-    validateConsequenceCanonRefs(findings, projectRefs, canonIds, ruleSet.id, `${context} rule set "${ruleSet.id}" then`, ruleSet.then);
-    validateConsequenceCanonRefs(findings, projectRefs, canonIds, ruleSet.id, `${context} rule set "${ruleSet.id}" else`, ruleSet.else);
-  });
-}
-
-function validateRuleSetBindings(
-  findings: ValidationFinding[],
-  rules: Set<string>,
-  ownerId: string,
-  context: string,
-  kind: RuleBindingOwnerKind,
-  bindings: RuleSetBinding[] | undefined,
-) {
-  const allowed = ruleSetPhasesByOwner[kind];
-  bindings?.forEach((binding) => {
-    if (!rules.has(binding.ruleId)) {
-      findings.push(finding("missing_rule_set", "error", `${context} references missing rule set "${binding.ruleId}".`, { id: ownerId, ref: binding.ruleId }));
-    }
-    if (!allowed.includes(binding.phase)) {
-      findings.push(finding("invalid_rule_set_binding", "error", `${context} uses unsupported rule phase "${binding.phase}".`, { id: ownerId, ref: binding.id }));
-    }
-  });
-}
 
 export function validateProject(project: BranchingProject): ValidationFinding[] {
   const findings: ValidationFinding[] = [];
@@ -271,16 +245,8 @@ export function validateProject(project: BranchingProject): ValidationFinding[] 
     decisionIds,
     outcomeIds,
     dataObjectIds,
+    grantableEntityIds: grantableEntityIds(project),
   };
-  const libraryRules = new Set((project.ruleLibrary?.rules ?? []).map((rule) => rule.id));
-  (project.ruleLibrary?.rules ?? []).forEach((rule) => {
-    if (!rule.when) {
-      findings.push(finding("invalid_rule_set", "error", `Rule set "${rule.id}" is missing a when condition.`, { id: rule.id }));
-    }
-    validateConditionRefs(findings, projectRefs, canonIds, rule.id, `Rule set "${rule.id}"`, rule.when);
-    validateConsequenceCanonRefs(findings, projectRefs, canonIds, rule.id, `Rule set "${rule.id}" then`, rule.then);
-    validateConsequenceCanonRefs(findings, projectRefs, canonIds, rule.id, `Rule set "${rule.id}" else`, rule.else);
-  });
 
   [
     ...findDuplicates(project.sequences.map((sequence) => sequence.id)),
@@ -359,7 +325,7 @@ export function validateProject(project: BranchingProject): ValidationFinding[] 
     });
 
     validateConditionRefs(findings, projectRefs, canonIds, sequence.id, `Sequence "${sequence.id}" availability`, sequence.availability);
-    validateRuleSets(findings, projectRefs, canonIds, sequence.id, `Sequence "${sequence.id}"`, sequence.ruleSets);
+    validateConsequenceCanonRefs(findings, projectRefs, canonIds, sequence.id, `Sequence "${sequence.id}" consequence`, sequence.consequences);
   });
 
   project.branches.forEach((branch) => {
@@ -374,7 +340,7 @@ export function validateProject(project: BranchingProject): ValidationFinding[] 
       }
     });
     validateConditionRefs(findings, projectRefs, canonIds, branch.id, `Branch "${branch.id}" availability`, branch.availability);
-    validateRuleSets(findings, projectRefs, canonIds, branch.id, `Branch "${branch.id}"`, branch.ruleSets);
+    validateConsequenceCanonRefs(findings, projectRefs, canonIds, branch.id, `Branch "${branch.id}" consequence`, branch.consequences);
   });
 
   project.events.forEach((event) => {
@@ -513,8 +479,7 @@ export function validateProject(project: BranchingProject): ValidationFinding[] 
     });
 
     validateConditionRefs(findings, projectRefs, canonIds, event.id, `Event "${event.id}" availability`, event.availability);
-    validateConsequenceCanonRefs(findings, projectRefs, canonIds, event.id, `Event "${event.id}" unlock`, event.unlocks);
-    validateRuleSets(findings, projectRefs, canonIds, event.id, `Event "${event.id}"`, event.ruleSets);
+    validateConsequenceCanonRefs(findings, projectRefs, canonIds, event.id, `Event "${event.id}" consequence`, event.consequences);
 
     event.decisions?.forEach((decision) => {
       validateConditionRefs(
@@ -525,7 +490,6 @@ export function validateProject(project: BranchingProject): ValidationFinding[] 
         `Decision "${decision.id}" in event "${event.id}" availability`,
         decision.availability,
       );
-      validateRuleSets(findings, projectRefs, canonIds, decision.id, `Decision "${decision.id}"`, decision.ruleSets);
       decision.outcomes.forEach((outcome) => {
         outcome.requiredCanonRefs?.forEach((canonRef) => {
           validateCanonRef(
@@ -552,7 +516,6 @@ export function validateProject(project: BranchingProject): ValidationFinding[] 
           `Outcome "${outcome.id}" in decision "${decision.id}" consequence`,
           outcome.consequences,
         );
-        validateRuleSets(findings, projectRefs, canonIds, outcome.id, `Outcome "${outcome.id}"`, outcome.ruleSets);
       });
     });
 
@@ -619,7 +582,7 @@ export function validateProject(project: BranchingProject): ValidationFinding[] 
         }
       });
       validateConditionRefs(findings, projectRefs, canonIds, beat.id, `Dialogue beat "${beat.id}" display condition`, beat.displayCondition);
-      validateRuleSets(findings, projectRefs, canonIds, beat.id, `Dialogue beat "${beat.id}"`, beat.ruleSets);
+      validateConsequenceCanonRefs(findings, projectRefs, canonIds, beat.id, `Dialogue beat "${beat.id}" consequence`, beat.consequences);
     };
 
     (event.dialogueBeats ?? []).forEach(validateDialogueBeat);
@@ -636,7 +599,7 @@ export function validateProject(project: BranchingProject): ValidationFinding[] 
         `Dialogue "${dialogue.id}" in event "${event.id}" availability`,
         dialogue.availability,
       );
-      validateRuleSets(findings, projectRefs, canonIds, dialogue.id, `Dialogue "${dialogue.id}"`, dialogue.ruleSets);
+      validateConsequenceCanonRefs(findings, projectRefs, canonIds, dialogue.id, `Dialogue "${dialogue.id}" consequence`, dialogue.consequences);
       (dialogue.beats ?? []).forEach(validateDialogueBeat);
     });
 
@@ -806,7 +769,7 @@ export function validateProject(project: BranchingProject): ValidationFinding[] 
       });
 
     validateConditionRefs(findings, projectRefs, canonIds, dataObject.id, `Data object "${dataObject.id}" availability`, dataObject.availability);
-    validateRuleSets(findings, projectRefs, canonIds, dataObject.id, `Data object "${dataObject.id}"`, dataObject.ruleSets);
+    validateConsequenceCanonRefs(findings, projectRefs, canonIds, dataObject.id, `Data object "${dataObject.id}" consequence`, dataObject.consequences);
   });
 
   (project.canonEditSuggestions ?? []).forEach((suggestion) => {
@@ -870,21 +833,6 @@ export function validateProject(project: BranchingProject): ValidationFinding[] 
       );
     }
   });
-
-  project.sequences.forEach((item) => validateRuleSetBindings(findings, libraryRules, item.id, `Sequence "${item.id}"`, "sequence", item.ruleSetBindings));
-  project.branches.forEach((item) => validateRuleSetBindings(findings, libraryRules, item.id, `Branch "${item.id}"`, "branch", item.ruleSetBindings));
-  project.events.forEach((event) => {
-    validateRuleSetBindings(findings, libraryRules, event.id, `Event "${event.id}"`, "event", event.ruleSetBindings);
-    event.decisions?.forEach((decision) => {
-      validateRuleSetBindings(findings, libraryRules, decision.id, `Decision "${decision.id}"`, "decision", decision.ruleSetBindings);
-      decision.outcomes.forEach((outcome) => validateRuleSetBindings(findings, libraryRules, outcome.id, `Outcome "${outcome.id}"`, "outcome", outcome.ruleSetBindings));
-    });
-    event.dialogues?.forEach((dialogue) => {
-      validateRuleSetBindings(findings, libraryRules, dialogue.id, `Dialogue "${dialogue.id}"`, "dialogue", dialogue.ruleSetBindings);
-      dialogue.beats?.forEach((beat) => validateRuleSetBindings(findings, libraryRules, beat.id, `Dialogue beat "${beat.id}"`, "beat", beat.ruleSetBindings));
-    });
-  });
-  (project.projectDataObjects ?? []).forEach((item) => validateRuleSetBindings(findings, libraryRules, item.id, `Data object "${item.id}"`, "dataObject", item.ruleSetBindings));
 
   return findings;
 }

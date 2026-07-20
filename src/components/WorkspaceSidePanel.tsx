@@ -9,7 +9,7 @@ export function WorkspaceSidePanel({
   onContextMenu,
   children,
 }: {
-  title: string;
+  title: ReactNode;
   side: "left" | "right";
   collapsed: boolean;
   onCollapsedChange: (collapsed: boolean) => void;

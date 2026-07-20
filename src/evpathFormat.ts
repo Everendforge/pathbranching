@@ -166,11 +166,18 @@ export function conditionInputText(input: ConditionInput | undefined): string {
 }
 
 function simpleConsequenceText(consequence: Consequence): string | undefined {
-  if (consequence.type === "setVariable" && !consequence.conditions) {
+  if (consequence.conditions) return undefined;
+  if (consequence.type === "setVariable") {
     return `~ ${consequence.name} = ${jsonScalar(consequence.value)}`;
   }
-  if (consequence.type === "unlockCanonEntry" && !consequence.conditions) {
-    return `~ unlock ${consequence.ref}`;
+  if (consequence.type === "addGrantable") {
+    return `~ grant ${consequence.entityId}`;
+  }
+  if (consequence.type === "removeGrantable") {
+    return `~ ungrant ${consequence.entityId}`;
+  }
+  if (consequence.type === "editGrantable") {
+    return `~ ${consequence.entityId}.${consequence.propertyId} = ${jsonScalar(consequence.value)}`;
   }
   return undefined;
 }
@@ -227,12 +234,25 @@ export function parseConditionText(text: string): ConditionInput | undefined | n
 export function parseConsequenceText(text: string): Consequence | null {
   const body = text.replace(/^~\s*/, "").trim();
   if (body.startsWith("#")) return null;
-  const unlock = body.match(/^unlock\s+(\S+)$/);
-  if (unlock) return { type: "unlockCanonEntry", ref: unlock[1] };
+  const grant = body.match(/^grant\s+(\S+)$/);
+  if (grant) return { type: "addGrantable", entityId: grant[1] };
+  const ungrant = body.match(/^ungrant\s+(\S+)$/);
+  if (ungrant) return { type: "removeGrantable", entityId: ungrant[1] };
   const assign = body.match(/^([^\s=]+)\s*=\s*(.+)$/);
   if (assign) {
     const scalar = parseScalar(assign[2]);
-    if (scalar.ok) return { type: "setVariable", name: assign[1], value: scalar.value };
+    if (scalar.ok) {
+      const dotIndex = assign[1].indexOf(".");
+      if (dotIndex > 0) {
+        return {
+          type: "editGrantable",
+          entityId: assign[1].slice(0, dotIndex),
+          propertyId: assign[1].slice(dotIndex + 1),
+          value: scalar.value,
+        };
+      }
+      return { type: "setVariable", name: assign[1], value: scalar.value };
+    }
   }
   return null;
 }
@@ -356,6 +376,7 @@ export function serializeEventEvpathDetailed(
   const emitBeat = (node: Extract<GraphNode, { kind: "beat" }>, level: number) => {
     const { beat } = node;
     const text = escapeText(beatText(project, beat));
+    let consTexts: string[] = [];
     if (beat.kind === "direction") {
       lines.push(`${indentOf(level)}[${text}] #^${beat.id}`);
     } else {
@@ -372,8 +393,13 @@ export function serializeEventEvpathDetailed(
         const asset = (project.assets ?? []).find((item) => item.id === beat.sceneImage?.assetId);
         lines.push(`${indentOf(level + 1)}#img: ${asset?.name ?? beat.sceneImage.assetId}`);
       }
+      // Consequences only round-trip for speech beats — direction beats don't
+      // carry an anchor (`lastSpeechRef`) the parser can reattach `~` lines to,
+      // matching the existing note/scene-image restriction.
+      consTexts = consequenceTexts(beat.consequences);
+      consTexts.forEach((consText) => lines.push(`${indentOf(level + 1)}${consText}`));
     }
-    registry.set(beat.id, { kind: "beat", container: node.container?.id });
+    registry.set(beat.id, { kind: "beat", container: node.container?.id, consTexts });
   };
 
   const renderChain = (startId: string, level: number, containerId?: string) => {
@@ -813,6 +839,7 @@ export function applyEvpathToEvent(
   const seenRoots: Array<{ ref: string; bare: string }> = [];
   const consumedNotes = new Map<string, { note?: string; img?: string }>();
   const parsedOutcomeCons = new Map<string, string[]>();
+  const parsedBeatCons = new Map<string, string[]>();
 
   const currentScope = () => scopeStack[scopeStack.length - 1];
 
@@ -1021,8 +1048,10 @@ export function applyEvpathToEvent(
       const scope = currentScope();
       if (scope.kind === "option") {
         parsedOutcomeCons.get(scope.outcomeId)?.push(parsedLine.text ?? "");
+      } else if (lastSpeechRef && lastSpeechRef.container !== "outcome") {
+        parsedBeatCons.get(lastSpeechRef.nodeRef)?.push(parsedLine.text ?? "");
       } else {
-        warnings.push(`Línea ${parsedLine.line}: las consecuencias solo se aplican bajo opciones en esta versión.`);
+        warnings.push(`Línea ${parsedLine.line}: las consecuencias solo se aplican bajo opciones o beats de diálogo en esta versión.`);
       }
       continue;
     }
@@ -1133,6 +1162,7 @@ export function applyEvpathToEvent(
     linkFromTip(indent, nodeRef, beatId);
     chainTip.set(indent, nodeRef);
     elements.push({ parsedLine, nodeRef, bareId: beatId, isNew });
+    if (beat.kind === "speech") parsedBeatCons.set(beatId, []);
     lastSpeechRef = beat.kind === "speech" ? { nodeRef: beatId } : undefined;
     pendingDecision = pendingDecision && pendingDecision.indent === indent ? undefined : pendingDecision;
   }
@@ -1156,6 +1186,34 @@ export function applyEvpathToEvent(
     const updates: Partial<DialogueBeat> = {};
     if ((beat.directorNote ?? "") !== (extras.note ?? "")) {
       updates.directorNote = extras.note || undefined;
+    }
+    const consTexts = parsedBeatCons.get(beatId);
+    if (consTexts) {
+      const previous = registry.get(beatId);
+      const previousTexts = previous?.consTexts ?? [];
+      if (previousTexts.join("\n") !== consTexts.join("\n")) {
+        const kept: Consequence[] = [];
+        let parseFailed = false;
+        consTexts.forEach((text) => {
+          const parsedConsequence = parseConsequenceText(text);
+          if (parsedConsequence) {
+            kept.push(parsedConsequence);
+            return;
+          }
+          // Opaque line: keep the original consequence it rendered from, if any.
+          const originalIndex = previousTexts.indexOf(text);
+          if (originalIndex >= 0 && beat.consequences?.[originalIndex]) {
+            kept.push(beat.consequences[originalIndex]);
+          } else {
+            parseFailed = true;
+          }
+        });
+        if (parseFailed) {
+          warnings.push(`Consecuencia no reconocida en el beat #^${beatId}; se conserva la lógica existente.`);
+        } else {
+          updates.consequences = kept;
+        }
+      }
     }
     const currentAsset = beat.sceneImage
       ? (current.assets ?? []).find((item) => item.id === beat.sceneImage?.assetId)

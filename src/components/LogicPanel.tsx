@@ -8,11 +8,13 @@ import {
   CircleDot,
   Info,
   LockKeyhole,
+  MapPin,
   MessageSquare,
   MoreHorizontal,
   Package,
   Pencil,
   Plus,
+  Search,
   ShieldCheck,
   Trash2,
   UserRound,
@@ -33,6 +35,7 @@ import type {
   ExplorerPropertyOption,
   LocalExplorerProperty,
   LogicPropertyOverride,
+  LogicTypeOverride,
   LogicVariable,
   LogicVariableGroup,
   LogicVariableType,
@@ -42,6 +45,7 @@ import {
   canonExplorerTypeProperty,
   flattenCanonExplorerProperties,
   propertyCapability,
+  typeCapability,
   type CanonExplorerProperty,
 } from "../explorerSchema.js";
 import { WorkspaceSidePanel } from "./WorkspaceSidePanel.js";
@@ -49,12 +53,14 @@ import { WorkspaceSidePanel } from "./WorkspaceSidePanel.js";
 const CLICK_SEQUENCE_WINDOW_MS = 360;
 const variableTypes: LogicVariableType[] = ["text", "number", "boolean", "list", "canonRef"];
 const propertyTypes = [
+  ["entity-type", "Entity type"],
   ["text", "Text"],
   ["number", "Number"],
   ["boolean", "Boolean"],
+  ["date", "Date"],
   ["select", "Select"],
   ["multiselect", "Multi-select"],
-  ["entity-ref", "Entity reference"],
+  ["group", "Group (nested properties)"],
 ] as const;
 type PropertySource = "canon" | "local";
 type PropertyEditorState = { id: string; source: PropertySource; top: number; left: number };
@@ -77,6 +83,7 @@ export function LogicPanel({
   onInitializeProperties,
   onUpdateLocalExplorerProperty,
   onUpdateLogicPropertyOverride,
+  onUpdateLogicTypeOverride,
   onDeleteLocalExplorerProperty,
 }: {
   project: BranchingProject;
@@ -88,7 +95,20 @@ export function LogicPanel({
   selected?: Selection;
   onSelect: (selection: Selection) => void;
   onOpenInspector: (selection: Selection) => void;
-  onCreateProperty: (label: string, valueType: LocalExplorerProperty["valueType"]) => void;
+  onCreateProperty: (
+    label: string,
+    valueType: LocalExplorerProperty["valueType"],
+    options?: {
+      description?: string;
+      required?: boolean;
+      options?: ExplorerPropertyOption[];
+      targetTypes?: string[];
+      appliesToTypes?: string[];
+      icon?: string;
+      color?: string;
+      suggestedFolder?: string;
+    },
+  ) => void;
   onInitializeProperties?: () => void;
   onUpdateLocalExplorerProperty: (id: string, updates: Partial<LocalExplorerProperty>) => void;
   onUpdateLogicPropertyOverride: (
@@ -96,17 +116,43 @@ export function LogicPanel({
     source: PropertySource,
     changes: Partial<LogicPropertyOverride>,
   ) => void;
+  onUpdateLogicTypeOverride: (
+    typeId: string,
+    source: PropertySource,
+    changes: Partial<LogicTypeOverride>,
+  ) => void;
   onDeleteLocalExplorerProperty?: (id: string) => void;
+  onCreateType?: () => void;
 }) {
   const [tab, setTab] = useState<"properties" | "variables">("properties");
+  const [propertySearch, setPropertySearch] = useState("");
+  const [showInfoTooltip, setShowInfoTooltip] = useState(false);
   const [collapsedCanonTypes, setCollapsedCanonTypes] = useState<Set<string>>(() => {
     const canonPropertyTypes = canonExplorerPropertyTypes(propertiesConfig);
     return new Set(canonPropertyTypes.map((type) => type.id));
   });
   const [propertyEditor, setPropertyEditor] = useState<PropertyEditorState>();
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
-  const [newPropertyLabel, setNewPropertyLabel] = useState("");
-  const [newPropertyType, setNewPropertyType] = useState<LocalExplorerProperty["valueType"]>("text");
+  const [newPropertyState, setNewPropertyState] = useState<{
+    label: string;
+    valueType: LocalExplorerProperty["valueType"];
+    description: string;
+    required: boolean;
+    options: ExplorerPropertyOption[];
+    targetTypes: string[];
+    appliesToTypes: string[];
+    icon?: string;
+    color?: string;
+    suggestedFolder?: string;
+  }>({
+    label: "",
+    valueType: "text",
+    description: "",
+    required: false,
+    options: [],
+    targetTypes: [],
+    appliesToTypes: [],
+  });
   const editorRef = useRef<HTMLDivElement>(null);
   const pendingInspectorClickRef = useRef<{ propertyId: string; source: PropertySource; timer: number } | undefined>(undefined);
   const groups = [...(project.logicVariableGroups ?? [])].sort((a, b) => a.order - b.order);
@@ -125,6 +171,10 @@ export function LogicPanel({
     ? propertyCapability(project, propertyEditor.source, editingProperty.id)
     : undefined;
   const isCanonEditor = propertyEditor?.source === "canon";
+  const editingTypeId = editingProperty?.id.startsWith("type:") ? editingProperty.id : undefined;
+  const editingTypeCapability = editingTypeId && propertyEditor
+    ? typeCapability(project, propertyEditor.source, editingTypeId)
+    : undefined;
 
   useEffect(() => {
     if (!propertyEditor) return;
@@ -173,12 +223,28 @@ export function LogicPanel({
   };
 
   const handleCreateProperty = () => {
-    const trimmedLabel = newPropertyLabel.trim();
+    const trimmedLabel = newPropertyState.label.trim();
     if (!trimmedLabel) return;
-    onCreateProperty(trimmedLabel, newPropertyType);
+    onCreateProperty(trimmedLabel, newPropertyState.valueType, {
+      description: newPropertyState.description || undefined,
+      required: newPropertyState.required || undefined,
+      options: newPropertyState.options.length ? newPropertyState.options : undefined,
+      targetTypes: newPropertyState.targetTypes.length ? newPropertyState.targetTypes : undefined,
+      appliesToTypes: newPropertyState.appliesToTypes.length ? newPropertyState.appliesToTypes : undefined,
+      icon: newPropertyState.icon || undefined,
+      color: newPropertyState.color || undefined,
+      suggestedFolder: newPropertyState.suggestedFolder || undefined,
+    });
     setIsCreateModalOpen(false);
-    setNewPropertyLabel("");
-    setNewPropertyType("text");
+    setNewPropertyState({
+      label: "",
+      valueType: "text",
+      description: "",
+      required: false,
+      options: [],
+      targetTypes: [],
+      appliesToTypes: [],
+    });
   };
 
   const handlePropertyPointerDown = (propertyId: string, source: PropertySource) => {
@@ -225,6 +291,17 @@ export function LogicPanel({
   const updateCapability = (changes: Partial<LogicPropertyOverride>) => {
     if (propertyEditor && editingProperty) {
       onUpdateLogicPropertyOverride(editingProperty.id, propertyEditor.source, changes);
+    }
+  };
+  const updateTypeCapability = (changes: Partial<LogicTypeOverride>) => {
+    if (propertyEditor && editingTypeId) {
+      // For entity-type properties (prefixed with "type:"), use property overrides
+      if (editingTypeId.startsWith("type:")) {
+        onUpdateLogicPropertyOverride(editingTypeId, propertyEditor.source, changes);
+      } else {
+        // For legacy local types, use type overrides
+        onUpdateLogicTypeOverride(editingTypeId, propertyEditor.source, changes);
+      }
     }
   };
   const updateOptions = (options: ExplorerPropertyOption[]) => updateLocal({ options: options.length ? options : undefined });
@@ -294,20 +371,65 @@ export function LogicPanel({
     {renderPropertyAction(property, "local")}
   </div>;
 
-  return <WorkspaceSidePanel title="Logic" side="left" collapsed={collapsed} onCollapsedChange={onCollapsedChange} onContextMenu={onContextMenu}>
+  const panelTitle = (
+    <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+      <span>Logic</span>
+      <div
+        style={{ position: "relative", display: "inline-flex", alignItems: "center", cursor: "help" }}
+        onMouseEnter={() => setShowInfoTooltip(true)}
+        onMouseLeave={() => setShowInfoTooltip(false)}
+      >
+        <Info size={14} style={{ opacity: 0.6 }} />
+        {showInfoTooltip && (
+          <div
+            style={{
+              position: "absolute",
+              top: "100%",
+              left: "50%",
+              transform: "translateX(-50%)",
+              marginTop: "4px",
+              backgroundColor: "rgba(0, 0, 0, 0.8)",
+              color: "white",
+              padding: "8px 12px",
+              borderRadius: "4px",
+              fontSize: "12px",
+              lineHeight: "1.4",
+              whiteSpace: "nowrap",
+              zIndex: 1000,
+              pointerEvents: "none"
+            }}
+          >
+            Edit local properties here. Imported canon properties are protected; only their Pathbranching capabilities can be overridden.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
+  return <WorkspaceSidePanel title={panelTitle} side="left" collapsed={collapsed} onCollapsedChange={onCollapsedChange} onContextMenu={onContextMenu}>
     <div className="explorer-view-tabs" role="tablist" aria-label="Logic views">
       <button type="button" role="tab" aria-selected={tab === "properties"} className={tab === "properties" ? "active" : ""} onClick={() => setTab("properties")}>Properties</button>
       <button type="button" role="tab" aria-selected={tab === "variables"} className={tab === "variables" ? "active" : ""} onClick={() => setTab("variables")}>Variables</button>
     </div>
     {tab === "properties" ? <>
-      <div className="panel-toolbar"><strong>Property schema</strong><div style={{display: "flex", gap: "4px"}}><button type="button" title="Expand all properties" onClick={expandAllProperties}><ChevronDown size={14} /></button><button type="button" title="Collapse all properties" onClick={collapseAllProperties}><ChevronRight size={14} /></button></div><button type="button" onClick={() => setIsCreateModalOpen(true)}><Plus size={14} /> Property</button></div>
-      <p className="inspector-connection-hint">Edit local properties here. Imported canon properties are protected; only their Pathbranching capabilities can be overridden.</p>
+      <div className="panel-toolbar">
+        <label className="explorer-search">
+          <Search size={14} />
+          <input value={propertySearch} onChange={(event) => setPropertySearch(event.target.value)} placeholder="Search properties" />
+        </label>
+        <button type="button" title="Add property" onClick={() => setIsCreateModalOpen(true)}><Plus size={14} /></button>
+        <div style={{display: "flex", gap: "4px", alignItems: "center", marginLeft: "auto"}}>
+          <button type="button" title="Expand all properties" onClick={expandAllProperties}><ChevronDown size={14} /></button>
+          <button type="button" title="Collapse all properties" onClick={collapseAllProperties}><ChevronRight size={14} /></button>
+        </div>
+      </div>
       <div className="explorer-tree logic-property-tree">
         {canonPropertyTypes.map((type) => {
           const typeExpanded = !collapsedCanonTypes.has(type.id);
           const count = propertyCount(type.properties);
           const typeProperty = canonExplorerTypeProperty(type);
-          return <section className="logic-canon-type-group" key={type.id}>
+          const typeMatchesSearch = !propertySearch || type.label.toLowerCase().includes(propertySearch.toLowerCase());
+          return typeMatchesSearch ? <section className="logic-canon-type-group" key={type.id}>
             <div className="logic-canon-type-heading">
               <button type="button" className="logic-canon-type-toggle" aria-label={`${typeExpanded ? "Collapse" : "Expand"} ${type.label}`} onClick={() => toggleCanonType(type.id)}>{typeExpanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}</button>
               <div className="logic-property-row-shell">
@@ -317,9 +439,9 @@ export function LogicPanel({
             </div>
             {typeExpanded && type.properties.map((property) => renderCanonProperty(property))}
             {typeExpanded && !type.properties.length ? <span className="empty-line">No properties for this type.</span> : null}
-          </section>;
+          </section> : null;
         })}
-        {localProperties.map((property) => renderLocalProperty(property))}
+        {localProperties.filter((property) => !propertySearch || property.label.toLowerCase().includes(propertySearch.toLowerCase())).map((property) => renderLocalProperty(property))}
         {canonPropertyTypes.length === 0 && localProperties.length === 0 ? (
           !propertiesConfig ? (
             <div className="empty-state" style={{ padding: "16px", textAlign: "center" }}>
@@ -358,6 +480,20 @@ export function LogicPanel({
         <div className={`logic-property-protection ${isCanonEditor ? "canon" : "local"}`}><LockKeyhole size={13} />{isCanonEditor ? "Canon property — only capabilities can be overridden" : "Local property"}</div>
         <div className="logic-property-capabilities">
           <div className="logic-property-editor-subheading"><strong>PathBranching capabilities</strong><span>Configure behavior</span></div>
+          {(editingTypeId || editingProperty?.valueType === "entity-type") ? renderCapabilityCard(
+            <Package size={16} />,
+            "Grantable",
+            "Entities of this type can be granted/removed as a consequence and checked as a condition",
+            editingTypeCapability?.grantable ?? false,
+            (checked) => updateTypeCapability({ grantable: checked }),
+          ) : null}
+          {(editingTypeId || editingProperty?.valueType === "entity-type") ? renderCapabilityCard(
+            <MapPin size={16} />,
+            "Location",
+            "Entities of this type can be selected as an event or speech beat location",
+            editingTypeCapability?.location ?? false,
+            (checked) => updateTypeCapability({ location: checked }),
+          ) : null}
           {renderCapabilityCard(
             <ShieldCheck size={16} />,
             "Available in conditions",
@@ -371,13 +507,6 @@ export function LogicPanel({
             "Can be modified by story actions",
             editingCapability?.actionWritable ?? propertyEditor.source === "local",
             (checked) => updateCapability({ actionWritable: checked }),
-          )}
-          {renderCapabilityCard(
-            <Package size={16} />,
-            "Grantable",
-            "Can be granted or unlocked during gameplay",
-            editingCapability?.grantable ?? false,
-            (checked) => updateCapability({ grantable: checked }),
           )}
           {renderCapabilityCard(
             <UserRound size={16} />,
@@ -403,8 +532,11 @@ export function LogicPanel({
           <summary><Info size={12} /> Schema fields</summary>
           <div className="logic-property-technical-content">
             <label className="field-label">Name<input value={editingProperty.label} disabled={isCanonEditor} onChange={(event) => updateLocal({ label: event.target.value })} /></label>
-            <label className="field-label">Value type<select value={editingProperty.valueType} disabled={isCanonEditor} onChange={(event) => updateLocal({ valueType: event.target.value })}>{!propertyTypes.some(([value]) => value === editingProperty.valueType) ? <option value={editingProperty.valueType}>{editingProperty.valueType}</option> : null}{propertyTypes.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+            <label className="field-label">Value type<select value={editingProperty.valueType} disabled={isCanonEditor} onChange={(event) => updateLocal({ valueType: event.target.value as LocalExplorerProperty["valueType"] })}>{!propertyTypes.some(([value]) => value === editingProperty.valueType) ? <option value={editingProperty.valueType}>{editingProperty.valueType}</option> : null}{propertyTypes.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
             <label className="field-label">Applies to types<input value={(editingProperty.appliesToTypes ?? []).join(", ")} disabled={isCanonEditor} placeholder="All types" onChange={(event) => updateLocal({ appliesToTypes: event.target.value.split(",").map((value) => value.trim()).filter(Boolean) })} /></label>
+            {!isCanonEditor && (editingProperty.valueType === "entity-ref" || editingProperty.valueType === "entity-ref-list") ? (
+              <label className="field-label">Target entity types<input value={((editingProperty as LocalExplorerProperty).targetTypes ?? []).join(", ")} placeholder="All entities" onChange={(event) => updateLocal({ targetTypes: event.target.value.split(",").map((value) => value.trim()).filter(Boolean) })} /></label>
+            ) : null}
             <label className="field-label">Description<textarea rows={3} value={editingProperty.description ?? ""} disabled={isCanonEditor} onChange={(event) => updateLocal({ description: event.target.value })} /></label>
             <label className="logic-property-checkbox"><input type="checkbox" checked={editingProperty.required ?? false} disabled={isCanonEditor} onChange={(event) => updateLocal({ required: event.target.checked })} /> Required</label>
             {renderEditorOptions()}
@@ -441,13 +573,13 @@ export function LogicPanel({
             <h3>Create New Property</h3>
             <button type="button" className="icon-only" onClick={() => setIsCreateModalOpen(false)}><X size={16} /></button>
           </header>
-          <div className="modal-body">
-            <label>
+          <div className="modal-body" style={{ maxHeight: "70vh", overflowY: "auto" }}>
+            <label className="field-label">
               <span>Label</span>
               <input
                 type="text"
-                value={newPropertyLabel}
-                onChange={(e) => setNewPropertyLabel(e.target.value)}
+                value={newPropertyState.label}
+                onChange={(e) => setNewPropertyState({ ...newPropertyState, label: e.target.value })}
                 placeholder="Property label"
                 autoFocus
                 onKeyDown={(e) => {
@@ -456,16 +588,147 @@ export function LogicPanel({
                 }}
               />
             </label>
-            <label>
+            <label className="field-label">
               <span>Type</span>
-              <select value={newPropertyType} onChange={(event) => setNewPropertyType(event.target.value as LocalExplorerProperty["valueType"])}>
+              <select value={newPropertyState.valueType} onChange={(event) => setNewPropertyState({ ...newPropertyState, valueType: event.target.value as LocalExplorerProperty["valueType"], options: [], targetTypes: [] })}>
                 {propertyTypes.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
               </select>
+            </label>
+            <label className="field-label">
+              <span>Description</span>
+              <textarea
+                rows={2}
+                value={newPropertyState.description}
+                onChange={(e) => setNewPropertyState({ ...newPropertyState, description: e.target.value })}
+                placeholder="Optional description"
+              />
+            </label>
+            <label className="logic-property-checkbox">
+              <input
+                type="checkbox"
+                checked={newPropertyState.required}
+                onChange={(e) => setNewPropertyState({ ...newPropertyState, required: e.target.checked })}
+              />
+              Required
+            </label>
+            {newPropertyState.valueType === "entity-type" ? (
+              <>
+                <label className="field-label">
+                  <span>Icon</span>
+                  <input
+                    type="text"
+                    value={newPropertyState.icon || ""}
+                    onChange={(e) => setNewPropertyState({ ...newPropertyState, icon: e.target.value || undefined })}
+                    placeholder="circle, person, map-pin, etc."
+                  />
+                </label>
+                <label className="field-label">
+                  <span>Color (optional)</span>
+                  <input
+                    type="text"
+                    value={newPropertyState.color || ""}
+                    onChange={(e) => setNewPropertyState({ ...newPropertyState, color: e.target.value || undefined })}
+                    placeholder="#FF5733 or blue"
+                  />
+                </label>
+                <label className="field-label">
+                  <span>Suggested folder (optional)</span>
+                  <input
+                    type="text"
+                    value={newPropertyState.suggestedFolder || ""}
+                    onChange={(e) => setNewPropertyState({ ...newPropertyState, suggestedFolder: e.target.value || undefined })}
+                    placeholder="characters, locations, etc."
+                  />
+                </label>
+              </>
+            ) : null}
+            {(newPropertyState.valueType === "select" || newPropertyState.valueType === "multiselect") ? (
+              <div className="field-label">
+                <span>Options</span>
+                <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                  {newPropertyState.options.map((option, index) => (
+                    <div key={index} style={{ display: "flex", gap: "4px" }}>
+                      <input
+                        type="text"
+                        placeholder="Value"
+                        value={option.value}
+                        onChange={(e) => {
+                          const updated = [...newPropertyState.options];
+                          updated[index].value = e.target.value;
+                          setNewPropertyState({ ...newPropertyState, options: updated });
+                        }}
+                        style={{ flex: 1 }}
+                      />
+                      <input
+                        type="text"
+                        placeholder="Label"
+                        value={option.label}
+                        onChange={(e) => {
+                          const updated = [...newPropertyState.options];
+                          updated[index].label = e.target.value;
+                          setNewPropertyState({ ...newPropertyState, options: updated });
+                        }}
+                        style={{ flex: 1 }}
+                      />
+                      <button
+                        type="button"
+                        className="icon-only"
+                        onClick={() => {
+                          const updated = newPropertyState.options.filter((_, i) => i !== index);
+                          setNewPropertyState({ ...newPropertyState, options: updated });
+                        }}
+                      >
+                        <X size={14} />
+                      </button>
+                    </div>
+                  ))}
+                  <button
+                    type="button"
+                    style={{ marginTop: "4px", padding: "4px 8px", fontSize: "12px" }}
+                    onClick={() => {
+                      const newOption: ExplorerPropertyOption = {
+                        value: optionKey(newPropertyState.options.length),
+                        label: `Option ${newPropertyState.options.length + 1}`,
+                      };
+                      setNewPropertyState({ ...newPropertyState, options: [...newPropertyState.options, newOption] });
+                    }}
+                  >
+                    <Plus size={12} style={{ marginRight: "4px", verticalAlign: "middle" }} />
+                    Add option
+                  </button>
+                </div>
+              </div>
+            ) : null}
+            {(newPropertyState.valueType === "entity-ref" || newPropertyState.valueType === "entity-ref-list") ? (
+              <label className="field-label">
+                <span>Target entity types</span>
+                <input
+                  type="text"
+                  value={newPropertyState.targetTypes.join(", ")}
+                  onChange={(e) => setNewPropertyState({
+                    ...newPropertyState,
+                    targetTypes: e.target.value.split(",").map((v) => v.trim()).filter(Boolean),
+                  })}
+                  placeholder="character, location (comma-separated)"
+                />
+              </label>
+            ) : null}
+            <label className="field-label">
+              <span>Applies to types (optional)</span>
+              <input
+                type="text"
+                value={newPropertyState.appliesToTypes.join(", ")}
+                onChange={(e) => setNewPropertyState({
+                  ...newPropertyState,
+                  appliesToTypes: e.target.value.split(",").map((v) => v.trim()).filter(Boolean),
+                })}
+                placeholder="Leave blank for all types"
+              />
             </label>
           </div>
           <footer className="modal-footer">
             <button type="button" onClick={() => setIsCreateModalOpen(false)}>Cancel</button>
-            <button type="button" className="primary" onClick={handleCreateProperty} disabled={!newPropertyLabel.trim()}>Create</button>
+            <button type="button" className="primary" onClick={handleCreateProperty} disabled={!newPropertyState.label.trim()}>Create</button>
           </footer>
         </div>
       </div>

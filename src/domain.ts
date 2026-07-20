@@ -66,6 +66,8 @@ export type LocalExplorerEntity = {
   aliases?: string[];
   properties?: Record<string, unknown>;
   body?: string;
+  /** Asset ids attached to this entity's gallery (used by location-flagged types). */
+  imageGallery?: string[];
   createdAt: string;
   updatedAt: string;
   exportedPath?: string;
@@ -90,14 +92,36 @@ export type ExplorerPropertyOption = {
   color?: string;
 };
 
+export type LocalExplorerPropertyValueType =
+  | "text"
+  | "number"
+  | "boolean"
+  | "date"
+  | "select"
+  | "multiselect"
+  | "entity-ref"
+  | "entity-ref-list"
+  | "entity-type"
+  | "group";
+
 export type LocalExplorerProperty = {
   id: string;
   label: string;
-  valueType: string;
+  valueType: LocalExplorerPropertyValueType;
   description?: string;
   appliesToTypes?: string[];
   required?: boolean;
   options?: ExplorerPropertyOption[];
+  /** entity-ref / entity-ref-list: which entity types are eligible targets. */
+  targetTypes?: string[];
+  /** group: nested child properties. */
+  children?: LocalExplorerProperty[];
+  /** entity-type: icon used to represent this type of entity. */
+  icon?: string;
+  /** entity-type: color used to represent this type of entity. */
+  color?: string;
+  /** entity-type: suggested folder path for entities of this type. */
+  suggestedFolder?: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -168,18 +192,33 @@ export type LogicPropertyOverride = {
   source: "canon" | "local";
   conditionReadable?: boolean;
   actionWritable?: boolean;
-  grantable?: boolean;
   /** Allows values of this property to be presented as event entities. */
   entityPresentable?: boolean;
   /** Child capability: values may be used as Dialogue Trigger sources. */
   dialogueTrigger?: boolean;
   relationTargetTypes?: string[];
+  /** For entity-type properties: entities of this type can be given/removed as a Consequence and checked as runtimeItem. */
+  grantable?: boolean;
+  /** For entity-type properties: entities of this type can be selected as an Event/DialogueBeat location. */
+  location?: boolean;
+};
+
+/** Entity-type-level capability flags: an entity is grantable/a location because its TYPE is marked so. */
+export type LogicTypeOverride = {
+  typeId: string;
+  source: "canon" | "local";
+  /** Entities of this type can be given/removed as a Consequence and checked as a runtimeItem Condition. */
+  grantable?: boolean;
+  /** Entities of this type can be selected as an Event/DialogueBeat location. */
+  location?: boolean;
 };
 
 export type PlayerSimulationState = {
   inventory?: string[];
   unlockedCanonRefs?: string[];
   variables?: Record<string, unknown>;
+  /** editGrantable runtime values, keyed by grantable entity id then property id. */
+  grantableProperties?: Record<string, Record<string, unknown>>;
   visited?: string[];
   activeNodeId?: string;
   activeDecisionId?: string;
@@ -356,8 +395,7 @@ export type Sequence = {
   eventIds: string[];
   branchIds?: string[];
   availability?: ConditionInput;
-  ruleSetBindings?: RuleSetBinding[];
-  ruleSets?: RuleSet[];
+  consequences?: Consequence[];
   legacyUnity?: Record<string, unknown>;
 };
 
@@ -368,8 +406,7 @@ export type Branch = {
   color?: string;
   eventIds: string[];
   availability?: ConditionInput;
-  ruleSetBindings?: RuleSetBinding[];
-  ruleSets?: RuleSet[];
+  consequences?: Consequence[];
   legacyUnity?: Record<string, unknown>;
 };
 
@@ -411,7 +448,7 @@ export type EventNode = {
   branchRef?: string | null;
   script?: ScriptRef;
   canonRefs?: string[];
-  /** Canon location where this event takes place. */
+  /** Canon or local location entity where this event takes place (entity type must be marked as a location via LogicTypeOverride). */
   locationRef?: string;
   /** Canon entities configured as present in this event. */
   presentEntityRefs?: string[];
@@ -424,10 +461,8 @@ export type EventNode = {
   dialogues?: DialogueNode[];
   dialogueStarts?: DialogueStart[];
   boundaryBindings?: BoundaryPortBinding[];
-  unlocks?: Consequence[];
+  consequences?: Consequence[];
   transitions?: Transition[];
-  ruleSetBindings?: RuleSetBinding[];
-  ruleSets?: RuleSet[];
   legacyUnity?: Record<string, unknown>;
 };
 
@@ -443,8 +478,8 @@ export type Decision = {
   /** @deprecated Legacy grouping only. Decisions now belong directly to the event. */
   dialogueId?: string;
   availability?: ConditionInput;
-  ruleSetBindings?: RuleSetBinding[];
-  ruleSets?: RuleSet[];
+  unavailableBehavior?: "locked" | "hidden";
+  lockText?: StoryTextBlock;
   outcomes: Outcome[];
 };
 
@@ -457,8 +492,7 @@ export type DialogueNode = {
   speakerRef?: string;
   text: StoryTextBlock;
   availability?: ConditionInput;
-  ruleSetBindings?: RuleSetBinding[];
-  ruleSets?: RuleSet[];
+  consequences?: Consequence[];
   canonRefs?: string[];
 };
 
@@ -492,8 +526,10 @@ export type DialogueBeat = {
   /** @deprecated Migrated to the single `sceneImage` attachment. */
   sceneImages?: SceneImageAttachment[];
   displayCondition?: ConditionInput;
-  ruleSetBindings?: RuleSetBinding[];
-  ruleSets?: RuleSet[];
+  /** Fires when this beat is reached — e.g. grant/remove a grantable at this exact line. */
+  consequences?: Consequence[];
+  /** Optional override of the owning event's `locationRef` for this beat. */
+  locationRef?: string;
 };
 
 export type BoundaryPortBinding = {
@@ -516,8 +552,6 @@ export type Outcome = {
   lockText?: StoryTextBlock;
   conditions?: ConditionInput;
   consequences?: Consequence[];
-  ruleSetBindings?: RuleSetBinding[];
-  ruleSets?: RuleSet[];
 };
 
 export type Condition =
@@ -598,9 +632,20 @@ export type ConditionInput = ConditionExpression | ConditionExpression[];
 
 export type Consequence =
   | {
-      type: "unlockCanonEntry";
-      ref: string;
-      sourceFunction?: string;
+      type: "addGrantable";
+      entityId: string;
+      conditions?: ConditionInput;
+    }
+  | {
+      type: "removeGrantable";
+      entityId: string;
+      conditions?: ConditionInput;
+    }
+  | {
+      type: "editGrantable";
+      entityId: string;
+      propertyId: string;
+      value: unknown;
       conditions?: ConditionInput;
     }
   | {
@@ -608,36 +653,7 @@ export type Consequence =
       name: string;
       value: unknown;
       conditions?: ConditionInput;
-    }
-  | {
-      type: "unlockDataObject";
-      objectId: string;
-      conditions?: ConditionInput;
-    }
-  | {
-      type: "externalFunction";
-      name: string;
-      arguments?: unknown[];
-      conditions?: ConditionInput;
-    }
-  | {
-      type: "engineSignal";
-      name: string;
-      arguments?: unknown[];
-      conditions?: ConditionInput;
-    }
-  | {
-      type: string;
-      [key: string]: unknown;
     };
-
-export type RuleSet = {
-  id: string;
-  label?: string;
-  when: ConditionInput;
-  then: Consequence[];
-  else?: Consequence[];
-};
 
 export type Transition = {
   id: string;
@@ -651,31 +667,6 @@ export type Transition = {
   source?: "graph" | "inkDivert" | "inkExternalFunction" | "engine" | string;
   function?: string;
   arguments?: unknown[];
-};
-
-export type RuleSetPhase = "onEnter" | "onExit" | "onDisplay" | "onSelect" | "onCreate";
-
-export type RuleSetBinding = {
-  id: string;
-  ruleId: string;
-  phase: RuleSetPhase;
-  order: number;
-};
-
-export type RuleLibraryGroup = {
-  id: string;
-  name: string;
-  order: number;
-};
-
-export type RuleLibraryRule = RuleSet & {
-  groupId: string;
-  tags?: string[];
-};
-
-export type RuleLibrary = {
-  groups: RuleLibraryGroup[];
-  rules: RuleLibraryRule[];
 };
 
 export type CanonRoleMapping = {
@@ -708,8 +699,7 @@ export type ProjectDataObject = {
   tags?: string[];
   scope?: ProjectDataObjectScope;
   availability?: ConditionInput;
-  ruleSetBindings?: RuleSetBinding[];
-  ruleSets?: RuleSet[];
+  consequences?: Consequence[];
 };
 
 export type ExternalFunction = {
@@ -812,10 +802,12 @@ export type BranchingProject = {
   logicVariableGroups?: LogicVariableGroup[];
   logicVariables?: LogicVariable[];
   logicPropertyOverrides?: LogicPropertyOverride[];
+  logicTypeOverrides?: LogicTypeOverride[];
+  /** Image-gallery overrides for canon (WorldNotion) entities, keyed by canonRef id — pathbranching cannot write into the vault directly. */
+  canonEntityGalleries?: Record<string, string[]>;
   playerSimulation?: PlayerSimulationState;
   playerProfiles?: PlayerProfile[];
   activePlayerProfileId?: string;
-  ruleLibrary?: RuleLibrary;
   projectionRules?: ProjectionRule[];
   graphModules?: GraphModuleDefinition[];
   canvas?: CanvasAuthoringState;
@@ -905,9 +897,7 @@ export type ValidationFinding = {
     | "invalid_frontmatter"
     | "invalid_worldnotion_properties"
     | "invalid_condition"
-    | "invalid_rule_set"
-    | "missing_rule_set"
-    | "invalid_rule_set_binding"
+    | "missing_grantable_entity"
     | "invalid_transition_order"
     | "duplicate_fallback"
     | "no_valid_transition"

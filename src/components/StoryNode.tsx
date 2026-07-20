@@ -189,6 +189,7 @@ type BeatQuickEditor = {
   onCharacterVariantUpdate?: (variantId: string) => void;
   beatConnector?: {
     onConnect: (kind: "speechBeat" | "decision" | "directionBeat") => void;
+    onInsertConditions?: () => void;
   };
 };
 
@@ -1168,6 +1169,19 @@ function StoryNode({ id, data, selected }: NodeProps<StoryCanvasNode>) {
               >
                 <Clapperboard size={13} aria-hidden="true" /> Director Direction
               </button>
+              {quickEditor.beatConnector.onInsertConditions ? (
+                <button
+                  type="button"
+                  onPointerDown={stopCanvasInteraction}
+                  onClick={(event) => {
+                    stopCanvasInteraction(event);
+                    quickEditor.beatConnector?.onInsertConditions?.();
+                    setConnectorMenuOpen(false);
+                  }}
+                >
+                  <GitBranch size={13} aria-hidden="true" /> Conditions
+                </button>
+              ) : null}
             </div>
           </div>
         ) : null}

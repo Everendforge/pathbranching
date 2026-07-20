@@ -1456,11 +1456,6 @@ export function deleteDataObject(
     });
   };
   const checkConsequences = (consequences: Consequence[] | undefined) => {
-    consequences?.forEach((consequence) => {
-      if ("objectId" in consequence && consequence.objectId === id) {
-        used = true;
-      }
-    });
     conditionInputsFromConsequences(consequences).forEach(checkConditions);
   };
 
@@ -1470,7 +1465,7 @@ export function deleteDataObject(
   project.branches.forEach((branch) => checkConditions(branch.availability));
   project.events.forEach((event) => {
     checkConditions(event.availability);
-    checkConsequences(event.unlocks);
+    checkConsequences(event.consequences);
     event.transitions?.forEach((transition) => {
       checkConditions(transition.conditions);
       checkConsequences(transition.consequences);

@@ -58,6 +58,12 @@ import {
   propertySupportsDialogueTrigger,
   entitySupportsDialogueTrigger,
   DIALOGUE_TRIGGER_ACTIONS,
+  typeCapability,
+  isLocationType,
+  grantableEntities,
+  locationEntities,
+  entityRefOptions,
+  type GrantableEntityOption,
 } from "./explorerSchema.js";
 import {
   canonVariantsForRef,
@@ -90,6 +96,7 @@ import {
   ImagePlus,
   Info,
   Link,
+  MapPin,
   Maximize2,
   MessageSquare,
   MousePointerClick,
@@ -146,16 +153,14 @@ import type {
   EventCategoryDefinition,
   EventNode,
   EventType,
+  ExplorerPropertyOption,
   LocalExplorerEntity,
   LocalExplorerProperty,
   LocalExplorerType,
   LogicPropertyOverride,
+  LogicTypeOverride,
   Outcome,
   ProjectDataObject,
-  RuleLibraryRule,
-  RuleSetBinding,
-  RuleSetPhase,
-  RuleSet,
   ScriptBlock,
   SceneImageAttachment,
   Sequence,
@@ -163,7 +168,6 @@ import type {
   Transition,
   ValidationFinding,
 } from "./domain.js";
-import { defaultRuleSetPhase, ruleSetPhasesByOwner, type RuleBindingOwnerKind } from "./ruleLibrary.js";
 import type {
   AppView,
   CanvasMode,
@@ -412,6 +416,24 @@ function eventCoverImageForNode(
   return attachment && asset
     ? { ...attachment, name: asset.name, url: universeAssetUrl(project, asset.path) }
     : undefined;
+}
+
+/**
+ * Scopes the image picker to a location's gallery when one is set. Falls back
+ * to every image asset when no location is active or its gallery is empty,
+ * preserving today's behavior for location-less events/beats.
+ */
+function imageAssetsForLocation(
+  project: Pick<BranchingProject, "assets" | "localExplorerEntities" | "canonEntityGalleries">,
+  locationRef: string | undefined,
+): Array<{ id: string; name: string }> {
+  const allImages = (project.assets ?? []).filter((asset) => asset.kind === "image");
+  const gallery = locationRef
+    ? project.localExplorerEntities?.find((entity) => entity.id === locationRef)?.imageGallery
+      ?? project.canonEntityGalleries?.[locationRef]
+    : undefined;
+  const scoped = gallery?.length ? allImages.filter((asset) => gallery.includes(asset.id)) : allImages;
+  return scoped.map((asset) => ({ id: asset.id, name: asset.name }));
 }
 
 function dialogueTriggerPortraitUrl(
@@ -1556,14 +1578,10 @@ function LogicSection({
   title,
   availability,
   consequences,
-  ruleSets,
-  ruleSetBindings,
 }: {
   title?: string;
   availability?: ConditionInput;
   consequences?: Consequence[];
-  ruleSets?: RuleSet[];
-  ruleSetBindings?: RuleSetBinding[];
 }) {
   const availabilityCount = conditionCount(availability);
 
@@ -1583,29 +1601,7 @@ function LogicSection({
           <strong>Consequences</strong>
           <span>{consequenceSummary(consequences)}</span>
         </div>
-        <div className="mini-card">
-          <strong>RuleSets</strong>
-          <span>
-            {ruleSetBindings?.length || ruleSets?.length
-              ? `${ruleSetBindings?.length ?? ruleSets?.length} shared rule(s)`
-              : "No advanced rules."}
-          </span>
-        </div>
       </div>
-      {ruleSets?.length ? (
-        <div className="stack-list">
-          {ruleSets.map((ruleSet) => (
-            <div className="mini-card" key={ruleSet.id}>
-              <strong>{ruleSet.label ?? ruleSet.id}</strong>
-              <span>when: {conditionSummary(ruleSet.when)}</span>
-              <span>then: {consequenceSummary(ruleSet.then)}</span>
-              {ruleSet.else?.length ? (
-                <span>else: {consequenceSummary(ruleSet.else)}</span>
-              ) : null}
-            </div>
-          ))}
-        </div>
-      ) : null}
     </section>
   );
 }
@@ -1671,20 +1667,27 @@ function BasicConditionEditor({
   value,
   canonRefs,
   dataObjects,
+  grantableOptions,
   onChange,
+  compact = false,
 }: {
   label?: string;
   value?: ConditionInput;
   canonRefs: string[];
   dataObjects: ProjectDataObject[];
+  grantableOptions: GrantableEntityOption[];
   onChange: (value: ConditionInput | undefined) => void;
+  /** Renders as a lightweight sub-block instead of a full inspector section — for embedding inside compact cards like the Conditions route list. */
+  compact?: boolean;
 }) {
   const condition = firstSimpleCondition(value);
   const type = conditionInputKind(value);
+  const Wrapper = compact ? "div" : "section";
+  const Heading = compact ? "h3" : "h2";
 
   return (
-    <section className="inspector-section">
-      <h2>{label}</h2>
+    <Wrapper className={compact ? "condition-editor-compact" : "inspector-section"}>
+      <Heading>{label}</Heading>
       <label className="field-label">
         Condition Type
         <select
@@ -1723,6 +1726,12 @@ function BasicConditionEditor({
                 type: "dataObjectExists",
                 objectId: dataObjects[0]?.id ?? "",
               });
+            } else if (nextType === "runtimeItem") {
+              onChange({
+                type: "runtimeItem",
+                itemId: grantableOptions[0]?.id ?? "",
+                operator: "has",
+              });
             } else if (nextType === "visited") {
               onChange({ type: "visited", targetType: "event", targetId: "" });
             } else if (nextType === "all") {
@@ -1740,6 +1749,7 @@ function BasicConditionEditor({
           <option value="canonState">canon runtime state</option>
           <option value="variable">variable check</option>
           <option value="dataObjectExists">data object exists</option>
+          <option value="runtimeItem">has grantable item</option>
           <option value="visited">visited target</option>
           <option value="all">all condition set</option>
           <option value="any">any condition set</option>
@@ -1760,6 +1770,7 @@ function BasicConditionEditor({
             value={firstConditionSetChild(value)}
             canonRefs={canonRefs}
             dataObjects={dataObjects}
+            grantableOptions={grantableOptions}
             onChange={(child) => {
               const nextChild = child ?? defaultCanonCondition(canonRefs);
               if (type === "all") {
@@ -1976,6 +1987,47 @@ function BasicConditionEditor({
         </label>
       ) : null}
 
+      {type === "runtimeItem" ? (
+        <div className="logic-grid">
+          <label className="field-label">
+            Grantable entity
+            <select
+              value={String(condition?.itemId ?? "")}
+              onChange={(event) =>
+                onChange({
+                  type: "runtimeItem",
+                  itemId: event.target.value,
+                  operator: (condition?.operator as "has" | "missing" | undefined) ?? "has",
+                })
+              }
+            >
+              <option value="">missing entity</option>
+              {grantableOptions.map((option) => (
+                <option key={`${option.source}:${option.id}`} value={option.id}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field-label">
+            Operator
+            <select
+              value={String(condition?.operator ?? "has")}
+              onChange={(event) =>
+                onChange({
+                  type: "runtimeItem",
+                  itemId: String(condition?.itemId ?? ""),
+                  operator: event.target.value as "has" | "missing",
+                })
+              }
+            >
+              <option value="has">has</option>
+              <option value="missing">missing</option>
+            </select>
+          </label>
+        </div>
+      ) : null}
+
       {type === "visited" ? (
         <div className="logic-grid">
           <label className="field-label">
@@ -2019,7 +2071,7 @@ function BasicConditionEditor({
           </label>
         </div>
       ) : null}
-    </section>
+    </Wrapper>
   );
 }
 
@@ -2027,11 +2079,13 @@ function TransitionConditionEditor({
   value,
   canonRefs,
   dataObjects,
+  grantableOptions,
   onChange,
 }: {
   value?: ConditionInput;
   canonRefs: string[];
   dataObjects: ProjectDataObject[];
+  grantableOptions: GrantableEntityOption[];
   onChange: (value: ConditionInput | undefined) => void;
 }) {
   if (!value) {
@@ -2057,6 +2111,7 @@ function TransitionConditionEditor({
       value={value}
       canonRefs={canonRefs}
       dataObjects={dataObjects}
+      grantableOptions={grantableOptions}
       onChange={onChange}
     />
   );
@@ -2090,15 +2145,16 @@ function InspectorContentTabs({
 function ConsequenceEditor({
   title = "Consequences",
   value,
-  canonRefs,
-  dataObjects,
+  grantableOptions,
   onChange,
+  compact = false,
 }: {
   title?: string;
   value?: Consequence[];
-  canonRefs: string[];
-  dataObjects: ProjectDataObject[];
+  grantableOptions: GrantableEntityOption[];
   onChange: (value: Consequence[] | undefined) => void;
+  /** Renders as a lightweight sub-block instead of a full inspector section — for embedding inside compact cards like the Conditions route list. */
+  compact?: boolean;
 }) {
   const consequences = value ?? [];
   const update = (index: number, consequence: Consequence) => {
@@ -2108,10 +2164,12 @@ function ConsequenceEditor({
       ),
     );
   };
+  const Wrapper = compact ? "div" : "section";
+  const Heading = compact ? "h3" : "h2";
 
   return (
-    <section className="inspector-section">
-      <h2>{title}</h2>
+    <Wrapper className={compact ? "condition-editor-compact" : "inspector-section"}>
+      <Heading>{title}</Heading>
       <div className="stack-list">
         {consequences.map((consequence, index) => (
           <div className="mini-card" key={`${consequence.type}:${index}`}>
@@ -2121,71 +2179,67 @@ function ConsequenceEditor({
                 value={consequence.type}
                 onChange={(event) => {
                   const nextType = event.target.value;
-                  if (nextType === "unlockCanonEntry") {
+                  if (nextType === "addGrantable") {
                     update(index, {
-                      type: "unlockCanonEntry",
-                      ref: canonRefs[0] ?? "",
+                      type: "addGrantable",
+                      entityId: grantableOptions[0]?.id ?? "",
                     });
-                  } else if (nextType === "unlockDataObject") {
+                  } else if (nextType === "removeGrantable") {
                     update(index, {
-                      type: "unlockDataObject",
-                      objectId: dataObjects[0]?.id ?? "",
+                      type: "removeGrantable",
+                      entityId: grantableOptions[0]?.id ?? "",
                     });
-                  } else if (nextType === "setVariable") {
+                  } else if (nextType === "editGrantable") {
                     update(index, {
-                      type: "setVariable",
-                      name: "flag",
-                      value: true,
+                      type: "editGrantable",
+                      entityId: grantableOptions[0]?.id ?? "",
+                      propertyId: "",
+                      value: "",
                     });
                   } else {
-                    update(index, { type: "engineSignal", name: "signal" });
+                    update(index, { type: "setVariable", name: "flag", value: true });
                   }
                 }}
               >
-                <option value="unlockCanonEntry">unlock canon</option>
-                <option value="unlockDataObject">unlock data</option>
+                <option value="addGrantable">grant item</option>
+                <option value="removeGrantable">remove item</option>
+                <option value="editGrantable">edit item property</option>
                 <option value="setVariable">set variable</option>
-                <option value="engineSignal">engine signal</option>
               </select>
             </label>
-            {consequence.type === "unlockCanonEntry" ? (
+            {consequence.type === "addGrantable" || consequence.type === "removeGrantable" || consequence.type === "editGrantable" ? (
               <label className="field-label">
-                Canon Ref
+                Grantable entity
                 <select
-                  value={String(consequence.ref ?? "")}
-                  onChange={(event) =>
-                    update(index, { ...consequence, ref: event.target.value })
-                  }
+                  value={consequence.entityId}
+                  onChange={(event) => update(index, { ...consequence, entityId: event.target.value })}
                 >
-                  <option value="">missing ref</option>
-                  {canonRefs.map((ref) => (
-                    <option key={ref} value={ref}>
-                      {ref}
+                  <option value="">missing entity</option>
+                  {grantableOptions.map((option) => (
+                    <option key={`${option.source}:${option.id}`} value={option.id}>
+                      {option.label}
                     </option>
                   ))}
                 </select>
               </label>
             ) : null}
-            {consequence.type === "unlockDataObject" ? (
-              <label className="field-label">
-                Data Object
-                <select
-                  value={String(consequence.objectId ?? "")}
-                  onChange={(event) =>
-                    update(index, {
-                      ...consequence,
-                      objectId: event.target.value,
-                    })
-                  }
-                >
-                  <option value="">missing object</option>
-                  {dataObjects.map((dataObject) => (
-                    <option key={dataObject.id} value={dataObject.id}>
-                      {dataObject.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
+            {consequence.type === "editGrantable" ? (
+              <div className="logic-grid">
+                <label className="field-label">
+                  Property
+                  <input
+                    value={consequence.propertyId}
+                    onChange={(event) => update(index, { ...consequence, propertyId: event.target.value })}
+                  />
+                </label>
+                <label className="field-label">
+                  Value
+                  <input
+                    value={String(consequence.value ?? "")}
+                    onChange={(event) => update(index, { ...consequence, value: event.target.value })}
+                  />
+                </label>
+              </div>
             ) : null}
             {consequence.type === "setVariable" ? (
               <div className="logic-grid">
@@ -2215,17 +2269,6 @@ function ConsequenceEditor({
                 </label>
               </div>
             ) : null}
-            {consequence.type === "engineSignal" ? (
-              <label className="field-label">
-                Signal
-                <input
-                  value={String(consequence.name ?? "")}
-                  onChange={(event) =>
-                    update(index, { ...consequence, name: event.target.value })
-                  }
-                />
-              </label>
-            ) : null}
             <button
               type="button"
               className="danger"
@@ -2246,58 +2289,15 @@ function ConsequenceEditor({
           onClick={() =>
             onChange([
               ...consequences,
-              { type: "unlockCanonEntry", ref: canonRefs[0] ?? "" },
+              { type: "addGrantable", entityId: grantableOptions[0]?.id ?? "" },
             ])
           }
         >
           Add Consequence
         </button>
       </div>
-    </section>
+    </Wrapper>
   );
-}
-
-function RuleSetBindingEditor({ project, value, ownerKind, onChange, onOpenRule }: {
-  project: BranchingProject; value?: RuleSetBinding[]; ownerKind: RuleBindingOwnerKind;
-  onChange: (value: RuleSetBinding[] | undefined) => void; onOpenRule: (id: string) => void;
-}) {
-  const bindings = [...(value ?? [])].sort((left, right) => left.order - right.order);
-  const rules = project.ruleLibrary?.rules ?? [];
-  const phases = ruleSetPhasesByOwner[ownerKind];
-  const update = (index: number, changes: Partial<RuleSetBinding>) => onChange(bindings.map((binding, position) => position === index ? { ...binding, ...changes } : binding).map((binding, order) => ({ ...binding, order })));
-  return <section className="inspector-section"><h2>Rulesets</h2><p className="inspector-connection-hint">Shared actions from Logic. They never select a route; Route Gate owns navigation.</p>
-    <div className="stack-list">{bindings.map((binding, index) => <div className="mini-card" key={binding.id}>
-      <label className="field-label">Rule<select value={binding.ruleId} onChange={(event) => update(index, { ruleId: event.target.value })}><option value="">Select rule…</option>{rules.map((rule) => <option value={rule.id} key={rule.id}>{rule.label ?? rule.id}</option>)}</select></label>
-      <label className="field-label">Phase<select value={binding.phase} onChange={(event) => update(index, { phase: event.target.value as RuleSetPhase })}>{phases.map((phase) => <option key={phase} value={phase}>{phase}</option>)}</select></label>
-      <div className="inspector-actions"><button type="button" disabled={index === 0} onClick={() => onChange(bindings.map((item, position) => position === index ? { ...item, order: index - 1 } : position === index - 1 ? { ...item, order: index } : item))}>Move up</button><button type="button" disabled={index === bindings.length - 1} onClick={() => onChange(bindings.map((item, position) => position === index ? { ...item, order: index + 1 } : position === index + 1 ? { ...item, order: index } : item))}>Move down</button><button type="button" onClick={() => onOpenRule(binding.ruleId)}>Open in Logic</button><button type="button" className="danger" onClick={() => onChange(bindings.filter((_, position) => position !== index).map((item, order) => ({ ...item, order })))}>Remove</button></div>
-    </div>)}</div>
-    <div className="inspector-actions"><button type="button" disabled={!rules.length} onClick={() => onChange([...bindings, { id: `rule-binding:${crypto.randomUUID()}`, ruleId: rules[0]?.id ?? "", phase: defaultRuleSetPhase[ownerKind], order: bindings.length }])}>Add shared rule</button></div>
-  </section>;
-}
-
-function LocalRuleSetEditor({ value, canonRefs, dataObjects, onChange }: { value?: RuleSet[]; canonRefs: string[]; dataObjects: ProjectDataObject[]; onChange: (value: RuleSet[] | undefined) => void }) {
-  const rules = value ?? [];
-  return <section className="inspector-section"><h2>Rulesets</h2><p className="inspector-connection-hint">Local if/then/else actions for this item. Route Gate remains responsible for navigation.</p>
-    <div className="stack-list">{rules.map((rule, index) => <div className="mini-card" key={rule.id}>
-      <label className="field-label">Name<input value={rule.label ?? rule.id} onChange={(event) => onChange(rules.map((item, position) => position === index ? { ...item, label: event.target.value } : item))} /></label>
-      <BasicConditionEditor label="If" value={rule.when} canonRefs={canonRefs} dataObjects={dataObjects} onChange={(when) => onChange(rules.map((item, position) => position === index ? { ...item, when: when ?? { all: [] } } : item))} />
-      <ConsequenceEditor title="Then" value={rule.then} canonRefs={canonRefs} dataObjects={dataObjects} onChange={(then) => onChange(rules.map((item, position) => position === index ? { ...item, then: then ?? [] } : item))} />
-      <ConsequenceEditor title="Else" value={rule.else} canonRefs={canonRefs} dataObjects={dataObjects} onChange={(elseConsequences) => onChange(rules.map((item, position) => position === index ? { ...item, else: elseConsequences } : item))} />
-      <button type="button" className="danger" onClick={() => onChange(rules.filter((_, position) => position !== index))}>Remove Rule</button>
-    </div>)}</div>
-    <div className="inspector-actions"><button type="button" onClick={() => onChange([...rules, { id: `rule:${crypto.randomUUID()}`, label: "New local rule", when: { all: [] }, then: [] }])}>Add local rule</button></div>
-  </section>;
-}
-
-function RuleLibraryEditor({ rule, canonRefs, dataObjects, onChange }: { rule?: RuleLibraryRule; canonRefs: string[]; dataObjects: ProjectDataObject[]; onChange: (rule: RuleLibraryRule) => void }) {
-  if (!rule) return null;
-  return <section className="inspector-section"><h2>Rule editor</h2>
-    <label className="field-label">Name<input value={rule.label ?? ""} onChange={(event) => onChange({ ...rule, label: event.target.value })} /></label>
-    <label className="field-label">Tags<input value={(rule.tags ?? []).join(", ")} placeholder="combat, quest" onChange={(event) => onChange({ ...rule, tags: event.target.value.split(",").map((tag) => tag.trim()).filter(Boolean) })} /></label>
-    <BasicConditionEditor label="When" value={rule.when} canonRefs={canonRefs} dataObjects={dataObjects} onChange={(when) => onChange({ ...rule, when: when ?? { all: [] } })} />
-    <ConsequenceEditor title="Then" value={rule.then} canonRefs={canonRefs} dataObjects={dataObjects} onChange={(then) => onChange({ ...rule, then: then ?? [] })} />
-    <ConsequenceEditor title="Else" value={rule.else} canonRefs={canonRefs} dataObjects={dataObjects} onChange={(elseConsequences) => onChange({ ...rule, else: elseConsequences })} />
-  </section>;
 }
 
 function CanonRefsPicker({
@@ -4177,8 +4177,8 @@ function SequenceOutlinePanel({
             conditionCount(sequence.availability)
               ? `${conditionCount(sequence.availability)} conditions`
               : "",
-            sequence.ruleSets?.length
-              ? `${sequence.ruleSets.length} rules`
+            sequence.consequences?.length
+              ? `${sequence.consequences.length} effects`
               : "",
           ]}
         />
@@ -5827,6 +5827,7 @@ function Inspector({
   onDeleteOutcome,
   onUpdateTransition,
   onDeleteTransition,
+  onCreateScriptTransition,
   onCreateCanonSuggestion,
   onUpdateCanonSuggestion,
   onDeleteCanonSuggestion,
@@ -5844,6 +5845,7 @@ function Inspector({
   onUpdateLocalExplorerType,
   onUpdateLocalExplorerProperty,
   onUpdateLogicPropertyOverride,
+  onUpdateLogicTypeOverride,
   onUpdateCharacterCategories,
   onUpdateEdgeLabel,
   onDeleteSelection,
@@ -5915,6 +5917,7 @@ function Inspector({
     updates: Partial<Transition>,
   ) => void;
   onDeleteTransition: (transitionId: string) => void;
+  onCreateScriptTransition?: (eventId: string, from: string, to: string) => void;
   onCreateCanonSuggestion: (
     canonRefId: string,
     source?: { eventId?: string; dataObjectId?: string },
@@ -5947,13 +5950,14 @@ function Inspector({
     updates: Partial<LocalExplorerProperty>,
   ) => void;
   onUpdateLogicPropertyOverride: (propertyId: string, source: "canon" | "local", changes: Partial<LogicPropertyOverride>) => void;
+  onUpdateLogicTypeOverride: (typeId: string, source: "canon" | "local", changes: Partial<LogicTypeOverride>) => void;
   onUpdateCharacterCategories: (categories: string[]) => void;
   onUpdateEdgeLabel: (edgeId: string, label: string) => void;
   onDeleteSelection: (selection: Selection) => void;
   onOpenRule: (id: string) => void;
 }) {
   const [transitionInspectorTab, setTransitionInspectorTab] = useState<
-    "route" | "if" | "effects"
+    "route" | "conditions" | "consequences"
   >("route");
   const [objectInspectorTab, setObjectInspectorTab] = useState("overview");
   const [inspectorLocale, setInspectorLocale] = useState(project.localizationCatalog?.primaryLocale ?? "und");
@@ -6121,15 +6125,14 @@ function Inspector({
     typeof selectedNode.data.details?.routeSourceId === "string"
       ? (() => {
           const sourceId = selectedNode.data.details.routeSourceId as string;
-          const owner = project.events.find((eventNode) =>
-            eventNode.transitions?.some((transition) => transition.from === sourceId),
-          );
-          const routes = (owner?.transitions ?? [])
+          const eventId = typeof selectedNode.data.details?.eventId === "string"
+            ? selectedNode.data.details.eventId
+            : undefined;
+          const routes = project.events
+            .flatMap((eventNode) => eventNode.transitions ?? [])
             .filter((transition) => transition.from === sourceId)
             .sort((left, right) => (left.order ?? 0) - (right.order ?? 0));
-          return owner && routes.length
-            ? { sourceId, owner, routes }
-            : undefined;
+          return { sourceId, eventId, routes };
         })()
       : undefined;
   const selectedTransitionTarget = selectedTransition
@@ -6194,6 +6197,8 @@ function Inspector({
     .map((canonRef) => canonRef.id);
   const eventCategories = project.eventCategories ?? [];
   const dataObjects = project.projectDataObjects ?? [];
+  const grantableOptionsList = grantableEntities(project);
+  const locationOptionsList = locationEntities(project);
   const eventSequence = event ? findSequence(project, event.id) : undefined;
   const eventBranches = eventSequence
     ? branchesForSequence(project, eventSequence.id)
@@ -6257,8 +6262,8 @@ function Inspector({
       };
     if (selectedRouteGateContext)
       return {
-        label: "Route Gate",
-        kind: `${selectedRouteGateContext.routes.length} routes`,
+        label: "Conditions",
+        kind: selectedRouteGateContext.routes.length ? `${selectedRouteGateContext.routes.length} routes` : "No routes yet",
         Icon: GitBranch,
       };
     if (selectedTransition)
@@ -6417,14 +6422,15 @@ function Inspector({
               value={sequence.availability}
               canonRefs={canonRefIds}
               dataObjects={dataObjects}
+              grantableOptions={grantableOptionsList}
               onChange={(availability) =>
                 onUpdateSequence(sequence.id, { availability })
               }
             />
-            <LocalRuleSetEditor value={sequence.ruleSets} canonRefs={canonRefIds} dataObjects={dataObjects} onChange={(ruleSets) => onUpdateSequence(sequence.id, { ruleSets })} />
+            <ConsequenceEditor value={sequence.consequences} grantableOptions={grantableOptionsList} onChange={(consequences) => onUpdateSequence(sequence.id, { consequences })} />
             <LogicSection
               availability={sequence.availability}
-              ruleSets={sequence.ruleSets}
+              consequences={sequence.consequences}
             />
           </>
         ) : null}
@@ -6492,21 +6498,22 @@ function Inspector({
               value={branch.availability}
               canonRefs={canonRefIds}
               dataObjects={dataObjects}
+              grantableOptions={grantableOptionsList}
               onChange={(availability) =>
                 onUpdateBranch(branch.id, { availability })
               }
             />
-            <LocalRuleSetEditor value={branch.ruleSets} canonRefs={canonRefIds} dataObjects={dataObjects} onChange={(ruleSets) => onUpdateBranch(branch.id, { ruleSets })} />
+            <ConsequenceEditor value={branch.consequences} grantableOptions={grantableOptionsList} onChange={(consequences) => onUpdateBranch(branch.id, { consequences })} />
             <LogicSection
               availability={branch.availability}
-              ruleSets={branch.ruleSets}
+              consequences={branch.consequences}
             />
           </>
         ) : null}
 
         {event ? (
           <>
-            <InspectorContentTabs value={objectInspectorTab} onChange={setObjectInspectorTab} tabs={[{ id: "overview", label: "Overview" }, { id: "path", label: "Path" }, { id: "connections", label: "Connections" }, { id: "logic", label: "Logic" }, { id: "choices", label: "Choices" }]} />
+            <InspectorContentTabs value={objectInspectorTab} onChange={setObjectInspectorTab} tabs={[{ id: "overview", label: "Overview" }, { id: "path", label: "Path" }, { id: "connections", label: "Connections" }, { id: "conditions", label: "Conditions" }, { id: "consequences", label: "Consequences" }, { id: "choices", label: "Choices" }]} />
             {objectInspectorTab === "overview" ? <>
             <section className="inspector-section">
               <div className="event-inspector-overview-preview">
@@ -6665,45 +6672,24 @@ function Inspector({
               }
             />
             </> : null}
-            {objectInspectorTab === "logic" ? <>
-            <section className="inspector-section">
-              <h2>Unlocks</h2>
-              <div className="stack-list">
-                {(event.unlocks ?? []).map((unlock, index) => (
-                  <div className="mini-card" key={`${unlock.type}:${index}`}>
-                    <strong>{unlock.type}</strong>
-                    {"ref" in unlock && typeof unlock.ref === "string" ? (
-                      <span>{unlock.ref}</span>
-                    ) : null}
-                    {"sourceFunction" in unlock &&
-                    typeof unlock.sourceFunction === "string" ? (
-                      <span>{unlock.sourceFunction}</span>
-                    ) : null}
-                  </div>
-                ))}
-                {(event.unlocks ?? []).length === 0 ? (
-                  <span className="empty-line">No unlock consequences.</span>
-                ) : null}
-              </div>
-            </section>
-
+            {objectInspectorTab === "conditions" ? (
             <BasicConditionEditor
               value={event.availability}
               canonRefs={canonRefIds}
               dataObjects={dataObjects}
+              grantableOptions={grantableOptionsList}
               onChange={(availability) =>
                 onUpdateEvent(event.id, { availability })
               }
             />
+            ) : null}
+            {objectInspectorTab === "consequences" ? (
             <ConsequenceEditor
-              title="Unlocks / Runtime Actions"
-              value={event.unlocks}
-              canonRefs={canonRefIds}
-              dataObjects={dataObjects}
-              onChange={(unlocks) => onUpdateEvent(event.id, { unlocks })}
+              value={event.consequences}
+              grantableOptions={grantableOptionsList}
+              onChange={(consequences) => onUpdateEvent(event.id, { consequences })}
             />
-            <LocalRuleSetEditor value={event.ruleSets} canonRefs={canonRefIds} dataObjects={dataObjects} onChange={(ruleSets) => onUpdateEvent(event.id, { ruleSets })} />
-            </> : null}
+            ) : null}
             {objectInspectorTab === "choices" ? <>
             <section className="inspector-section">
               <h2>Decisions</h2>
@@ -6746,8 +6732,7 @@ function Inspector({
             </section>
             <LogicSection
               availability={event.availability}
-              consequences={event.unlocks}
-              ruleSets={event.ruleSets}
+              consequences={event.consequences}
             />
             <section className="inspector-section">
               <div className="inspector-actions">
@@ -6768,7 +6753,7 @@ function Inspector({
 
         {selectedDecisionContext?.decision ? (
           <>
-            <InspectorContentTabs value={objectInspectorTab} onChange={setObjectInspectorTab} tabs={[{ id: "overview", label: "Overview" }, { id: "choices", label: "Choices" }, { id: "logic", label: "Logic" }]} />
+            <InspectorContentTabs value={objectInspectorTab} onChange={setObjectInspectorTab} tabs={[{ id: "overview", label: "Overview" }, { id: "choices", label: "Choices" }, { id: "conditions", label: "Conditions" }]} />
             <section className="inspector-section">
               <h2>Decision</h2>
               {objectInspectorTab === "overview" ? <>
@@ -6823,6 +6808,49 @@ function Inspector({
                   <option value="iconOnly">ICON</option>
                 </select>
               </label>
+              <label className="field-label">
+                When unavailable
+                <select
+                  value={selectedDecisionContext.decision!.unavailableBehavior ?? "locked"}
+                  onChange={(inputEvent) =>
+                    onUpdateDecision(
+                      selectedDecisionContext.eventId,
+                      selectedDecisionContext.decision!.id,
+                      { unavailableBehavior: inputEvent.target.value as "locked" | "hidden" },
+                    )
+                  }
+                >
+                  <option value="locked">Show locked</option>
+                  <option value="hidden">Hide choice</option>
+                </select>
+              </label>
+              {selectedDecisionContext.decision!.unavailableBehavior !== "hidden" ? (
+                <label className="field-label">
+                  Public lock text
+                  <input
+                    value={selectedDecisionContext.decision!.lockText?.content ?? ""}
+                    placeholder="Optional — avoids revealing the real requirement"
+                    onChange={(inputEvent) =>
+                      onUpdateDecision(
+                        selectedDecisionContext.eventId,
+                        selectedDecisionContext.decision!.id,
+                        {
+                          lockText: inputEvent.target.value
+                            ? { format: "plain", content: inputEvent.target.value }
+                            : undefined,
+                        },
+                      )
+                    }
+                  />
+                </label>
+              ) : null}
+              <p className="inspector-connection-hint">
+                Preview: {selectedDecisionContext.decision!.availability
+                  ? selectedDecisionContext.decision!.unavailableBehavior === "hidden"
+                    ? "conditionally hidden"
+                    : "conditionally locked"
+                  : "available"}
+              </p>
               </> : null}
               {objectInspectorTab === "choices" ? <>
               <p className="inspector-connection-hint">
@@ -6884,24 +6912,17 @@ function Inspector({
               </div>
               </> : null}
             </section>
-            {objectInspectorTab === "logic" ? <>
+            {objectInspectorTab === "conditions" ? <>
             <BasicConditionEditor
               value={selectedDecisionContext.decision!.availability}
               canonRefs={canonRefIds}
               dataObjects={dataObjects}
+              grantableOptions={grantableOptionsList}
               onChange={(availability) =>
                 onUpdateDecision(
                   selectedDecisionContext.eventId,
                   selectedDecisionContext.decision!.id,
                   { availability },
-                )
-              }
-            />
-            <LocalRuleSetEditor value={selectedDecisionContext.decision!.ruleSets} canonRefs={canonRefIds} dataObjects={dataObjects} onChange={(ruleSets) =>
-                onUpdateDecision(
-                  selectedDecisionContext.eventId,
-                  selectedDecisionContext.decision!.id,
-                  { ruleSets },
                 )
               }
             />
@@ -6911,7 +6932,7 @@ function Inspector({
 
         {selectedDialogueBeatContext ? (
           <>
-            <InspectorContentTabs value={objectInspectorTab} onChange={setObjectInspectorTab} tabs={[{ id: "overview", label: "Content" }, { id: "logic", label: "Logic" }]} />
+            <InspectorContentTabs value={objectInspectorTab} onChange={setObjectInspectorTab} tabs={[{ id: "overview", label: "Content" }, { id: "conditions", label: "Conditions" }, { id: "consequences", label: "Consequences" }]} />
             {objectInspectorTab === "overview" ? (
             <section className="inspector-section">
               <h2>{selectedDialogueBeatContext.beat.kind === "speech" ? "Speech Beat" : "Direction Beat"}</h2>
@@ -7070,22 +7091,51 @@ function Inspector({
               </button>
             </section>
             ) : null}
-            {objectInspectorTab === "logic" ? <>
+            {objectInspectorTab === "conditions" ? <>
+            <section className="inspector-section">
+              <h2>Location override</h2>
+              <label className="field-label">
+                Location (falls back to event location when unset)
+                <select
+                  value={selectedDialogueBeatContext.beat.locationRef ?? ""}
+                  onChange={(input) => {
+                    const locationRef = input.target.value || undefined;
+                    if (selectedDialogueBeatContext.dialogueId) {
+                      onUpdateDialogueBeat(selectedDialogueBeatContext.eventId, selectedDialogueBeatContext.dialogueId, selectedDialogueBeatContext.beat.id, { locationRef });
+                    } else {
+                      onUpdateEventDialogueBeat(selectedDialogueBeatContext.eventId, selectedDialogueBeatContext.beat.id, { locationRef });
+                    }
+                  }}
+                >
+                  <option value="">Use event location</option>
+                  {locationOptionsList.map((option) => (
+                    <option key={`${option.source}:${option.id}`} value={option.id}>
+                      {option.label} · {option.typeId}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </section>
             <BasicConditionEditor
               label="Display condition"
               value={selectedDialogueBeatContext.beat.displayCondition}
               canonRefs={canonRefIds}
               dataObjects={dataObjects}
+              grantableOptions={grantableOptionsList}
               onChange={(displayCondition) => selectedDialogueBeatContext.dialogueId
                 ? onUpdateDialogueBeat(selectedDialogueBeatContext.eventId, selectedDialogueBeatContext.dialogueId, selectedDialogueBeatContext.beat.id, { displayCondition })
                 : onUpdateEventDialogueBeat(selectedDialogueBeatContext.eventId, selectedDialogueBeatContext.beat.id, { displayCondition })}
             />
-            <LocalRuleSetEditor value={selectedDialogueBeatContext.beat.ruleSets} canonRefs={canonRefIds} dataObjects={dataObjects} onChange={(ruleSets) =>
-                selectedDialogueBeatContext.dialogueId
-                  ? onUpdateDialogueBeat(selectedDialogueBeatContext.eventId, selectedDialogueBeatContext.dialogueId, selectedDialogueBeatContext.beat.id, { ruleSets })
-                  : onUpdateEventDialogueBeat(selectedDialogueBeatContext.eventId, selectedDialogueBeatContext.beat.id, { ruleSets })
-              } />
             </> : null}
+            {objectInspectorTab === "consequences" ? (
+            <ConsequenceEditor
+              value={selectedDialogueBeatContext.beat.consequences}
+              grantableOptions={grantableOptionsList}
+              onChange={(consequences) => selectedDialogueBeatContext.dialogueId
+                ? onUpdateDialogueBeat(selectedDialogueBeatContext.eventId, selectedDialogueBeatContext.dialogueId, selectedDialogueBeatContext.beat.id, { consequences })
+                : onUpdateEventDialogueBeat(selectedDialogueBeatContext.eventId, selectedDialogueBeatContext.beat.id, { consequences })}
+            />
+            ) : null}
           </>
         ) : null}
 
@@ -7141,7 +7191,7 @@ function Inspector({
 
         {selectedDialogueContext?.dialogue ? (
           <>
-            <InspectorContentTabs value={objectInspectorTab} onChange={setObjectInspectorTab} tabs={[{ id: "overview", label: "Overview" }, { id: "logic", label: "Logic" }]} />
+            <InspectorContentTabs value={objectInspectorTab} onChange={setObjectInspectorTab} tabs={[{ id: "overview", label: "Overview" }, { id: "conditions", label: "Conditions" }, { id: "consequences", label: "Consequences" }]} />
             {objectInspectorTab === "overview" ? (
             <section className="inspector-section">
               <h2>Dialogue</h2>
@@ -7245,11 +7295,12 @@ function Inspector({
               </button>
             </section>
             ) : null}
-            {objectInspectorTab === "logic" ? <>
+            {objectInspectorTab === "conditions" ? (
             <BasicConditionEditor
               value={selectedDialogueContext.dialogue.availability}
               canonRefs={canonRefIds}
               dataObjects={dataObjects}
+              grantableOptions={grantableOptionsList}
               onChange={(availability) =>
                 onUpdateDialogue(
                   selectedDialogueContext.eventId,
@@ -7258,14 +7309,16 @@ function Inspector({
                 )
               }
             />
-            <LocalRuleSetEditor value={selectedDialogueContext.dialogue.ruleSets} canonRefs={canonRefIds} dataObjects={dataObjects} onChange={(ruleSets) =>
+            ) : null}
+            {objectInspectorTab === "consequences" ? (
+            <ConsequenceEditor value={selectedDialogueContext.dialogue.consequences} grantableOptions={grantableOptionsList} onChange={(consequences) =>
                 onUpdateDialogue(
                   selectedDialogueContext.eventId,
                   selectedDialogueContext.dialogue!.id,
-                  { ruleSets },
+                  { consequences },
                 )
               } />
-            </> : null}
+            ) : null}
           </>
         ) : null}
 
@@ -7297,7 +7350,7 @@ function Inspector({
 
         {selectedOutcomeContext?.outcome ? (
           <>
-            <InspectorContentTabs value={objectInspectorTab} onChange={setObjectInspectorTab} tabs={[{ id: "overview", label: "Overview" }, { id: "logic", label: "Logic" }, { id: "effects", label: "Effects" }]} />
+            <InspectorContentTabs value={objectInspectorTab} onChange={setObjectInspectorTab} tabs={[{ id: "overview", label: "Overview" }, { id: "conditions", label: "Conditions" }, { id: "consequences", label: "Consequences" }]} />
             {objectInspectorTab === "overview" ? (
             <section className="inspector-section">
               <h2>Outcome</h2>
@@ -7424,12 +7477,13 @@ function Inspector({
               </button>
             </section>
             ) : null}
-            {objectInspectorTab === "logic" ? <>
+            {objectInspectorTab === "conditions" ? <>
             <BasicConditionEditor
               label="Choice conditions"
               value={selectedOutcomeContext.outcome!.availability}
               canonRefs={canonRefIds}
               dataObjects={dataObjects}
+              grantableOptions={grantableOptionsList}
               onChange={(availability) =>
                 onUpdateOutcome(
                   selectedOutcomeContext.eventId,
@@ -7439,20 +7493,11 @@ function Inspector({
                 )
               }
             />
-            <LocalRuleSetEditor value={selectedOutcomeContext.outcome!.ruleSets} canonRefs={canonRefIds} dataObjects={dataObjects} onChange={(ruleSets) =>
-              onUpdateOutcome(
-                selectedOutcomeContext.eventId,
-                selectedOutcomeContext.decisionId,
-                selectedOutcomeContext.outcome!.id,
-                { ruleSets },
-              )
-            } />
             </> : null}
-            {objectInspectorTab === "effects" ? <>
+            {objectInspectorTab === "consequences" ? <>
             <ConsequenceEditor
               value={selectedOutcomeContext.outcome!.consequences}
-              canonRefs={canonRefIds}
-              dataObjects={dataObjects}
+              grantableOptions={grantableOptionsList}
               onChange={(consequences) =>
                 onUpdateOutcome(
                   selectedOutcomeContext.eventId,
@@ -7497,51 +7542,29 @@ function Inspector({
 
         {selectedRouteGateContext ? (
           <section className="inspector-section route-gate-inspector">
-            <h2>Route rules</h2>
+            <h2>Conditions</h2>
             <p className="inspector-connection-hint">
-              Configure the ordered routes leaving this source. Draw a new edge from the Gate to add another route.
+              Each route below is checked in order — the first whose condition passes is taken, and its consequences fire. Draw a new edge from the Gate to add another route.
             </p>
-            <div className="stack-list">
-              {selectedRouteGateContext.routes.map((route, index) => (
-                <div className="mini-card route-gate-route" key={route.id}>
-                  <div className="logic-grid">
-                    <label className="field-label">
-                      Route
-                      <select
-                        value={route.mode ?? "conditional"}
-                        onChange={(event) =>
-                          onUpdateTransition(route.id, {
-                            mode: event.target.value as "conditional" | "fallback",
-                          })
-                        }
-                      >
-                        <option value="conditional">If / else-if</option>
-                        <option value="fallback">Else fallback</option>
-                      </select>
-                    </label>
-                    <label className="field-label">
-                      Order
-                      <input
-                        type="number"
-                        min={1}
-                        value={(route.order ?? index) + 1}
-                        disabled={route.mode === "fallback"}
-                        onChange={(event) =>
-                          onUpdateTransition(route.id, {
-                            order: Math.max(0, Number(event.target.value) - 1),
-                          })
-                        }
-                      />
-                    </label>
-                  </div>
+            {!selectedRouteGateContext.routes.length ? (
+              <div className="route-condition-card fallback">
+                <p className="inspector-connection-hint">
+                  This Conditions node has no routes yet. Pick a destination to create the first one, or draw a new edge from it on the canvas.
+                </p>
+                {selectedRouteGateContext.eventId ? (
                   <label className="field-label">
-                    Destination
+                    Add destination
                     <select
-                      value={route.to}
-                      onChange={(event) =>
-                        onUpdateTransition(route.id, { to: event.target.value })
-                      }
+                      value=""
+                      onChange={(event) => {
+                        const targetId = event.target.value;
+                        const eventId = selectedRouteGateContext.eventId;
+                        if (targetId && eventId) {
+                          onCreateScriptTransition?.(eventId, selectedRouteGateContext.sourceId, targetId);
+                        }
+                      }}
                     >
+                      <option value="">Select a destination…</option>
                       {nodes
                         .filter(
                           (node) =>
@@ -7555,39 +7578,115 @@ function Inspector({
                         ))}
                     </select>
                   </label>
-                  {route.mode !== "fallback" ? (
-                    <BasicConditionEditor
-                      value={route.conditions}
-                      canonRefs={canonRefIds}
-                      dataObjects={dataObjects}
-                      onChange={(conditions) =>
-                        onUpdateTransition(route.id, { conditions })
+                ) : null}
+              </div>
+            ) : null}
+            <div className="route-condition-list">
+              {selectedRouteGateContext.routes.map((route, index) => {
+                const isFallback = route.mode === "fallback";
+                const conditionSummary = conditionLabels(route.conditions).join(", ");
+                const consequenceSummary = (route.consequences ?? []).map(consequenceLabel).join(", ");
+                return (
+                  <div className={`route-condition-card${isFallback ? " fallback" : ""}`} key={route.id}>
+                    <div className="route-condition-header">
+                      <span className="route-condition-badge">{isFallback ? "else" : index + 1}</span>
+                      <div className="route-condition-header-fields">
+                        <label className="field-label">
+                          Mode
+                          <select
+                            value={route.mode ?? "conditional"}
+                            onChange={(event) =>
+                              onUpdateTransition(route.id, {
+                                mode: event.target.value as "conditional" | "fallback",
+                              })
+                            }
+                          >
+                            <option value="conditional">If / else-if</option>
+                            <option value="fallback">Else fallback</option>
+                          </select>
+                        </label>
+                        <label className="field-label">
+                          Destination
+                          <select
+                            value={route.to}
+                            onChange={(event) =>
+                              onUpdateTransition(route.id, { to: event.target.value })
+                            }
+                          >
+                            {nodes
+                              .filter(
+                                (node) =>
+                                  node.id !== selectedRouteGateContext.sourceId &&
+                                  node.data.kind !== "routeGate",
+                              )
+                              .map((node) => (
+                                <option key={node.id} value={node.id}>
+                                  {node.data.title}
+                                </option>
+                              ))}
+                          </select>
+                        </label>
+                        {!isFallback ? (
+                          <label className="field-label">
+                            Order
+                            <input
+                              type="number"
+                              min={1}
+                              value={(route.order ?? index) + 1}
+                              onChange={(event) =>
+                                onUpdateTransition(route.id, {
+                                  order: Math.max(0, Number(event.target.value) - 1),
+                                })
+                              }
+                            />
+                          </label>
+                        ) : null}
+                      </div>
+                      <button
+                        type="button"
+                        className="icon-only danger"
+                        title="Delete route"
+                        aria-label="Delete route"
+                        onClick={() => onDeleteTransition(route.id)}
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                    {!isFallback && (conditionSummary || consequenceSummary) ? (
+                      <p className="route-condition-summary">
+                        {conditionSummary ? `If ${conditionSummary}` : "Always"}
+                        {consequenceSummary ? ` → ${consequenceSummary}` : ""}
+                      </p>
+                    ) : null}
+                    {!isFallback ? (
+                      <BasicConditionEditor
+                        label="Condition"
+                        value={route.conditions}
+                        canonRefs={canonRefIds}
+                        dataObjects={dataObjects}
+                        grantableOptions={grantableOptionsList}
+                        compact
+                        onChange={(conditions) =>
+                          onUpdateTransition(route.id, { conditions })
+                        }
+                      />
+                    ) : (
+                      <p className="inspector-connection-hint">
+                        This route runs when none of the previous conditions match.
+                      </p>
+                    )}
+                    <ConsequenceEditor
+                      title="Consequences"
+                      value={route.consequences}
+                      grantableOptions={grantableOptionsList}
+                      compact
+                      onChange={(consequences) =>
+                        onUpdateTransition(route.id, { consequences })
                       }
                     />
-                  ) : (
-                    <p className="inspector-connection-hint">
-                      This route runs when none of the previous conditions match.
-                    </p>
-                  )}
-                  <ConsequenceEditor
-                    value={route.consequences}
-                    canonRefs={canonRefIds}
-                    dataObjects={dataObjects}
-                    onChange={(consequences) =>
-                      onUpdateTransition(route.id, { consequences })
-                    }
-                  />
-                  <div className="inspector-actions">
-                    <button
-                      type="button"
-                      className="danger"
-                      onClick={() => onDeleteTransition(route.id)}
-                    >
-                      Delete route
-                    </button>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </section>
         ) : null}
@@ -7597,8 +7696,8 @@ function Inspector({
             {selectedTransition ? (
               <nav className="inspector-subtabs" aria-label="Transition inspector sections">
                 <button type="button" className={transitionInspectorTab === "route" ? "active" : ""} onClick={() => setTransitionInspectorTab("route")}>Route</button>
-                <button type="button" className={transitionInspectorTab === "if" ? "active" : ""} onClick={() => setTransitionInspectorTab("if")}>If</button>
-                <button type="button" className={transitionInspectorTab === "effects" ? "active" : ""} onClick={() => setTransitionInspectorTab("effects")}>Effects</button>
+                <button type="button" className={transitionInspectorTab === "conditions" ? "active" : ""} onClick={() => setTransitionInspectorTab("conditions")}>Conditions</button>
+                <button type="button" className={transitionInspectorTab === "consequences" ? "active" : ""} onClick={() => setTransitionInspectorTab("consequences")}>Consequences</button>
               </nav>
             ) : null}
             {!selectedTransition || transitionInspectorTab === "route" ? (
@@ -7705,13 +7804,14 @@ function Inspector({
               ) : null}
             </section>
             ) : null}
-            {selectedTransition && transitionInspectorTab === "if" ? (
+            {selectedTransition && transitionInspectorTab === "conditions" ? (
               <>
                 {selectedTransition.mode !== "fallback" ? (
                   <TransitionConditionEditor
                     value={selectedTransition.conditions}
                     canonRefs={canonRefIds}
                     dataObjects={dataObjects}
+                    grantableOptions={grantableOptionsList}
                     onChange={(conditions) =>
                       onUpdateTransition(selectedTransition.id, { conditions })
                     }
@@ -7726,11 +7826,10 @@ function Inspector({
                 )}
               </>
             ) : null}
-            {selectedTransition && transitionInspectorTab === "effects" ? (
+            {selectedTransition && transitionInspectorTab === "consequences" ? (
               <ConsequenceEditor
                 value={selectedTransition.consequences}
-                canonRefs={canonRefIds}
-                dataObjects={dataObjects}
+                grantableOptions={grantableOptionsList}
                 onChange={(consequences) =>
                   onUpdateTransition(selectedTransition.id, { consequences })
                 }
@@ -7942,6 +8041,51 @@ function Inspector({
                 }
               />
             </label>
+            {isLocationType(project, "local", selectedExplorerEntity.type) ? (
+              <div className="logic-property-options">
+                <div className="logic-property-editor-subheading"><strong>Image gallery</strong><span>{selectedExplorerEntity.imageGallery?.length ?? 0}</span></div>
+                <div className="logic-property-options">
+                  {(selectedExplorerEntity.imageGallery ?? []).map((assetId) => {
+                    const asset = project.assets?.find((candidate) => candidate.id === assetId);
+                    return (
+                      <div className="logic-property-option" key={assetId}>
+                        <span>{asset?.name ?? assetId}</span>
+                        <button
+                          type="button"
+                          className="icon-only"
+                          aria-label={`Remove ${asset?.name ?? assetId}`}
+                          onClick={() =>
+                            onUpdateLocalExplorerEntity(selectedExplorerEntity.id, {
+                              imageGallery: (selectedExplorerEntity.imageGallery ?? []).filter((id) => id !== assetId),
+                            })
+                          }
+                        >
+                          <X size={13} />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+                <select
+                  value=""
+                  onChange={(event) => {
+                    const assetId = event.target.value;
+                    if (!assetId) return;
+                    const currentGallery = selectedExplorerEntity.imageGallery ?? [];
+                    if (!currentGallery.includes(assetId)) {
+                      onUpdateLocalExplorerEntity(selectedExplorerEntity.id, { imageGallery: [...currentGallery, assetId] });
+                    }
+                  }}
+                >
+                  <option value="">Attach an existing image…</option>
+                  {(project.assets ?? [])
+                    .filter((asset) => asset.kind === "image" && !(selectedExplorerEntity.imageGallery ?? []).includes(asset.id))
+                    .map((asset) => (
+                      <option key={asset.id} value={asset.id}>{asset.name}</option>
+                    ))}
+                </select>
+              </div>
+            ) : null}
             {(project.localExplorerProperties ?? [])
               .filter(
                 (property) =>
@@ -7957,22 +8101,103 @@ function Inspector({
                       [property.id]: nextValue,
                     },
                   });
+                if (property.valueType === "boolean") {
+                  return (
+                    <label className="field-label" key={property.id}>
+                      {property.label}
+                      <input type="checkbox" checked={value === true} onChange={(event) => setProperty(event.target.checked)} />
+                    </label>
+                  );
+                }
+                if (property.valueType === "select") {
+                  return (
+                    <label className="field-label" key={property.id}>
+                      {property.label}
+                      <select value={typeof value === "string" ? value : ""} onChange={(event) => setProperty(event.target.value || undefined)}>
+                        <option value="">Not set</option>
+                        {(property.options ?? []).map((option) => (
+                          <option key={option.value} value={option.value}>{option.label}</option>
+                        ))}
+                      </select>
+                    </label>
+                  );
+                }
+                if (property.valueType === "multiselect") {
+                  const selectedValues = Array.isArray(value) ? value.map(String) : [];
+                  return (
+                    <div className="field-label" key={property.id}>
+                      {property.label}
+                      <div className="logic-property-options">
+                        {(property.options ?? []).map((option) => (
+                          <label key={option.value} className="logic-property-checkbox">
+                            <input
+                              type="checkbox"
+                              checked={selectedValues.includes(option.value)}
+                              onChange={(event) =>
+                                setProperty(
+                                  event.target.checked
+                                    ? [...selectedValues, option.value]
+                                    : selectedValues.filter((item) => item !== option.value),
+                                )
+                              }
+                            />
+                            {option.label}
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                }
+                if (property.valueType === "entity-ref") {
+                  const refOptions = entityRefOptions(project, property.targetTypes);
+                  return (
+                    <label className="field-label" key={property.id}>
+                      {property.label}
+                      <select value={typeof value === "string" ? value : ""} onChange={(event) => setProperty(event.target.value || undefined)}>
+                        <option value="">Not set</option>
+                        {refOptions.map((option) => (
+                          <option key={`${option.source}:${option.id}`} value={option.id}>{option.label}</option>
+                        ))}
+                      </select>
+                    </label>
+                  );
+                }
+                if (property.valueType === "entity-ref-list") {
+                  const refOptions = entityRefOptions(project, property.targetTypes);
+                  const selectedIds = Array.isArray(value) ? value.map(String) : [];
+                  return (
+                    <div className="field-label" key={property.id}>
+                      {property.label}
+                      <div className="logic-property-options">
+                        {selectedIds.map((id) => {
+                          const option = refOptions.find((candidate) => candidate.id === id);
+                          return (
+                            <div className="logic-property-option" key={id}>
+                              <span>{option?.label ?? id}</span>
+                              <button type="button" className="icon-only" aria-label={`Remove ${option?.label ?? id}`} onClick={() => setProperty(selectedIds.filter((item) => item !== id))}>
+                                <X size={13} />
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <select value="" onChange={(event) => { const id = event.target.value; if (id && !selectedIds.includes(id)) setProperty([...selectedIds, id]); }}>
+                        <option value="">Add entity…</option>
+                        {refOptions.filter((option) => !selectedIds.includes(option.id)).map((option) => (
+                          <option key={`${option.source}:${option.id}`} value={option.id}>{option.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                  );
+                }
                 return (
                   <label className="field-label" key={property.id}>
                     {property.label}
-                    {property.valueType === "boolean" ? (
-                      <input
-                        type="checkbox"
-                        checked={value === true}
-                        onChange={(event) => setProperty(event.target.checked)}
-                      />
-                    ) : (
-                      <input
-                        value={typeof value === "string" || typeof value === "number" ? String(value) : ""}
-                        onChange={(event) => setProperty(event.target.value)}
-                        placeholder={property.description}
-                      />
-                    )}
+                    <input
+                      value={typeof value === "string" || typeof value === "number" ? String(value) : ""}
+                      onChange={(event) => setProperty(event.target.value)}
+                      placeholder={property.description}
+                    />
                   </label>
                 );
               })}
@@ -8082,6 +8307,45 @@ function Inspector({
                 <div><dt>Description</dt><dd>{selectedExplorerType.description ?? "not specified"}</dd></div>
               </dl>
             )}
+            <div className="logic-property-editor-subheading"><strong>PathBranching capabilities</strong><span>Configure behavior for entities of this type</span></div>
+            {(() => {
+              const typeSource = selectedExplorerSchemaSource ?? "local";
+              const typeCapabilityValue = typeCapability(project, typeSource, selectedExplorerType.id);
+              return (
+                <div className="logic-property-capabilities">
+                  <button
+                    type="button"
+                    className={`logic-capability-card${typeCapabilityValue?.grantable ? " active" : ""}`}
+                    onClick={() => onUpdateLogicTypeOverride(selectedExplorerType.id, typeSource, { grantable: !typeCapabilityValue?.grantable })}
+                    aria-pressed={typeCapabilityValue?.grantable ?? false}
+                  >
+                    <div className="logic-capability-icon"><Package size={16} /></div>
+                    <div className="logic-capability-content">
+                      <strong>Grantable</strong>
+                      <span>Entities of this type can be granted/removed as a consequence and checked as a condition</span>
+                    </div>
+                    <div className="logic-capability-toggle">
+                      {typeCapabilityValue?.grantable ? <CheckCircle2 size={18} /> : <Circle size={18} />}
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    className={`logic-capability-card${typeCapabilityValue?.location ? " active" : ""}`}
+                    onClick={() => onUpdateLogicTypeOverride(selectedExplorerType.id, typeSource, { location: !typeCapabilityValue?.location })}
+                    aria-pressed={typeCapabilityValue?.location ?? false}
+                  >
+                    <div className="logic-capability-icon"><MapPin size={16} /></div>
+                    <div className="logic-capability-content">
+                      <strong>Location</strong>
+                      <span>Entities of this type can be selected as an event or speech beat location</span>
+                    </div>
+                    <div className="logic-capability-toggle">
+                      {typeCapabilityValue?.location ? <CheckCircle2 size={18} /> : <Circle size={18} />}
+                    </div>
+                  </button>
+                </div>
+              );
+            })()}
           </section>
         ) : null}
 
@@ -8102,7 +8366,43 @@ function Inspector({
                 const override = propertyCapability(project, source, selectedExplorerProperty.id);
                 const entityPresentable = propertyIsEntityPresentable(project, source, selectedExplorerProperty.id);
                 const dialogueTrigger = propertySupportsDialogueTrigger(project, source, selectedExplorerProperty.id);
+                const rawTypeId = selectedExplorerProperty.id.startsWith("type:") ? selectedExplorerProperty.id : undefined;
+                const typeOverride = rawTypeId ? typeCapability(project, source, rawTypeId) : undefined;
                 return <>
+                  {rawTypeId ? (
+                    <>
+                      <button
+                        type="button"
+                        className={`logic-capability-card${typeOverride?.grantable ? " active" : ""}`}
+                        onClick={() => onUpdateLogicPropertyOverride(rawTypeId, source, { grantable: !typeOverride?.grantable })}
+                        aria-pressed={typeOverride?.grantable ?? false}
+                      >
+                        <div className="logic-capability-icon"><Package size={16} /></div>
+                        <div className="logic-capability-content">
+                          <strong>Grantable</strong>
+                          <span>Entities of this type can be granted/removed as a consequence and checked as a condition</span>
+                        </div>
+                        <div className="logic-capability-toggle">
+                          {typeOverride?.grantable ? <CheckCircle2 size={18} /> : <Circle size={18} />}
+                        </div>
+                      </button>
+                      <button
+                        type="button"
+                        className={`logic-capability-card${typeOverride?.location ? " active" : ""}`}
+                        onClick={() => onUpdateLogicPropertyOverride(rawTypeId, source, { location: !typeOverride?.location })}
+                        aria-pressed={typeOverride?.location ?? false}
+                      >
+                        <div className="logic-capability-icon"><MapPin size={16} /></div>
+                        <div className="logic-capability-content">
+                          <strong>Location</strong>
+                          <span>Entities of this type can be selected as an event or speech beat location</span>
+                        </div>
+                        <div className="logic-capability-toggle">
+                          {typeOverride?.location ? <CheckCircle2 size={18} /> : <Circle size={18} />}
+                        </div>
+                      </button>
+                    </>
+                  ) : null}
                   <button
                     type="button"
                     className={`logic-capability-card${(override?.conditionReadable ?? true) ? " active" : ""}`}
@@ -8132,22 +8432,6 @@ function Inspector({
                     </div>
                     <div className="logic-capability-toggle">
                       {(override?.actionWritable ?? source === "local") ? <CheckCircle2 size={18} /> : <Circle size={18} />}
-                    </div>
-                  </button>
-
-                  <button
-                    type="button"
-                    className={`logic-capability-card${(override?.grantable ?? false) ? " active" : ""}`}
-                    onClick={() => onUpdateLogicPropertyOverride(selectedExplorerProperty.id, source, { grantable: !(override?.grantable ?? false) })}
-                    aria-pressed={override?.grantable ?? false}
-                  >
-                    <div className="logic-capability-icon"><Package size={16} /></div>
-                    <div className="logic-capability-content">
-                      <strong>Grantable</strong>
-                      <span>Can be granted or unlocked during gameplay</span>
-                    </div>
-                    <div className="logic-capability-toggle">
-                      {(override?.grantable ?? false) ? <CheckCircle2 size={18} /> : <Circle size={18} />}
                     </div>
                   </button>
 
@@ -8211,7 +8495,7 @@ function Inspector({
                         value={selectedExplorerProperty.valueType}
                         onChange={(event) =>
                           onUpdateLocalExplorerProperty(selectedExplorerProperty.id, {
-                            valueType: event.target.value,
+                            valueType: event.target.value as LocalExplorerProperty["valueType"],
                           })
                         }
                       >
@@ -8533,14 +8817,15 @@ function Inspector({
               value={selectedDataObject.availability}
               canonRefs={canonRefIds}
               dataObjects={dataObjects}
+              grantableOptions={grantableOptionsList}
               onChange={(availability) =>
                 onUpdateDataObject(selectedDataObject.id, { availability })
               }
             />
-            <LocalRuleSetEditor value={selectedDataObject.ruleSets} canonRefs={canonRefIds} dataObjects={dataObjects} onChange={(ruleSets) => onUpdateDataObject(selectedDataObject.id, { ruleSets })} />
+            <ConsequenceEditor value={selectedDataObject.consequences} grantableOptions={grantableOptionsList} onChange={(consequences) => onUpdateDataObject(selectedDataObject.id, { consequences })} />
             <LogicSection
               availability={selectedDataObject.availability}
-              ruleSets={selectedDataObject.ruleSets}
+              consequences={selectedDataObject.consequences}
             />
           </>
         ) : null}
@@ -8564,6 +8849,7 @@ type CanvasContextMenu = {
 
 const CANVAS_CLICK_SEQUENCE_WINDOW_MS = 360;
 const DIRECTED_NODE_OPEN_DELAY_MS = 750;
+const NESTED_EDGE_INSPECTOR_OPEN_DELAY_MS = 640;
 
 type CanvasDialogueMember = {
   eventId: string;
@@ -8893,6 +9179,7 @@ function StoryCanvas({
   onDeleteBoundaryEnd,
   onWorkspaceBoundsChange,
   onDeleteTransition,
+  onCreateScriptTransition,
   onRemoveMissingEventReference,
   onRemoveBoundaryBinding,
   onNormalizeTransitionOrder,
@@ -8916,6 +9203,7 @@ function StoryCanvas({
   onUpdateLocalExplorerType,
   onUpdateLocalExplorerProperty,
   onUpdateLogicPropertyOverride,
+  onUpdateLogicTypeOverride,
   onUpdateCharacterCategories,
   onUpdateEdgeLabel,
   onDeleteSelection,
@@ -9079,6 +9367,7 @@ function StoryCanvas({
     persist: boolean,
   ) => void;
   onDeleteTransition: (transitionId: string) => void;
+  onCreateScriptTransition?: (eventId: string, from: string, to: string) => void;
   onRemoveMissingEventReference: (
     ownerId: string,
     missingEventId: string,
@@ -9120,6 +9409,7 @@ function StoryCanvas({
     updates: Partial<LocalExplorerProperty>,
   ) => void;
   onUpdateLogicPropertyOverride: (propertyId: string, source: "canon" | "local", changes: Partial<LogicPropertyOverride>) => void;
+  onUpdateLogicTypeOverride: (typeId: string, source: "canon" | "local", changes: Partial<LogicTypeOverride>) => void;
   onUpdateCharacterCategories: (categories: string[]) => void;
   onUpdateEdgeLabel: (edgeId: string, label: string) => void;
   onDeleteSelection: (selection: Selection) => void;
@@ -9156,6 +9446,10 @@ function StoryCanvas({
   const shellRef = useRef<HTMLElement | null>(null);
   const pendingNodeClickRef = useRef<{
     nodeId: string;
+    timer?: number;
+  } | undefined>(undefined);
+  const pendingEdgeClickRef = useRef<{
+    edgeId: string;
     timer?: number;
   } | undefined>(undefined);
   const directedNodeHoldRef = useRef<{
@@ -9206,6 +9500,14 @@ function StoryCanvas({
     pendingNodeClickRef.current = undefined;
   }, []);
 
+  const clearPendingEdgeClick = useCallback(() => {
+    const pending = pendingEdgeClickRef.current;
+    if (pending?.timer !== undefined) {
+      window.clearTimeout(pending.timer);
+    }
+    pendingEdgeClickRef.current = undefined;
+  }, []);
+
   const clearDirectedNodeHold = useCallback(() => {
     const pending = directedNodeHoldRef.current;
     if (pending) window.clearTimeout(pending.timer);
@@ -9215,9 +9517,10 @@ function StoryCanvas({
   useEffect(() => {
     return () => {
       clearPendingNodeClick();
+      clearPendingEdgeClick();
       clearDirectedNodeHold();
     };
-  }, [clearDirectedNodeHold, clearPendingNodeClick]);
+  }, [clearDirectedNodeHold, clearPendingNodeClick, clearPendingEdgeClick]);
 
   const inspectorNodeStates = useMemo(() => {
     const states = new Map<string, "open" | "expanded">();
@@ -9354,9 +9657,7 @@ function StoryCanvas({
                     return {
                       description: event.description ?? "",
                       coverImage: eventCoverImageForNode(project, event),
-                      imageAssets: (project.assets ?? [])
-                        .filter((asset) => asset.kind === "image")
-                        .map((asset) => ({ id: asset.id, name: asset.name })),
+                      imageAssets: imageAssetsForLocation(project, event.locationRef),
                       coverImageOpen: auxiliaryPanels?.coverImage ?? false,
                       descriptionOpen: auxiliaryPanels?.description ?? false,
                       onDescriptionUpdate: (value: string) => onUpdateEvent(event.id, { description: value || undefined }),
@@ -9499,9 +9800,7 @@ function StoryCanvas({
                       const asset = attachment ? project.assets?.find((candidate) => candidate.id === attachment.assetId && candidate.kind === "image") : undefined;
                       return attachment && asset ? { ...attachment, name: asset.name, url: universeAssetUrl(project, asset.path) } : undefined;
                     })(),
-                    imageAssets: (project.assets ?? [])
-                      .filter((asset) => asset.kind === "image")
-                      .map((asset) => ({ id: asset.id, name: asset.name })),
+                    imageAssets: imageAssetsForLocation(project, beat.locationRef ?? beatEvent?.locationRef),
                     directorNoteOpen: auxiliaryPanels?.directorNote ?? false,
                     sceneImageOpen: auxiliaryPanels?.sceneImage ?? false,
                     primaryLocale,
@@ -9612,6 +9911,7 @@ function StoryCanvas({
                                 position,
                               );
                             },
+                            onInsertConditions: () => onInsertRouteGate(node.id),
                           }
                         : undefined,
                   };
@@ -10366,11 +10666,16 @@ function StoryCanvas({
           onEdgeClick={(event, edgeItem) => {
             setContextMenu(undefined);
             setEditingEdgeId(undefined);
-            const clickCount = Math.max(event.detail || 1, 1);
             const edgeSelection = { type: "edge" as const, id: edgeItem.id };
-            if (clickCount === 1) {
-              onCanvasSelect(edgeSelection);
-            } else if (clickCount === 2) {
+            onCanvasSelect(edgeSelection);
+            if (isNestedCanvas) {
+              clearPendingEdgeClick();
+              const timer = window.setTimeout(() => {
+                onOpenCanvasInspector(edgeSelection);
+                pendingEdgeClickRef.current = undefined;
+              }, NESTED_EDGE_INSPECTOR_OPEN_DELAY_MS);
+              pendingEdgeClickRef.current = { edgeId: edgeItem.id, timer };
+            } else {
               onOpenCanvasInspector(edgeSelection);
             }
           }}
@@ -10379,6 +10684,7 @@ function StoryCanvas({
             setContextMenu(undefined);
             setEditingEdgeId(undefined);
             clearPendingNodeClick();
+            clearPendingEdgeClick();
             if (
               collapseInspectorTabOnCanvasClick &&
               eventInspector.expandedEventId
@@ -10551,94 +10857,16 @@ function StoryCanvas({
             </>
           ) : contextMenu.kind === "route-gate" ? (
             <>
-              {activeScope?.kind === "event" || activeDialogueScope
-                ? (() => {
-                    const scope = activeScope?.kind === "event"
-                      ? activeScope
-                      : activeDialogueScope;
-                    const sourceNodeId = contextMenu.sourceNodeId;
-                    if (!scope || !sourceNodeId) return null;
-                    const connectNarrativeNode = (
-                      kind: ConnectedNarrativeNodeKind,
-                      nodeKind: StoryCanvasNodeData["kind"],
-                    ) => {
-                      onCreateConnectedNarrativeNode(
-                        scope,
-                        sourceNodeId,
-                        kind,
-                        positionForNewNode(
-                          { x: contextMenu.flowX, y: contextMenu.flowY },
-                          nodeKind,
-                        ),
-                        contextMenu.sourceHandleId,
-                      );
-                      setContextMenu(undefined);
-                    };
-                    return (
-                      <>
-                        <span className="canvas-menu-label">Create connected narrative node</span>
-                        <button type="button" onClick={() => connectNarrativeNode("dialogueStart", "dialogueStart")}>
-                          Dialogue Trigger
-                        </button>
-                        <button type="button" onClick={() => connectNarrativeNode("speechBeat", "speechBeat")}>
-                          Dialogue
-                        </button>
-                        <button type="button" onClick={() => connectNarrativeNode("decision", "decision")}>
-                          Decision
-                        </button>
-                        <button type="button" onClick={() => connectNarrativeNode("directionBeat", "directionBeat")}>
-                          Director Direction
-                        </button>
-                        <hr style={{ margin: "8px 0", borderColor: "var(--color-border)" }} />
-                        {activeEventScope ? (
-                          <>
-                            <EventTypeMenuButton
-                              label="Events"
-                              options={eventTypeOptions}
-                              onSelect={(categoryId) => {
-                                onCreateNestedEvent(activeEventScope.id, categoryId, {
-                                  ...positionForNewNode(
-                                    { x: contextMenu.flowX, y: contextMenu.flowY },
-                                    "event",
-                                  ),
-                                });
-                                setContextMenu(undefined);
-                              }}
-                            />
-                            <button
-                              type="button"
-                              onClick={() => {
-                                onCreateDialogue(
-                                  activeEventScope.id,
-                                  positionForNewNode(
-                                    { x: contextMenu.flowX, y: contextMenu.flowY },
-                                    "dialogue",
-                                  ),
-                                );
-                                setContextMenu(undefined);
-                              }}
-                            >
-                              Dialogue Group
-                            </button>
-                          </>
-                        ) : null}
-                      </>
-                    );
-                  })()
-                : (
-                  <>
-                    <span className="canvas-menu-label">Transition</span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (contextMenu.routeSourceId) onInsertRouteGate(contextMenu.routeSourceId);
-                        setContextMenu(undefined);
-                      }}
-                    >
-                      Insert Route Gate
-                    </button>
-                  </>
-                )}
+              <span className="canvas-menu-label">Transition</span>
+              <button
+                type="button"
+                onClick={() => {
+                  if (contextMenu.routeSourceId) onInsertRouteGate(contextMenu.routeSourceId);
+                  setContextMenu(undefined);
+                }}
+              >
+                Conditions
+              </button>
             </>
           ) : contextMenu.kind === "connect-create" ? (
             <>
@@ -10687,6 +10915,15 @@ function StoryCanvas({
                         </button>
                         <button type="button" onClick={() => connectNarrativeNode("directionBeat", "directionBeat")}>
                           Director Direction
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onInsertRouteGate(contextMenu.sourceHandleId ?? sourceNodeId);
+                            setContextMenu(undefined);
+                          }}
+                        >
+                          Conditions
                         </button>
                         <hr />
                         <button type="button" onClick={() => connectNarrativeNode("dialogue", "dialogue")}>
@@ -10983,6 +11220,7 @@ function StoryCanvas({
           onDeleteOutcome={onDeleteOutcome}
           onUpdateTransition={onUpdateTransition}
           onDeleteTransition={onDeleteTransition}
+          onCreateScriptTransition={onCreateScriptTransition}
           onCreateCanonSuggestion={onCreateCanonSuggestion}
           onUpdateCanonSuggestion={onUpdateCanonSuggestion}
           onDeleteCanonSuggestion={onDeleteCanonSuggestion}
@@ -11000,6 +11238,7 @@ function StoryCanvas({
           onUpdateLocalExplorerType={onUpdateLocalExplorerType}
           onUpdateLocalExplorerProperty={onUpdateLocalExplorerProperty}
           onUpdateLogicPropertyOverride={onUpdateLogicPropertyOverride}
+          onUpdateLogicTypeOverride={onUpdateLogicTypeOverride}
           onUpdateCharacterCategories={onUpdateCharacterCategories}
           onUpdateEdgeLabel={onUpdateEdgeLabel}
           onDeleteSelection={onDeleteSelection}
@@ -11498,6 +11737,73 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
     [applyProject, redoStack, restoreStructuralSnapshot, undoStack],
   );
 
+  const updateLogicPropertyOverride = useCallback(
+    (
+      propertyId: string,
+      source: "canon" | "local",
+      changes: Partial<LogicPropertyOverride>,
+    ) => {
+      const currentProject = projectRef.current;
+      if (!currentProject) return;
+      
+      const current = (currentProject.logicPropertyOverrides ?? []).find(
+        (item) => item.propertyId === propertyId && item.source === source,
+      ) ?? { propertyId, source };
+      
+      const normalizedChanges = changes.entityPresentable === false
+        ? { ...changes, dialogueTrigger: false }
+        : changes;
+      
+      const updatedProject = {
+        ...currentProject,
+        logicPropertyOverrides: [
+          ...(currentProject.logicPropertyOverrides ?? []).filter(
+            (item) => item.propertyId !== propertyId || item.source !== source,
+          ),
+          { ...current, ...normalizedChanges },
+        ],
+      };
+      
+      // Commit directly without using drafts for immediate save
+      void commitStructuralAction(
+        "Updated property capability",
+        updatedProject,
+      );
+    },
+    [commitStructuralAction],
+  );
+
+  const updateLogicTypeOverride = useCallback(
+    (
+      typeId: string,
+      source: "canon" | "local",
+      changes: Partial<LogicTypeOverride>,
+    ) => {
+      const currentProject = projectRef.current;
+      if (!currentProject) return;
+
+      const current = (currentProject.logicTypeOverrides ?? []).find(
+        (item) => item.typeId === typeId && item.source === source,
+      ) ?? { typeId, source };
+
+      const updatedProject = {
+        ...currentProject,
+        logicTypeOverrides: [
+          ...(currentProject.logicTypeOverrides ?? []).filter(
+            (item) => item.typeId !== typeId || item.source !== source,
+          ),
+          { ...current, ...changes },
+        ],
+      };
+
+      void commitStructuralAction(
+        "Updated type capability",
+        updatedProject,
+      );
+    },
+    [commitStructuralAction],
+  );
+
   const runMutation = useCallback(
     (result: mutations.MutationResult, label = "Saved structural change") => {
       void commitStructuralAction(label, result);
@@ -11845,7 +12151,17 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
     (type: string, name = "New Entity") => {
       const currentProject = projectRef.current;
       if (!currentProject) return;
-      const base = createLocalExplorerEntity(type, name);
+      
+      // If type is an entity-type property, use its label as the name
+      let entityName = name;
+      const entityTypeProperty = (currentProject.localExplorerProperties ?? []).find(
+        (prop) => prop.valueType === "entity-type" && (prop.id === type || prop.id.slice(5) === type || prop.id === `type:${type}`)
+      );
+      if (entityTypeProperty && name === "New Entity") {
+        entityName = entityTypeProperty.label;
+      }
+      
+      const base = createLocalExplorerEntity(type, entityName);
       const existingIds = new Set([
         ...(currentProject.localExplorerEntities ?? []).map(
           (entity) => entity.id,
@@ -11901,23 +12217,30 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
   const createExplorerType = useCallback(() => {
     const currentProject = projectRef.current;
     if (!currentProject) return;
-    const type = createLocalExplorerType();
-    void commitStructuralAction("Created local Explorer type", {
+    // Create entity-type property instead of separate localExplorerType
+    const property = createLocalExplorerProperty("New entity type", "entity-type");
+    void commitStructuralAction("Created local entity type", {
       project: {
         ...currentProject,
-        localExplorerTypes: [
-          ...(currentProject.localExplorerTypes ?? []),
-          type,
+        localExplorerProperties: [
+          ...(currentProject.localExplorerProperties ?? []),
+          property,
         ],
       },
-      selection: { type: "explorerType", id: type.id, source: "local" },
+      selection: { type: "explorerProperty", id: property.id, source: "local" },
     });
   }, [commitStructuralAction]);
 
-  const createExplorerProperty = useCallback((label = "New local property", valueType: LocalExplorerProperty["valueType"] = "text") => {
+  const createExplorerProperty = useCallback((label = "New local property", valueType: LocalExplorerProperty["valueType"] = "text", options?: {
+    description?: string;
+    required?: boolean;
+    options?: ExplorerPropertyOption[];
+    targetTypes?: string[];
+    appliesToTypes?: string[];
+  }) => {
     const currentProject = projectRef.current;
     if (!currentProject) return;
-    const property = createLocalExplorerProperty(label, valueType);
+    const property = createLocalExplorerProperty(label, valueType, options);
     void commitStructuralAction("Created local Explorer property", {
       project: {
         ...currentProject,
@@ -12010,42 +12333,6 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
           ),
         },
       });
-    },
-    [commitStructuralAction],
-  );
-
-  const updateLogicPropertyOverride = useCallback(
-    (
-      propertyId: string,
-      source: "canon" | "local",
-      changes: Partial<LogicPropertyOverride>,
-    ) => {
-      const currentProject = projectRef.current;
-      if (!currentProject) return;
-      
-      const current = (currentProject.logicPropertyOverrides ?? []).find(
-        (item) => item.propertyId === propertyId && item.source === source,
-      ) ?? { propertyId, source };
-      
-      const normalizedChanges = changes.entityPresentable === false
-        ? { ...changes, dialogueTrigger: false }
-        : changes;
-      
-      const updatedProject = {
-        ...currentProject,
-        logicPropertyOverrides: [
-          ...(currentProject.logicPropertyOverrides ?? []).filter(
-            (item) => item.propertyId !== propertyId || item.source !== source,
-          ),
-          { ...current, ...normalizedChanges },
-        ],
-      };
-      
-      // Commit directly without using drafts for immediate save
-      void commitStructuralAction(
-        "Updated property capability",
-        updatedProject,
-      );
     },
     [commitStructuralAction],
   );
@@ -15100,36 +15387,37 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
 
   const insertRouteGate = useCallback(
     (sourceId: string) => {
-      if (!project) return;
-      const scope = activeScope ?? activeCanvasScope(project);
+      const currentProject = projectRef.current;
+      if (!currentProject) return;
+      const scope = activeScope ?? activeCanvasScope(currentProject);
       const scopeKey = scope ? canvasScopeKey(scope) : undefined;
       const currentSources = scopeKey
-        ? project.canvas?.scopes?.[scopeKey]?.routeGateSources
-        : project.canvas?.routeGateSources;
+        ? currentProject.canvas?.scopes?.[scopeKey]?.routeGateSources
+        : currentProject.canvas?.routeGateSources;
       if (currentSources?.includes(sourceId)) {
         setMessage("This connection already has a Route Gate.");
         return;
       }
       updateProject({
-        ...project,
+        ...currentProject,
         canvas: {
-          ...project.canvas,
+          ...currentProject.canvas,
           routeGateSources: scopeKey
-            ? project.canvas?.routeGateSources
-            : withValue(project.canvas?.routeGateSources, sourceId),
+            ? currentProject.canvas?.routeGateSources
+            : withValue(currentProject.canvas?.routeGateSources, sourceId),
           scopes: scopeKey
             ? {
-                ...(project.canvas?.scopes ?? {}),
+                ...(currentProject.canvas?.scopes ?? {}),
                 [scopeKey]: {
-                  ...(project.canvas?.scopes?.[scopeKey] ?? {}),
+                  ...(currentProject.canvas?.scopes?.[scopeKey] ?? {}),
                   routeGateSources: withValue(currentSources, sourceId),
                 },
               }
-            : project.canvas?.scopes,
+            : currentProject.canvas?.scopes,
         },
       });
     },
-    [activeScope, project, updateProject],
+    [activeScope, updateProject],
   );
 
   const deleteScriptBlock = useCallback(
@@ -15818,7 +16106,7 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
               project: {
                 ...currentProject,
                 events: currentProject.events.map((event) => event.id === ownerId
-                  ? { ...event, unlocks: (event.unlocks ?? []).filter((_, index) => index !== consequenceIndex) }
+                  ? { ...event, consequences: (event.consequences ?? []).filter((_, index) => index !== consequenceIndex) }
                   : event),
               },
             });
@@ -15842,6 +16130,54 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
                               : outcome),
                           }
                         : decision),
+                    }
+                  : event),
+              },
+            });
+            return;
+          }
+          const ownerBeat = currentProject.events.flatMap((event) => [
+            ...(event.dialogueBeats ?? []).map((beat) => ({ event, dialogueId: undefined as string | undefined, beat })),
+            ...(event.dialogues ?? []).flatMap((dialogue) =>
+              (dialogue.beats ?? []).map((beat) => ({ event, dialogueId: dialogue.id, beat }))),
+          ]).find(({ event, beat }) => `beat:${event.id}:${beat.id}` === ownerId);
+          if (ownerBeat) {
+            const filterBeat = (beat: DialogueBeat) =>
+              beat.id === ownerBeat.beat.id
+                ? { ...beat, consequences: (beat.consequences ?? []).filter((_, index) => index !== consequenceIndex) }
+                : beat;
+            runCanvasMutation({
+              project: {
+                ...currentProject,
+                events: currentProject.events.map((event) => {
+                  if (event.id !== ownerBeat.event.id) return event;
+                  return ownerBeat.dialogueId === undefined
+                    ? { ...event, dialogueBeats: (event.dialogueBeats ?? []).map(filterBeat) }
+                    : {
+                        ...event,
+                        dialogues: (event.dialogues ?? []).map((dialogue) =>
+                          dialogue.id === ownerBeat.dialogueId
+                            ? { ...dialogue, beats: (dialogue.beats ?? []).map(filterBeat) }
+                            : dialogue),
+                      };
+                }),
+              },
+            });
+            return;
+          }
+          const ownerDialogue = currentProject.events.flatMap((event) =>
+            (event.dialogues ?? []).map((dialogue) => ({ event, dialogue })),
+          ).find(({ event, dialogue }) => `dialogue:${event.id}:${dialogue.id}` === ownerId);
+          if (ownerDialogue) {
+            runCanvasMutation({
+              project: {
+                ...currentProject,
+                events: currentProject.events.map((event) => event.id === ownerDialogue.event.id
+                  ? {
+                      ...event,
+                      dialogues: (event.dialogues ?? []).map((dialogue) => dialogue.id === ownerDialogue.dialogue.id
+                        ? { ...dialogue, consequences: (dialogue.consequences ?? []).filter((_, index) => index !== consequenceIndex) }
+                        : dialogue),
                     }
                   : event),
               },
@@ -17247,7 +17583,6 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
             onOpenInspector={selectWithEventDraftGuard}
             onCreateEntity={createExplorerEntity}
             onDeleteEntity={deleteLocalExplorerEntity}
-            onCreateType={createExplorerType}
             onInitializeProperties={initializePropertiesFromTemplate}
           /> : null}
           {panelVisibility.logic ? <LogicPanel
@@ -17264,7 +17599,9 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
             onInitializeProperties={initializePropertiesFromTemplate}
             onUpdateLocalExplorerProperty={updateLocalExplorerProperty}
             onUpdateLogicPropertyOverride={updateLogicPropertyOverride}
+            onUpdateLogicTypeOverride={updateLogicTypeOverride}
             onDeleteLocalExplorerProperty={deleteLocalExplorerProperty}
+            onCreateType={createExplorerType}
           /> : null}
           {panelVisibility.outline ? <FilesPanel
             project={project}
@@ -17427,6 +17764,7 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
             onDeleteScriptBlock={deleteScriptBlock}
             onFocusScriptBlock={focusScriptBlock}
             onDeleteTransition={deleteTransition}
+            onCreateScriptTransition={createScriptTransition}
             onCreateCanonSuggestion={createCanonSuggestion}
             onUpdateCanonSuggestion={updateCanonSuggestion}
             onDeleteCanonSuggestion={deleteCanonSuggestion}
@@ -17444,6 +17782,7 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
             onUpdateLocalExplorerType={updateLocalExplorerType}
             onUpdateLocalExplorerProperty={updateLocalExplorerProperty}
             onUpdateLogicPropertyOverride={updateLogicPropertyOverride}
+            onUpdateLogicTypeOverride={updateLogicTypeOverride}
             onUpdateCharacterCategories={updateCharacterCategories}
             onUpdateEdgeLabel={updateEdgeLabel}
             onDeleteSelection={deleteSelection}

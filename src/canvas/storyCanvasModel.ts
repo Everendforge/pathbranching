@@ -334,14 +334,12 @@ function insertRouteGates(
       ]);
     });
 
-  transitionGroups.forEach((routes, routeSourceId) => {
-    // A single route stays a direct line. In child canvases, a Route Gate is
-    // introduced only for an actual split; authors can still insert one on any
-    // individual transition from its context menu.
-    const shouldInsertAutomatically = routeGatesAreAutomatic && routes.length >= 2;
-    if (!shouldInsertAutomatically && !manuallyInsertedSources.has(routeSourceId)) {
-      return;
-    }
+  const ownerEventIdForSource = (routeSourceId: string) =>
+    project.events.find((eventNode) =>
+      eventNode.transitions?.some((transition) => transition.from === routeSourceId),
+    )?.id ?? (scope?.kind === "event" ? scope.id : scope?.kind === "dialogue" ? scope.eventId : undefined);
+
+  const insertGate = (routeSourceId: string, routes: StoryCanvasEdge[]) => {
     if (nodes.some((node) => node.id === `route-gate:${routeSourceId}`)) {
       return;
     }
@@ -350,27 +348,34 @@ function insertRouteGates(
     if (!source) return;
 
     const gateId = `route-gate:${routeSourceId}`;
-    const ownerEventId = project.events.find((eventNode) =>
-      eventNode.transitions?.some((transition) => transition.from === routeSourceId),
-    )?.id;
+    const ownerEventId = ownerEventIdForSource(routeSourceId);
     const conditionalCount = routes.filter((route) => route.data?.conditions).length;
+    const conditionBadges = Array.from(
+      new Set(routes.flatMap((route) => conditionLabels(route.data?.conditions))),
+    ).slice(0, 2);
+    const consequenceBadges = Array.from(
+      new Set(routes.flatMap((route) => (route.data?.consequences ?? []).map(consequenceLabel))),
+    ).slice(0, 2);
     pushNode(
       project,
       nodes,
       gateId,
       "routeGate",
-      "Route Gate",
-      `${routes.length} routes`,
+      "Conditions",
+      routes.length ? `${routes.length} routes` : "No routes yet",
       source.position.x + NODE_WIDTH + 58,
       source.position.y + 4,
       [
         `${routes.length} routes`,
         ...(conditionalCount ? [`${conditionalCount} conditional`] : []),
+        ...conditionBadges,
+        ...consequenceBadges,
       ],
       { routeSourceId, eventId: ownerEventId, transitionIds: routes.map((route) => route.id) },
       { nodeColors: options.nodeColors, scope },
     );
 
+    if (!routes.length) return;
     const sourceHandle = routes[0]?.sourceHandle;
     routes.forEach((route) => {
       route.source = gateId;
@@ -380,6 +385,24 @@ function insertRouteGates(
       ...edge(`edge:route-gate:${routeSourceId}`, sourceId, gateId, "contains", ""),
       sourceHandle,
     });
+  };
+
+  transitionGroups.forEach((routes, routeSourceId) => {
+    // A single route stays a direct line. In child canvases, a Route Gate is
+    // introduced only for an actual split; authors can still insert one on any
+    // individual transition from its context menu.
+    const shouldInsertAutomatically = routeGatesAreAutomatic && routes.length >= 2;
+    if (!shouldInsertAutomatically && !manuallyInsertedSources.has(routeSourceId)) {
+      return;
+    }
+    insertGate(routeSourceId, routes);
+  });
+
+  // Manually placed gates on a source with no outgoing transitions yet — the
+  // author can still open, configure, and later connect them from the canvas.
+  manuallyInsertedSources.forEach((routeSourceId) => {
+    if (transitionGroups.has(routeSourceId)) return;
+    insertGate(routeSourceId, []);
   });
 }
 
@@ -398,10 +421,10 @@ function scriptSubtitle(script: ScriptRef) {
     .join(" - ");
 }
 
-function logicBadges(availability: ConditionInput | undefined, ruleSetCount = 0) {
+function logicBadges(availability: ConditionInput | undefined, consequenceCount = 0) {
   return [
     ...(conditionCount(availability) > 0 ? ["conditional"] : []),
-    ...(ruleSetCount > 0 ? [`${ruleSetCount} rules`] : []),
+    ...(consequenceCount > 0 ? [`${consequenceCount} effects`] : []),
   ];
 }
 
@@ -451,8 +474,8 @@ function eventBadges(project: BranchingProject, eventNode: EventNode) {
     ...(categoryLabel ? [categoryLabel] : []),
     ...(canonRefCount > 0 ? [`${canonRefCount} refs`] : []),
     ...(eventNode.script ? ["ink"] : []),
-    ...(eventNode.unlocks?.length ? ["unlocks"] : []),
-    ...logicBadges(eventNode.availability, eventNode.ruleSets?.length ?? 0),
+    ...(eventNode.consequences?.length ? ["unlocks"] : []),
+    ...logicBadges(eventNode.availability, eventNode.consequences?.length ?? 0),
     ...dataUseBadges(project, eventNode.availability),
   ];
 }
@@ -508,7 +531,7 @@ function dialogueBadges(project: BranchingProject, dialogue: DialogueNode) {
   return [
     ...(dialogue.speakerRef ? ["speaker"] : []),
     ...(dialogue.canonRefs?.length ? [`${dialogue.canonRefs.length} refs`] : []),
-    ...logicBadges(dialogue.availability, dialogue.ruleSets?.length ?? 0),
+    ...logicBadges(dialogue.availability, dialogue.consequences?.length ?? 0),
     ...dataUseBadges(project, dialogue.availability),
   ];
 }
@@ -850,10 +873,10 @@ function addConsequenceNodes(
     const id = `runtime-action:${ownerId}:${index}`;
     const title = consequenceLabel(consequence);
     const badges = [consequence.type];
-    const ref =
-      consequence.type === "unlockCanonEntry" && typeof consequence.ref === "string" ? consequence.ref : undefined;
-    const dataObjectId =
-      consequence.type === "unlockDataObject" && typeof consequence.objectId === "string" ? consequence.objectId : undefined;
+    const entityId =
+      consequence.type === "addGrantable" || consequence.type === "removeGrantable" || consequence.type === "editGrantable"
+        ? consequence.entityId
+        : undefined;
 
     pushNode(project, nodes, id, "runtimeAction", title, ownerLabel, 1160, cursor.supportY, badges, {
       consequence,
@@ -862,21 +885,9 @@ function addConsequenceNodes(
     }, { nodeColors: options.nodeColors });
     edges.push(edge(`edge:consequence:${ownerId}:${id}`, ownerId, id, "consequence", title, { consequences: [consequence] }));
 
-    if (ref) {
-      const knowledgeId = ensureKnowledgeNode(project, nodes, createdKnowledge, ref, 1440, cursor.supportY, options);
-      edges.push(edge(`edge:consequence:${id}:${knowledgeId}`, id, knowledgeId, "consequence", "unlocks", { consequences: [consequence] }));
-    }
-
-    if (dataObjectId) {
-      const dataObject = project.projectDataObjects?.find((object) => object.id === dataObjectId);
-      const knowledgeId = ensureKnowledgeNode(project, nodes, createdKnowledge, dataObjectId, 1440, cursor.supportY, options);
-      const targetNode = nodes.find((node) => node.id === knowledgeId);
-      if (targetNode) {
-        targetNode.data.title = dataObject?.name ?? dataObjectId;
-        targetNode.data.subtitle = dataObject?.classId ?? "project data";
-        targetNode.data.badges = ["data"];
-      }
-      edges.push(edge(`edge:consequence:${id}:${knowledgeId}`, id, knowledgeId, "consequence", "unlocks data", { consequences: [consequence] }));
+    if (entityId) {
+      const knowledgeId = ensureKnowledgeNode(project, nodes, createdKnowledge, entityId, 1440, cursor.supportY, options);
+      edges.push(edge(`edge:consequence:${id}:${knowledgeId}`, id, knowledgeId, "consequence", title, { consequences: [consequence] }));
     }
 
     cursor.supportY += 150;
@@ -903,7 +914,7 @@ function addOutcomeNodes(
       ? [outcome.unavailableBehavior === "hidden" ? "hidden when unavailable" : "locks when unavailable"]
       : []),
     ...(outcome.consequences ?? []).map(consequenceLabel),
-    ...logicBadges(availability, outcome.ruleSets?.length ?? 0),
+    ...logicBadges(availability, outcome.consequences?.length ?? 0),
     ...dataUseBadges(project, availability),
   ];
 
@@ -978,7 +989,10 @@ function addEventSupportNodes(
       [
         decision.type,
         `${decision.outcomes.length} outcomes`,
-        ...logicBadges(decision.availability, decision.ruleSets?.length ?? 0),
+        ...logicBadges(decision.availability),
+        ...(decision.availability
+          ? [decision.unavailableBehavior === "hidden" ? "hidden when unavailable" : "locks when unavailable"]
+          : []),
         ...dataUseBadges(project, decision.availability),
       ],
       { eventId: eventNode.id, decision, options: decisionOptions(eventNode.id, decision) },
@@ -991,7 +1005,7 @@ function addEventSupportNodes(
     cursor.decisionY += Math.max(220, 108 + decision.outcomes.length * 62);
   });
 
-  addConsequenceNodes(project, nodes, edges, createdKnowledge, eventNode.id, eventNode.name, eventNode.unlocks, cursor, options);
+  addConsequenceNodes(project, nodes, edges, createdKnowledge, eventNode.id, eventNode.name, eventNode.consequences, cursor, options);
 }
 
 function buildEventScopeModel(
@@ -1086,7 +1100,10 @@ function buildEventScopeModel(
       [
         decision.type,
         `${decision.outcomes.length} outcomes`,
-        ...logicBadges(decision.availability, decision.ruleSets?.length ?? 0),
+        ...logicBadges(decision.availability),
+        ...(decision.availability
+          ? [decision.unavailableBehavior === "hidden" ? "hidden when unavailable" : "locks when unavailable"]
+          : []),
         ...dataUseBadges(project, decision.availability),
       ],
       { eventId: eventNode.id, decision, options: decisionOptions(eventNode.id, decision) },
@@ -1104,6 +1121,14 @@ function buildEventScopeModel(
     ),
   );
   const eventBeats = (eventNode.dialogueBeats ?? []).map((beat) => ({ beat, dialogueId: undefined }));
+  const beatConsequenceCursor: LayoutCursor = {
+    sequenceY: 0,
+    branchY: 0,
+    eventY: 0,
+    decisionY: 0,
+    outcomeY: 0,
+    supportY: 900,
+  };
   eventBeats.forEach(({ beat, dialogueId }, index) => {
     const block = scriptBlocks.get(`${beat.blockRef.scriptId}:${beat.blockRef.blockId}`);
     const nodeId = `beat:${eventNode.id}:${beat.id}`;
@@ -1123,9 +1148,20 @@ function buildEventScopeModel(
       beat.kind === "speech" ? speaker : "Stage direction",
       740,
       420 + index * 168,
-      logicBadges(beat.displayCondition, beat.ruleSets?.length ?? 0),
+      logicBadges(beat.displayCondition, beat.consequences?.length ?? 0),
       { eventId: eventNode.id, dialogueId, beat, block, isEventBeat: !dialogueId },
       { nodeColors: options.nodeColors, scope },
+    );
+    addConsequenceNodes(
+      project,
+      nodes,
+      edges,
+      createdKnowledge,
+      nodeId,
+      block?.content.trim().slice(0, 80) || beat.id,
+      beat.consequences,
+      beatConsequenceCursor,
+      { ...options, scope },
     );
   });
 
@@ -1143,6 +1179,17 @@ function buildEventScopeModel(
       dialogueBadges(project, dialogue),
       { eventId: eventNode.id, dialogue },
       { nodeColors: options.nodeColors, scope },
+    );
+    addConsequenceNodes(
+      project,
+      nodes,
+      edges,
+      createdKnowledge,
+      dialogueId,
+      dialogue.title,
+      dialogue.consequences,
+      beatConsequenceCursor,
+      { ...options, scope },
     );
   });
 
@@ -1175,7 +1222,7 @@ function buildEventScopeModel(
     createdKnowledge,
     eventNode.id,
     eventNode.name,
-    eventNode.unlocks,
+    eventNode.consequences,
     {
       sequenceY: 80,
       branchY: 80,
@@ -1334,6 +1381,15 @@ function buildDialogueScopeModel(
       script.blocks.map((block) => [`${script.id}:${block.id}`, block] as const),
     ),
   );
+  const createdKnowledge = new Set<string>();
+  const beatConsequenceCursor: LayoutCursor = {
+    sequenceY: 0,
+    branchY: 0,
+    eventY: 0,
+    decisionY: 0,
+    outcomeY: 0,
+    supportY: 640,
+  };
   (dialogue.beats ?? []).forEach((beat, index) => {
     const block = scriptBlocks.get(`${beat.blockRef.scriptId}:${beat.blockRef.blockId}`);
     const nodeId = `beat:${eventNode.id}:${beat.id}`;
@@ -1353,11 +1409,34 @@ function buildDialogueScopeModel(
       beat.kind === "speech" ? speaker : "Stage direction",
       330 + (index % 2) * 310,
       90 + Math.floor(index / 2) * 175,
-      logicBadges(beat.displayCondition, beat.ruleSets?.length ?? 0),
+      logicBadges(beat.displayCondition, beat.consequences?.length ?? 0),
       { eventId: eventNode.id, dialogueId: dialogue.id, beat, block },
       { nodeColors: options.nodeColors, scope },
     );
+    addConsequenceNodes(
+      project,
+      nodes,
+      edges,
+      createdKnowledge,
+      nodeId,
+      block?.content.trim().slice(0, 80) || beat.id,
+      beat.consequences,
+      beatConsequenceCursor,
+      { ...options, scope },
+    );
   });
+
+  addConsequenceNodes(
+    project,
+    nodes,
+    edges,
+    createdKnowledge,
+    `dialogue:${eventNode.id}:${dialogue.id}`,
+    dialogue.title,
+    dialogue.consequences,
+    beatConsequenceCursor,
+    { ...options, scope },
+  );
 
   (eventNode.decisions ?? []).filter((decision) => decision.dialogueId === dialogue.id).forEach((decision, index) => {
     const decisionId = `decision:${eventNode.id}:${decision.id}`;
@@ -1370,7 +1449,14 @@ function buildDialogueScopeModel(
       decision.description ?? decision.id,
       340 + (index % 2) * 320,
       460 + Math.floor(index / 2) * 220,
-      [decision.type, `${decision.outcomes.length} outcomes`, ...logicBadges(decision.availability, decision.ruleSets?.length ?? 0)],
+      [
+        decision.type,
+        `${decision.outcomes.length} outcomes`,
+        ...logicBadges(decision.availability),
+        ...(decision.availability
+          ? [decision.unavailableBehavior === "hidden" ? "hidden when unavailable" : "locks when unavailable"]
+          : []),
+      ],
       { eventId: eventNode.id, dialogueId: dialogue.id, decision, options: decisionOptions(eventNode.id, decision) },
       { nodeColors: options.nodeColors, scope, width: 300 },
     );

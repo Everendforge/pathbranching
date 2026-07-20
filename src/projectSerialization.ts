@@ -13,6 +13,7 @@ import type {
 } from "./domain.js";
 import { normalizeBranchMembership } from "./storyOutlineModel.js";
 import { DEFAULT_INTEGRATION_CONFIG, normalizeIntegrationConfig } from "./integrationConfig.js";
+import { migrateProjectTypesToProperties } from "./explorerSchema.js";
 
 export function projectFileName(path: string | undefined) {
   if (!path) {
@@ -314,6 +315,9 @@ function normalizeBeatSceneImage<T extends { sceneImage?: unknown; sceneImages?:
 }
 
 export function normalizeProject(project: BranchingProject): BranchingProject {
+  // Migrate local types to properties if they exist
+  project = migrateProjectTypesToProperties(project);
+
   const entrySequenceId = project.entrySequenceId ?? project.sequences[0]?.id;
   const activeSequenceId =
     project.canvas?.activeSequenceId ??

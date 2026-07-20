@@ -1,10 +1,12 @@
-import type { BranchingProject, Condition, ConditionExpression, ConditionInput, ConditionSet, Consequence, ProjectDataObject, RuleLibrary, RuleLibraryRule, RuleSet, RuleSetBinding, RuleSetPhase, Transition } from "./domain.js";
+import type { BranchingProject, Condition, ConditionExpression, ConditionInput, ConditionSet, Consequence, PlayerSimulationState, ProjectDataObject, Transition } from "./domain.js";
 
 export type NarrativeEvaluationState = {
   variables?: Record<string, unknown>;
   canonStates?: Record<string, Record<string, unknown>>;
   visited?: Set<string> | string[];
   dataObjects?: ProjectDataObject[];
+  /** Grantable entity ids the player currently holds (mirrors PlayerSimulationState.inventory). */
+  inventory?: Set<string> | string[];
 };
 
 function compareValues(left: unknown, operator: string, right: unknown): boolean {
@@ -52,7 +54,9 @@ export function evaluateCondition(
     return compareValues(dataObject?.fields[String(raw.field ?? "")], String(raw.operator ?? "=="), raw.value);
   }
   if (condition.type === "runtimeItem") {
-    const owned = state.canonStates?.[String(raw.itemId ?? "")]?.owned === true;
+    const itemId = String(raw.itemId ?? "");
+    const inventory = state.inventory instanceof Set ? state.inventory : new Set(state.inventory ?? []);
+    const owned = inventory.has(itemId);
     return condition.operator === "missing" ? !owned : owned;
   }
   if (condition.type === "visited") {
@@ -103,30 +107,39 @@ export function resolveFirstValidTransition(
   );
 }
 
-export function resolveRuleSetConsequences(
-  rule: Pick<RuleLibraryRule, "when" | "then" | "else">,
+/** Filters a list of consequences down to the ones whose own (optional) `conditions` gate currently passes. */
+export function resolveConsequences(
+  consequences: Consequence[] | undefined,
   project: Pick<BranchingProject, "canonRefs">,
   state: NarrativeEvaluationState,
 ): Consequence[] {
-  return evaluateConditionInput(rule.when, project, state) ? rule.then : rule.else ?? [];
+  return (consequences ?? []).filter((consequence) => evaluateConditionInput(consequence.conditions, project, state));
 }
 
-export function evaluateRuleSetBindings(
-  library: RuleLibrary | undefined,
-  bindings: RuleSetBinding[] | undefined,
-  phase: RuleSetPhase,
-  project: Pick<BranchingProject, "canonRefs">,
-  state: NarrativeEvaluationState,
-): Array<{ binding: RuleSetBinding; rule: RuleLibraryRule; consequences: Consequence[] }> {
-  if (!library || !bindings?.length) return [];
-  const rules = new Map(library.rules.map((rule) => [rule.id, rule]));
-  return [...bindings]
-    .filter((binding) => binding.phase === phase)
-    .sort((left, right) => left.order - right.order)
-    .flatMap((binding) => {
-      const rule = rules.get(binding.ruleId);
-      return rule ? [{ binding, rule, consequences: resolveRuleSetConsequences(rule, project, state) }] : [];
-    });
+/** Pure reducer applying a single consequence onto player simulation state. */
+export function applyConsequence(consequence: Consequence, state: PlayerSimulationState): PlayerSimulationState {
+  if (consequence.type === "addGrantable") {
+    const inventory = state.inventory ?? [];
+    return inventory.includes(consequence.entityId)
+      ? state
+      : { ...state, inventory: [...inventory, consequence.entityId] };
+  }
+  if (consequence.type === "removeGrantable") {
+    return { ...state, inventory: (state.inventory ?? []).filter((id) => id !== consequence.entityId) };
+  }
+  if (consequence.type === "editGrantable") {
+    return {
+      ...state,
+      grantableProperties: {
+        ...state.grantableProperties,
+        [consequence.entityId]: {
+          ...state.grantableProperties?.[consequence.entityId],
+          [consequence.propertyId]: consequence.value,
+        },
+      },
+    };
+  }
+  return { ...state, variables: { ...state.variables, [consequence.name]: consequence.value } };
 }
 
 export function isConditionSet(expression: ConditionExpression): expression is ConditionSet {
@@ -218,19 +231,16 @@ export function conditionLabels(input: ConditionInput | undefined): string[] {
 }
 
 export function consequenceLabel(consequence: Consequence): string {
-  if (consequence.type === "unlockCanonEntry") {
-    return "unlock canon";
+  if (consequence.type === "addGrantable") {
+    return "grant item";
   }
-  if (consequence.type === "unlockDataObject") {
-    return "unlock data";
+  if (consequence.type === "removeGrantable") {
+    return "remove item";
   }
-  if (consequence.type === "setVariable") {
-    return "set variable";
+  if (consequence.type === "editGrantable") {
+    return `edit ${consequence.propertyId}`;
   }
-  if (consequence.type === "engineSignal") {
-    return "engine signal";
-  }
-  return consequence.type;
+  return "set variable";
 }
 
 export function conditionInputsFromConsequences(consequences: Consequence[] | undefined): ConditionInput[] {
@@ -240,10 +250,6 @@ export function conditionInputsFromConsequences(consequences: Consequence[] | un
     }
     return isConditionInput(consequence.conditions) ? [consequence.conditions] : [];
   });
-}
-
-export function ruleSetConditionInputs(ruleSets: RuleSet[] | undefined): ConditionInput[] {
-  return (ruleSets ?? []).map((ruleSet) => ruleSet.when);
 }
 
 function isConditionInput(value: unknown): value is ConditionInput {

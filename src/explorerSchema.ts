@@ -4,6 +4,8 @@ import type {
   ExplorerPropertyOption,
   LocalExplorerProperty,
   LocalExplorerType,
+  LogicPropertyOverride,
+  LogicTypeOverride,
 } from "./domain.js";
 
 type UnknownRecord = Record<string, unknown>;
@@ -295,6 +297,87 @@ export function propertyCapability(
   );
 }
 
+export function typeCapability(
+  project: Pick<BranchingProject, "logicTypeOverrides" | "logicPropertyOverrides">,
+  source: "canon" | "local",
+  typeId: string,
+) {
+  // For entity-type properties (prefixed with "type:"), look in property overrides
+  if (typeId.startsWith("type:")) {
+    return project.logicPropertyOverrides?.find(
+      (item) => item.propertyId === typeId && item.source === source,
+    ) as LogicPropertyOverride | undefined;
+  }
+  // For legacy local types, look in type overrides
+  return project.logicTypeOverrides?.find(
+    (item) => item.typeId === typeId && item.source === source,
+  );
+}
+
+export function isGrantableType(
+  project: Pick<BranchingProject, "logicTypeOverrides">,
+  source: "canon" | "local",
+  typeId: string,
+) {
+  return typeCapability(project, source, typeId)?.grantable === true;
+}
+
+export function isLocationType(
+  project: Pick<BranchingProject, "logicTypeOverrides">,
+  source: "canon" | "local",
+  typeId: string,
+) {
+  return typeCapability(project, source, typeId)?.location === true;
+}
+
+export type GrantableEntityOption = { id: string; label: string; source: "canon" | "local"; typeId: string };
+
+/** Merged pool of canon + local entities whose entity type is marked grantable. */
+export function grantableEntities(
+  project: Pick<BranchingProject, "canonRefs" | "localExplorerEntities" | "logicTypeOverrides">,
+): GrantableEntityOption[] {
+  const canonOptions = project.canonRefs
+    .filter((ref) => ref.kind && isGrantableType(project, "canon", ref.kind))
+    .map((ref) => ({ id: ref.id, label: ref.label ?? ref.id, source: "canon" as const, typeId: ref.kind! }));
+  const localOptions = (project.localExplorerEntities ?? [])
+    .filter((entity) => isGrantableType(project, "local", entity.type))
+    .map((entity) => ({ id: entity.id, label: entity.name, source: "local" as const, typeId: entity.type }));
+  return [...canonOptions, ...localOptions];
+}
+
+/** Merged pool of canon + local entities whose entity type is marked as a location. */
+export function locationEntities(
+  project: Pick<BranchingProject, "canonRefs" | "localExplorerEntities" | "logicTypeOverrides">,
+): GrantableEntityOption[] {
+  const canonOptions = project.canonRefs
+    .filter((ref) => ref.kind && isLocationType(project, "canon", ref.kind))
+    .map((ref) => ({ id: ref.id, label: ref.label ?? ref.id, source: "canon" as const, typeId: ref.kind! }));
+  const localOptions = (project.localExplorerEntities ?? [])
+    .filter((entity) => isLocationType(project, "local", entity.type))
+    .map((entity) => ({ id: entity.id, label: entity.name, source: "local" as const, typeId: entity.type }));
+  return [...canonOptions, ...localOptions];
+}
+
+/**
+ * Merged pool of canon + local entities eligible as an entity-ref/entity-ref-list
+ * target, filtered by `targetTypes` (canon `kind` or local `type`) when set.
+ * An empty/undefined `targetTypes` allows every entity, mirroring WorldNotion's
+ * entity-ref eligibility rule.
+ */
+export function entityRefOptions(
+  project: Pick<BranchingProject, "canonRefs" | "localExplorerEntities">,
+  targetTypes: string[] | undefined,
+): GrantableEntityOption[] {
+  const allowed = targetTypes?.length ? new Set(targetTypes) : undefined;
+  const canonOptions = project.canonRefs
+    .filter((ref) => !allowed || (ref.kind && allowed.has(ref.kind)))
+    .map((ref) => ({ id: ref.id, label: ref.label ?? ref.id, source: "canon" as const, typeId: ref.kind ?? "" }));
+  const localOptions = (project.localExplorerEntities ?? [])
+    .filter((entity) => !allowed || allowed.has(entity.type))
+    .map((entity) => ({ id: entity.id, label: entity.name, source: "local" as const, typeId: entity.type }));
+  return [...canonOptions, ...localOptions];
+}
+
 export function propertyIsEntityPresentable(
   project: Pick<BranchingProject, "logicPropertyOverrides">,
   source: "canon" | "local",
@@ -363,14 +446,153 @@ export function createLocalExplorerType(
 export function createLocalExplorerProperty(
   label = "New local property",
   valueType: LocalExplorerProperty["valueType"] = "text",
+  options?: {
+    description?: string;
+    required?: boolean;
+    options?: ExplorerPropertyOption[];
+    targetTypes?: string[];
+    appliesToTypes?: string[];
+    icon?: string;
+    color?: string;
+    suggestedFolder?: string;
+  },
   now = new Date().toISOString(),
 ): LocalExplorerProperty {
+  // Entity-type properties use "type:" prefix for capability routing
+  const prefix = valueType === "entity-type" ? "type:" : "property:";
   return {
-    id: `property:local-${Date.now().toString(36)}`,
+    id: `${prefix}local-${Date.now().toString(36)}`,
     label,
     valueType,
-    appliesToTypes: [],
+    ...(options?.description ? { description: options.description } : {}),
+    ...(options?.required ? { required: options.required } : {}),
+    ...(options?.options ? { options: options.options } : {}),
+    appliesToTypes: options?.appliesToTypes ?? [],
+    ...(options?.targetTypes ? { targetTypes: options.targetTypes } : {}),
+    ...(options?.icon ? { icon: options.icon } : {}),
+    ...(options?.color ? { color: options.color } : {}),
+    ...(options?.suggestedFolder ? { suggestedFolder: options.suggestedFolder } : {}),
     createdAt: now,
     updatedAt: now,
+  };
+}
+
+export function createEntityTypeProperty(
+  label = "New entity type",
+  icon = "circle",
+  color?: string,
+  suggestedFolder?: string,
+  now = new Date().toISOString(),
+): LocalExplorerProperty {
+  return createLocalExplorerProperty(label, "entity-type", {
+    icon,
+    ...(color ? { color } : {}),
+    ...(suggestedFolder ? { suggestedFolder } : {}),
+  }, now);
+}
+
+/**
+ * Converts LocalExplorerType array to LocalExplorerProperty array with valueType: "entity-type".
+ * Used during data migration to unify types and properties.
+ */
+export function migrateLocalTypesToProperties(
+  types: LocalExplorerType[] | undefined,
+): LocalExplorerProperty[] {
+  if (!types || types.length === 0) return [];
+  return types.map((type) => ({
+    id: `type:${type.id}`,
+    label: type.label,
+    valueType: "entity-type" as const,
+    description: type.description,
+    icon: type.icon,
+    color: type.color,
+    suggestedFolder: type.suggestedFolder,
+    appliesToTypes: [],
+    createdAt: type.createdAt,
+    updatedAt: type.updatedAt,
+  }));
+}
+
+/**
+ * Converts LogicTypeOverride array to LogicPropertyOverride entries.
+ * Each type override becomes a property override with the corresponding entity-type property ID.
+ * Used during data migration.
+ */
+export function migrateLogicTypeOverridesToPropertyOverrides(
+  typeOverrides: LogicTypeOverride[] | undefined,
+): LogicPropertyOverride[] {
+  if (!typeOverrides || typeOverrides.length === 0) return [];
+  return typeOverrides.map((override) => ({
+    propertyId: `type:${override.typeId}`,
+    source: override.source,
+    grantable: override.grantable,
+    location: override.location,
+  }));
+}
+
+/**
+ * Runs migration utilities on a BranchingProject to convert types to properties.
+ * - Converts localExplorerTypes to localExplorerProperties with entity-type valueType
+ * - Converts logicTypeOverrides to logicPropertyOverrides
+ * - Merges migrated properties with existing properties (types first, then properties)
+ * - Merges migrated overrides with existing overrides
+ * Returns new project with migrated data; original project unchanged.
+ */
+export function migrateProjectTypesToProperties(
+  project: BranchingProject,
+): BranchingProject {
+  const hasLocalTypes = project.localExplorerTypes && project.localExplorerTypes.length > 0;
+  const hasTypeOverrides = project.logicTypeOverrides && project.logicTypeOverrides.length > 0;
+
+  if (!hasLocalTypes && !hasTypeOverrides) {
+    return project; // Nothing to migrate
+  }
+
+  // Check if migration already completed: 
+  // If there are entity-type properties with "type:" prefix, migration is done
+  const existingEntityTypeProps = (project.localExplorerProperties ?? []).filter(
+    (prop) => prop.valueType === "entity-type",
+  );
+  
+  const migrationAlreadyDone = existingEntityTypeProps.length > 0 && 
+    existingEntityTypeProps.every((prop) => prop.id.startsWith("type:"));
+
+  if (migrationAlreadyDone) {
+    return project; // Already migrated, skip to avoid duplicates
+  }
+
+  // Prevent duplicate migration: if we have BOTH types and type-prefixed properties, 
+  // it means migration started but was interrupted - remove the old types array
+  if (hasLocalTypes && existingEntityTypeProps.length > 0) {
+    return {
+      ...project,
+      localExplorerTypes: undefined,
+      logicTypeOverrides: undefined,
+    };
+  }
+
+  const migratedTypeProperties = migrateLocalTypesToProperties(project.localExplorerTypes);
+  const migratedTypeOverrides = migrateLogicTypeOverridesToPropertyOverrides(
+    project.logicTypeOverrides,
+  );
+
+  // Merge properties: migrated types first, then existing properties
+  const mergedProperties = [
+    ...migratedTypeProperties,
+    ...(project.localExplorerProperties ?? []),
+  ];
+
+  // Merge overrides: migrated type overrides first, then existing property overrides
+  const mergedOverrides = [
+    ...migratedTypeOverrides,
+    ...(project.logicPropertyOverrides ?? []),
+  ];
+
+  return {
+    ...project,
+    localExplorerProperties: mergedProperties,
+    logicPropertyOverrides: mergedOverrides.length > 0 ? mergedOverrides : undefined,
+    // Note: localExplorerTypes and logicTypeOverrides remain in the project for backward compat
+    // They will be removed in Phase 6 (Cleanup & Validation)
   };
 }

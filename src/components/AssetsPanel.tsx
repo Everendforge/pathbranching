@@ -84,7 +84,6 @@ export function AssetsPanel({
   onOpenInspector,
   onCreateEntity,
   onDeleteEntity,
-  onCreateType,
   onInitializeProperties,
 }: {
   project: BranchingProject;
@@ -98,7 +97,6 @@ export function AssetsPanel({
   onOpenInspector: (selection: Selection) => void;
   onCreateEntity: (type: string, name: string) => void;
   onDeleteEntity: (id: string) => void;
-  onCreateType: () => void;
   onInitializeProperties?: () => void;
 }) {
   const [query, setQuery] = useState("");
@@ -123,7 +121,12 @@ export function AssetsPanel({
     [deferredQuery, kind, origin, project.assets],
   );
   const allExplorerRows = useMemo(() => explorerRows(project), [project]);
-  const explorerTypes = useMemo(() => Array.from(new Set(["concept", ...allExplorerRows.filter((row) => row.kind !== "data").map((row) => row.type), ...(project.localExplorerTypes ?? []).map((type) => type.id)])).sort((left, right) => left.localeCompare(right)), [allExplorerRows, project.localExplorerTypes]);
+  const propertyTypeMap = useMemo(() => new Map((project.localExplorerProperties ?? []).filter((prop) => prop.valueType === "entity-type").map((prop) => [prop.id, prop.label])), [project.localExplorerProperties]);
+  const explorerTypes = useMemo(() => Array.from(new Set(["concept", ...allExplorerRows.filter((row) => row.kind !== "data").map((row) => row.type), ...(project.localExplorerTypes ?? []).map((type) => type.id), ...(project.localExplorerProperties ?? []).filter((prop) => prop.valueType === "entity-type").map((prop) => prop.id)])).sort((left, right) => {
+    const labelLeft = propertyTypeMap.get(left) || left;
+    const labelRight = propertyTypeMap.get(right) || right;
+    return labelLeft.localeCompare(labelRight);
+  }), [allExplorerRows, project.localExplorerTypes, project.localExplorerProperties, propertyTypeMap]);
   const explorerGroups = useMemo(() => {
     const grouped = new Map<string, ExplorerRow[]>();
     const canonById = new Map(project.canonRefs.map((ref) => [ref.id, ref]));
@@ -139,11 +142,25 @@ export function AssetsPanel({
       return current.kind ?? ref.kind ?? "canon";
     };
     allExplorerRows.filter((row) => (itemFilter === "all" || row.kind === itemFilter) && (!deferredQuery || row.search.includes(deferredQuery))).forEach((row) => {
-      const group = row.kind === "data" ? `Project Data · ${row.type.replace(/^data:/, "")}` : row.kind === "canon" ? displayType(rootCanonType(row.value)) : displayType(row.type);
+      let group: string;
+      if (row.kind === "data") {
+        group = `Project Data · ${row.type.replace(/^data:/, "")}`;
+      } else if (row.kind === "canon") {
+        group = displayType(rootCanonType(row.value));
+      } else {
+        // Check if this type is an entity-type property
+        group = propertyTypeMap.get(row.type) || displayType(row.type);
+      }
       grouped.set(group, [...(grouped.get(group) ?? []), row]);
     });
+    // Add empty groups for entity-type properties that don't have entities
+    (project.localExplorerProperties ?? []).filter((prop) => prop.valueType === "entity-type").forEach((prop) => {
+      if (!grouped.has(prop.label)) {
+        grouped.set(prop.label, []);
+      }
+    });
     return Array.from(grouped.entries()).sort(([left], [right]) => left.localeCompare(right));
-  }, [allExplorerRows, deferredQuery, itemFilter, project.canonRefs]);
+  }, [allExplorerRows, deferredQuery, itemFilter, project.canonRefs, project.localExplorerProperties, propertyTypeMap]);
 
   useEffect(() => {
     if (!isInitialized) {
@@ -198,7 +215,6 @@ export function AssetsPanel({
           <div className="explorer-toolbar">
             <label className="explorer-search"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search items" /></label>
             <button type="button" title="New local entity" onClick={() => setIsCreateModalOpen(true)}><Plus size={15} /></button>
-            <button type="button" title="New local item type" onClick={onCreateType}>Type</button>
             <button type="button" title="Expand all items" onClick={expandAllAssets}><ChevronDown size={15} /></button>
             <button type="button" title="Collapse all items" onClick={collapseAllAssets}><ChevronRight size={15} /></button>
           </div>
@@ -216,12 +232,39 @@ export function AssetsPanel({
                 {expanded ? (() => {
                   const renderRow = (node: ExplorerTreeNode, depth = 0): ReactNode => {
                     const row = node.row;
-                  const rowSelected = selected?.id === row.id && ((row.kind === "canon" && selected.type === "canon") || (row.kind === "local" && selected.type === "explorerEntity") || (row.kind === "data" && selected.type === "dataObject"));
-                  const RowIcon = explorerIconFor(row.type);
-                  return <div className="asset-explorer-tree-node" key={`${row.kind}:${row.id}`} style={{ "--asset-tree-depth": depth } as CSSProperties}><div className={`explorer-entity-row ${rowSelected ? "active" : ""}`}>
-                    <button type="button" className="explorer-entity-open" title={row.label} onPointerDown={() => handleExplorerRowPointerDown(row)} onPointerUp={() => handleExplorerRowPointerUp(row)} onPointerLeave={clearPendingInspectorClick}><RowIcon size={14} /><span className="explorer-entity-name">{row.label}</span><em className={`explorer-origin ${row.source.toLowerCase().replace(/\s+/g, "-")}`}>{row.source}</em></button>
-                    {row.kind === "local" ? <div className="explorer-row-actions"><button type="button" className="icon-only" title={`Actions for ${row.label}`} onClick={() => setActionsForId((current) => current === row.id ? undefined : row.id)}><MoreHorizontal size={15} /></button>{actionsForId === row.id ? <div className="explorer-row-menu"><button type="button" onClick={() => { onOpenInspector(explorerSelection(row)); setActionsForId(undefined); }}>Open inspector</button><button type="button" className="danger" onClick={() => { onDeleteEntity(row.id); setActionsForId(undefined); }}><Trash2 size={13} /> Delete local entity</button></div> : null}</div> : null}
-                  </div>{node.children.length ? <div className="asset-explorer-tree-children">{node.children.map((child) => renderRow(child, depth + 1))}</div> : null}</div>;
+                    const rowSelected = selected?.id === row.id && ((row.kind === "canon" && selected.type === "canon") || (row.kind === "local" && selected.type === "explorerEntity") || (row.kind === "data" && selected.type === "dataObject"));
+                    const RowIcon = explorerIconFor(row.type);
+                    return (
+                      <div className="asset-explorer-tree-node" key={`${row.kind}:${row.id}`} style={{ "--asset-tree-depth": depth } as CSSProperties}>
+                        <div className={`explorer-entity-row ${rowSelected ? "active" : ""}`}>
+                          <button type="button" className="explorer-entity-open" title={row.label} onPointerDown={() => handleExplorerRowPointerDown(row)} onPointerUp={() => handleExplorerRowPointerUp(row)} onPointerLeave={clearPendingInspectorClick}>
+                            <RowIcon size={14} />
+                            <span className="explorer-entity-name">{row.label}</span>
+                            <em className={`explorer-origin ${row.source.toLowerCase().replace(/\s+/g, "-")}`}>{row.source}</em>
+                          </button>
+                          {row.kind === "local" ? (
+                            <div className="explorer-row-actions">
+                              <button type="button" className="icon-only" title={`Actions for ${row.label}`} onClick={() => setActionsForId((current) => current === row.id ? undefined : row.id)}>
+                                <MoreHorizontal size={15} />
+                              </button>
+                              {actionsForId === row.id ? (
+                                <div className="explorer-row-menu">
+                                  <button type="button" onClick={() => { onOpenInspector(explorerSelection(row)); setActionsForId(undefined); }}>Open inspector</button>
+                                  <button type="button" className="danger" onClick={() => { onDeleteEntity(row.id); setActionsForId(undefined); }}>
+                                    <Trash2 size={13} /> Delete local entity
+                                  </button>
+                                </div>
+                              ) : null}
+                            </div>
+                          ) : null}
+                        </div>
+                        {node.children.length ? (
+                          <div className="asset-explorer-tree-children">
+                            {node.children.map((child) => renderRow(child, depth + 1))}
+                          </div>
+                        ) : null}
+                      </div>
+                    );
                   };
                   return explorerRowTree(rows).map((node) => renderRow(node));
                 })() : null}
@@ -275,8 +318,8 @@ export function AssetsPanel({
                   </label>
                   <label>
                     <span>Type</span>
-                    <select value={newEntityType} onChange={(event) => setNewEntityType(event.target.value)}>
-                      {explorerTypes.map((type) => <option key={type} value={type}>{displayType(type)}</option>)}
+                  <select value={newEntityType} onChange={(event) => setNewEntityType(event.target.value)}>
+                      {explorerTypes.map((type) => <option key={type} value={type}>{propertyTypeMap.get(type) || displayType(type)}</option>)}
                     </select>
                   </label>
                 </div>

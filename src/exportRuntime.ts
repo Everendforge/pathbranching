@@ -85,8 +85,7 @@ export function exportRuntimePackage(project: BranchingProject): RuntimePackage 
     automaticTransitions: orderedTransitions(
       (event.transitions ?? []).filter((transition) => transition.from === event.id),
     ),
-    consequences: event.unlocks,
-    ruleSetBindings: event.ruleSetBindings,
+    consequences: event.consequences,
   }));
   const scriptBlocks = new Map(
     (project.scriptDocuments ?? []).flatMap((script) =>
@@ -118,7 +117,7 @@ export function exportRuntimePackage(project: BranchingProject): RuntimePackage 
       characterVariantId: characterRef === UNKNOWN_SPEAKER_REF ? undefined : block?.characterVariantId,
       speakerRef: characterRef === UNKNOWN_SPEAKER_REF ? "unknown" : characterRef ? speakerMappings[characterRef] || characterRef : undefined,
       conditions: beat.displayCondition,
-      ruleSetBindings: beat.ruleSetBindings,
+      consequences: beat.consequences,
       automaticTransitions: orderedTransitions((event.transitions ?? []).filter((transition) => transition.from === id)),
       dialogueId,
       ...(sceneImage ? { sceneImage } : {}),
@@ -137,7 +136,7 @@ export function exportRuntimePackage(project: BranchingProject): RuntimePackage 
         automaticTransitions: orderedTransitions(
           (event.transitions ?? []).filter((transition) => transition.from === containerId),
         ),
-        ruleSetBindings: dialogue.ruleSetBindings,
+        consequences: dialogue.consequences,
       };
       const beats = (dialogue.beats ?? []).map((beat) => runtimeBeat(event, beat, dialogue.id));
       return [container, ...beats];
@@ -204,7 +203,6 @@ export function exportRuntimePackage(project: BranchingProject): RuntimePackage 
       scriptDocuments: project.scriptDocuments,
       integrationConfig: project.integrationConfig,
       integrationConfigOverride: project.integrationConfigOverride,
-      ruleLibrary: project.ruleLibrary,
       externalFunctions: project.externalFunctions,
     },
     engineTargets: project.engineTargets,

@@ -373,4 +373,89 @@ assert.ok(
   "deleting the middle beat must bridge a → c",
 );
 
+// --- Beat consequences round-trip ------------------------------------------
+function beatConsequenceProject() {
+  return {
+    specVersion: "0.1",
+    projectId: "beat-consequence-fixture",
+    canonRefs: [],
+    sequences: [{ id: "seq", name: "S", entryEventId: "e1", eventIds: ["e1"] }],
+    branches: [],
+    scripts: [],
+    externalFunctions: [],
+    variables: {},
+    assets: [],
+    eventCategories: [{ id: "normal", label: "Normal" }],
+    localizationCatalog: {
+      primaryLocale: "es-419",
+      locales: ["es-419"],
+      entries: {
+        "script.s.b1": { values: { "es-419": "Encuentras una espada." } },
+      },
+    },
+    scriptDocuments: [
+      {
+        id: "s",
+        name: "S",
+        format: "forge-script",
+        blocks: [{ id: "b1", kind: "speech", textKey: "script.s.b1", content: "Encuentras una espada." }],
+      },
+    ],
+    events: [
+      {
+        id: "e1",
+        name: "Hallazgo",
+        type: "normal",
+        dialogueBeats: [
+          {
+            id: "beat:a",
+            kind: "speech",
+            blockRef: { scriptId: "s", blockId: "b1" },
+            consequences: [{ type: "addGrantable", entityId: "sword" }],
+          },
+        ],
+        transitions: [{ id: "t1", from: "e1", to: "beat:e1:beat:a", order: 0 }],
+      },
+    ],
+  };
+}
+
+const beatConsProject = beatConsequenceProject();
+const beatConsText = serializeEventEvpath(beatConsProject, "e1");
+
+assert.match(beatConsText, /^Encuentras una espada\. #\^beat:a$/m);
+assert.match(beatConsText, /^    ~ grant sword$/m);
+
+const beatConsIdempotent = applyEvpathToEvent(beatConsProject, "e1", beatConsText);
+assert.equal(beatConsIdempotent.errors.length, 0, JSON.stringify(beatConsIdempotent.errors));
+assert.equal(beatConsIdempotent.changed, false, `expected no changes, warnings: ${beatConsIdempotent.warnings.join(" | ")}`);
+assert.equal(serializeEventEvpath(beatConsIdempotent.project, "e1"), beatConsText);
+
+const beatConsEdited = applyEvpathToEvent(beatConsProject, "e1", beatConsText.replace("~ grant sword", "~ grant shield"));
+assert.equal(beatConsEdited.errors.length, 0);
+const editedConsBeat = beatConsEdited.project.events.find((event) => event.id === "e1").dialogueBeats[0];
+assert.deepEqual(editedConsBeat.consequences, [{ type: "addGrantable", entityId: "shield" }]);
+
+// --- Opaque (guarded) beat consequence is preserved, not reparsed ----------
+function beatOpaqueConsequenceProject() {
+  const base = beatConsequenceProject();
+  base.events[0].dialogueBeats[0].consequences = [
+    {
+      type: "setVariable",
+      name: "flag",
+      value: true,
+      conditions: { type: "variable", name: "seen", operator: "==", value: true },
+    },
+  ];
+  return base;
+}
+const opaqueConsProject = beatOpaqueConsequenceProject();
+const opaqueConsText = serializeEventEvpath(opaqueConsProject, "e1");
+assert.match(opaqueConsText, /^    ~ # set variable$/m);
+const opaqueConsRound = applyEvpathToEvent(opaqueConsProject, "e1", opaqueConsText);
+assert.equal(opaqueConsRound.errors.length, 0, JSON.stringify(opaqueConsRound.errors));
+assert.equal(opaqueConsRound.changed, false, `expected opaque consequence to be preserved, warnings: ${opaqueConsRound.warnings.join(" | ")}`);
+const opaqueConsBeat = opaqueConsRound.project.events.find((event) => event.id === "e1").dialogueBeats[0];
+assert.deepEqual(opaqueConsBeat.consequences[0], opaqueConsProject.events[0].dialogueBeats[0].consequences[0]);
+
 console.log("evpath format verification passed");
