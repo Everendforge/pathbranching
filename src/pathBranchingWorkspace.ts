@@ -303,6 +303,7 @@ type ModularStoryFile = {
   canonEditSuggestions?: BranchingProject["canonEditSuggestions"];
   projectionRules?: BranchingProject["projectionRules"];
   graphModules?: BranchingProject["graphModules"];
+  authoringPreferences?: BranchingProject["authoringPreferences"];
   entrySequenceId?: string;
   eventCategories?: BranchingProject["eventCategories"];
   canonRefs?: BranchingProject["canonRefs"];
@@ -311,6 +312,10 @@ type ModularStoryFile = {
   externalFunctions?: BranchingProject["externalFunctions"];
   variables?: BranchingProject["variables"];
   engineTargets?: BranchingProject["engineTargets"];
+  logicPropertyOverrides?: BranchingProject["logicPropertyOverrides"];
+  localExplorerEntities?: BranchingProject["localExplorerEntities"];
+  localExplorerTypes?: BranchingProject["localExplorerTypes"];
+  localExplorerProperties?: BranchingProject["localExplorerProperties"];
   sequenceIds?: string[];
 };
 
@@ -468,6 +473,7 @@ function parseModularStoryProject(
     graphModules: parsedStory.graphModules,
     canvas: authoring?.canvas,
     panels: authoring?.panels,
+    authoringPreferences: parsedStory.authoringPreferences,
     entrySequenceId: parsedStory.entrySequenceId,
     eventCategories: parsedStory.eventCategories,
     canonRefs: parsedStory.canonRefs ?? [],
@@ -486,6 +492,10 @@ function parseModularStoryProject(
     externalFunctions: parsedStory.externalFunctions ?? [],
     variables: parsedStory.variables ?? {},
     engineTargets: parsedStory.engineTargets,
+    logicPropertyOverrides: parsedStory.logicPropertyOverrides ?? [],
+    localExplorerEntities: parsedStory.localExplorerEntities ?? [],
+    localExplorerTypes: parsedStory.localExplorerTypes ?? [],
+    localExplorerProperties: parsedStory.localExplorerProperties ?? [],
   });
 
   return {
@@ -700,6 +710,7 @@ export function serializeModularStoryFiles(
     canonEditSuggestions: project.canonEditSuggestions,
     projectionRules: project.projectionRules,
     graphModules: project.graphModules,
+    authoringPreferences: project.authoringPreferences,
     entrySequenceId: project.entrySequenceId,
     eventCategories: project.eventCategories,
     canonRefs: project.canonRefs,
@@ -708,6 +719,10 @@ export function serializeModularStoryFiles(
     externalFunctions: project.externalFunctions,
     variables: project.variables,
     engineTargets: project.engineTargets,
+    logicPropertyOverrides: project.logicPropertyOverrides,
+    localExplorerEntities: project.localExplorerEntities,
+    localExplorerTypes: project.localExplorerTypes,
+    localExplorerProperties: project.localExplorerProperties,
     sequenceIds: project.sequences.map((sequence) => sequence.id),
   };
 

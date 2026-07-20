@@ -312,6 +312,42 @@ export function propertySupportsDialogueTrigger(
   return capability?.entityPresentable === true && capability.dialogueTrigger === true;
 }
 
+/**
+ * Generic, temporary list of interaction verbs used as the Dialogue Trigger
+ * "trigger property" until per-entity property wiring is finalized.
+ */
+export const DIALOGUE_TRIGGER_ACTIONS: Array<{ id: string; label: string }> = [
+  { id: "talk", label: "Talk" },
+  { id: "attack", label: "Attack" },
+  { id: "inspect", label: "Inspect" },
+  { id: "use", label: "Use" },
+  { id: "trade", label: "Trade" },
+];
+
+/**
+ * Verifies an entity is correctly configured to appear as a Dialogue Trigger:
+ * it owns at least one property marked both Entity presentable and Dialogue Trigger.
+ */
+export function entitySupportsDialogueTrigger(
+  project: Pick<BranchingProject, "logicPropertyOverrides">,
+  ref: { kind?: string; properties?: Record<string, unknown>; frontmatter?: Record<string, unknown> },
+): boolean {
+  const hasOwnProperty = (propertyId: string) =>
+    [ref.properties, ref.frontmatter].some(
+      (record) => Boolean(record && Object.prototype.hasOwnProperty.call(record, propertyId)),
+    );
+  if (ref.kind && propertySupportsDialogueTrigger(project, "canon", `type:${ref.kind}`)) {
+    return true;
+  }
+  return (project.logicPropertyOverrides ?? []).some(
+    (override) =>
+      override.source === "canon" &&
+      override.entityPresentable === true &&
+      override.dialogueTrigger === true &&
+      hasOwnProperty(override.propertyId),
+  );
+}
+
 export function createLocalExplorerType(
   now = new Date().toISOString(),
 ): LocalExplorerType {
@@ -325,12 +361,14 @@ export function createLocalExplorerType(
 }
 
 export function createLocalExplorerProperty(
+  label = "New local property",
+  valueType: LocalExplorerProperty["valueType"] = "text",
   now = new Date().toISOString(),
 ): LocalExplorerProperty {
   return {
     id: `property:local-${Date.now().toString(36)}`,
-    label: "New local property",
-    valueType: "text",
+    label,
+    valueType,
     appliesToTypes: [],
     createdAt: now,
     updatedAt: now,

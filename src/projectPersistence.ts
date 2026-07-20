@@ -299,6 +299,44 @@ export async function saveProjectAsDialog(project: BranchingProject): Promise<Wr
   return result ?? undefined;
 }
 
+/**
+ * Initializes a properties.json file in the .everend directory using a standard template.
+ * Based on the ESTRELLAS CORRUPTAS universe structure.
+ */
+export async function initializePropertiesFile(universePath: string): Promise<WriteResult> {
+  assertDesktopRuntime("Initializing properties file");
+  
+  // Template based on ESTRELLAS CORRUPTAS structure
+  const propertiesTemplate = {
+    "version": "3.0",
+    "baseProperties": {
+      "definitions": [
+        { "id": "id", "label": "ID", "description": "Unique identifier", "type": "text", "immutable": true, "readOnly": true, "required": true, "order": 0 },
+        { "id": "name", "label": "Name", "description": "Entity name", "type": "text", "immutable": true, "required": true, "order": 1 },
+        { "id": "type", "label": "Type", "description": "Entity type", "type": "select", "immutable": true, "required": true, "order": 2, "options": [{ "value": "character", "label": "Character", "color": "#3b82f6" }, { "value": "location", "label": "Location", "color": "#10b981" }, { "value": "organization", "label": "Organization", "color": "#f59e0b" }, { "value": "concept", "label": "Concept", "color": "#8b5cf6" }, { "value": "item", "label": "Item", "color": "#ec4899" }, { "value": "cycle", "label": "Cycle", "color": "#14b8a6" }, { "value": "universe", "label": "Universe", "color": "#a855f7" }, { "value": "scene", "label": "Scene", "color": "#f97316" }, { "value": "world", "label": "World" }, { "value": "chronology", "label": "Chronology" }] },
+        { "id": "status", "label": "Status", "description": "Canon or editorial state", "type": "select", "immutable": true, "required": true, "order": 3, "options": [{ "value": "draft", "label": "Draft", "color": "#6b7280" }, { "value": "in-progress", "label": "In Progress", "color": "#f59e0b" }, { "value": "review", "label": "Review", "color": "#3b82f6" }, { "value": "published", "label": "Published", "color": "#10b981" }, { "value": "archived", "label": "Archived", "color": "#6b7280" }] },
+        { "id": "tags", "label": "Tags", "description": "Search and grouping labels", "type": "text", "immutable": true, "order": 4 },
+        { "id": "aliases", "label": "Aliases", "description": "Alternate display names or wikilink candidates", "type": "text", "immutable": true, "order": 5 },
+        { "id": "parentId", "label": "Parent", "description": "Stable ID of a parent entity", "type": "entity-ref", "immutable": true, "targetTypes": ["character", "location", "organization", "event", "concept", "item", "world", "cycle", "universe", "story", "arc", "scene", "quest"], "order": 6 },
+        { "id": "childrenIds", "label": "Children", "description": "Stable IDs of explicit child entities", "type": "entity-ref-list", "immutable": true, "targetTypes": ["character", "location", "organization", "event", "concept", "item", "world", "cycle", "universe", "story", "arc", "scene", "quest"], "order": 7 }
+      ],
+      "visibleByDefault": ["type", "status", "aliases", "parentId", "childrenIds"],
+      "order": ["id", "name", "type", "status", "tags", "aliases", "parentId", "childrenIds"]
+    },
+    "tags": { "rootNodes": [], "allowCustomTags": true, "autoDetectSlashNotation": true },
+    "contentTypes": { "definitions": [{ "id": "folder-description", "label": "Folder Note", "description": "Special note that describes a folder", "icon": "folder", "color": "#64748b", "immutable": true }] },
+    "entityTypes": { "definitions": [{ "id": "character", "label": "Character", "description": "Person, creature, or viewpoint actor", "icon": "user", "color": "#3b82f6", "customFields": ["lore-level", "identity", "narrative", "portrait"], "visibleProperties": ["type", "status", "aliases"], "propertyOrder": ["type", "status", "aliases", "lore-level", "identity", "narrative", "portrait"], "presentation": { "portraitPropertyId": "portrait" } }, { "id": "location", "label": "Location", "description": "Place, region, settlement, or site", "icon": "map-pin", "color": "#10b981", "customFields": ["lore-level", "place"], "visibleProperties": ["type", "status", "aliases", "parentId", "childrenIds"], "propertyOrder": ["type", "status", "aliases", "parentId", "childrenIds", "lore-level", "place"], "hiddenProperties": ["status"] }, { "id": "organization", "label": "Organization", "description": "Faction, institution, house, or guild", "icon": "users", "color": "#f59e0b", "customFields": ["lore-level", "identity"], "visibleProperties": ["type", "status", "aliases", "parentId", "childrenIds"], "propertyOrder": ["type", "status", "aliases", "parentId", "childrenIds", "lore-level", "identity"] }, { "id": "concept", "label": "Concept", "description": "Idea, law, magic rule, or abstract note", "icon": "lightbulb", "color": "#8b5cf6", "customFields": ["lore-level"], "visibleProperties": ["type", "status", "parentId", "childrenIds", "lore-level"], "propertyOrder": ["type", "status", "parentId", "childrenIds", "lore-level"], "hiddenProperties": ["aliases", "lore-level", "status"] }, { "id": "item", "label": "Item", "description": "Object, relic, tool, or artifact", "icon": "package", "color": "#ec4899", "customFields": ["lore-level", "identity", "place", "item-details"], "visibleProperties": ["type", "status", "aliases", "parentId", "childrenIds"], "propertyOrder": ["type", "status", "aliases", "parentId", "childrenIds", "lore-level", "identity", "place", "item-details"] }, { "id": "cycle", "label": "Cycle", "description": "Era, cycle, age, or large continuity span", "icon": "refresh-cw", "color": "#14b8a6", "customFields": ["lore-level"], "visibleProperties": ["type", "status", "aliases", "parentId", "childrenIds"], "propertyOrder": ["type", "status", "aliases", "parentId", "childrenIds", "lore-level"] }, { "id": "universe", "label": "Universe", "description": "Top-level canon container or cosmology", "icon": "sparkles", "color": "#a855f7", "customFields": ["lore-level"], "visibleProperties": ["type", "status", "aliases", "parentId", "childrenIds"], "propertyOrder": ["type", "status", "aliases", "parentId", "childrenIds", "lore-level"] }, { "id": "scene", "customFields": [], "label": "Scene", "color": "#f97316", "hiddenProperties": ["aliases"] }, { "id": "world", "customFields": [], "label": "World", "hiddenProperties": ["status"] }, { "id": "chronology", "customFields": [], "label": "Chronology", "hiddenProperties": ["aliases"] }], "defaultType": "concept", "allowCustomTypes": true },
+    "statuses": { "definitions": [{ "id": "draft", "label": "Draft", "description": "Work in progress", "color": "#6b7280", "order": 0 }, { "id": "in-progress", "label": "In Progress", "description": "Actively being worked on", "color": "#f59e0b", "order": 1 }, { "id": "review", "label": "Review", "description": "Ready for review", "color": "#3b82f6", "order": 2 }, { "id": "published", "label": "Published", "description": "Finalized and approved", "color": "#10b981", "order": 3 }, { "id": "archived", "label": "Archived", "description": "No longer active", "color": "#6b7280", "order": 4 }], "defaultStatus": "draft", "allowCustomStatuses": true },
+    "customFields": { "definitions": [{ "id": "lore-level", "label": "Lore Level", "type": "select", "description": "Level of detail or canonicity for this entity", "required": false, "options": [{ "value": "canon", "label": "Canon", "color": "#10b981" }, { "value": "semi-canon", "label": "Semi-canon", "color": "#f59e0b" }, { "value": "draft", "label": "Draft", "color": "#64748b" }, { "value": "idea", "label": "Idea", "color": "#94a3b8" }], "children": [], "appliesTo": ["character", "location", "organization", "item", "cycle", "universe"] }], "globalFields": ["lore-level"] }
+  };
+  
+  return saveUniverseTextFile(
+    universePath,
+    ".everend/properties.json",
+    JSON.stringify(propertiesTemplate, null, 2),
+  );
+}
+
 export async function exportRuntimeDialog(runtimePackage: RuntimePackage): Promise<WriteResult | undefined> {
   return exportTextDialog(`${JSON.stringify(runtimePackage, null, 2)}\n`, "runtime-package.json");
 }

@@ -1,8 +1,10 @@
-import { BookOpen, ChevronDown, ChevronRight, CircleDot, FileImage, FileText, Film, FolderUp, MapPin, MoreHorizontal, Music, Package, Plus, Search, Trash2, UserRound } from "lucide-react";
-import { useDeferredValue, useMemo, useState, type ComponentType, type CSSProperties, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import { BookOpen, ChevronDown, ChevronRight, CircleDot, FileImage, FileText, Film, FolderUp, MapPin, MoreHorizontal, Music, Package, Plus, Search, Trash2, UserRound, X } from "lucide-react";
+import { useDeferredValue, useEffect, useMemo, useRef, useState, type ComponentType, type CSSProperties, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import type { Selection } from "../appTypes.js";
 import type { AssetKind, BranchingProject, CanonRef, LocalExplorerEntity, ProjectAsset, ProjectDataObject } from "../domain.js";
 import { WorkspaceSidePanel } from "./WorkspaceSidePanel.js";
+
+const CLICK_SEQUENCE_WINDOW_MS = 360;
 
 const kinds: Array<{ id: AssetKind | "all"; label: string }> = [
   { id: "all", label: "All" },
@@ -72,26 +74,32 @@ function explorerRowTree(rows: ExplorerRow[]): ExplorerTreeNode[] {
 
 export function AssetsPanel({
   project,
+  propertiesConfig,
   collapsed,
   onCollapsedChange,
   onContextMenu,
   onImport,
   selected,
   onSelect,
+  onOpenInspector,
   onCreateEntity,
   onDeleteEntity,
   onCreateType,
+  onInitializeProperties,
 }: {
   project: BranchingProject;
+  propertiesConfig?: Record<string, unknown>;
   collapsed: boolean;
   onCollapsedChange: (collapsed: boolean) => void;
   onContextMenu: (event: ReactMouseEvent<HTMLElement>) => void;
   onImport: () => void;
   selected?: Selection;
   onSelect: (selection: Selection) => void;
-  onCreateEntity: (type: string) => void;
+  onOpenInspector: (selection: Selection) => void;
+  onCreateEntity: (type: string, name: string) => void;
   onDeleteEntity: (id: string) => void;
   onCreateType: () => void;
+  onInitializeProperties?: () => void;
 }) {
   const [query, setQuery] = useState("");
   const [kind, setKind] = useState<AssetKind | "all">("all");
@@ -101,6 +109,10 @@ export function AssetsPanel({
   const [newEntityType, setNewEntityType] = useState("concept");
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => new Set());
   const [actionsForId, setActionsForId] = useState<string>();
+  const [isInitialized, setIsInitialized] = useState(false);
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [newEntityName, setNewEntityName] = useState("");
+  const pendingInspectorClickRef = useRef<{ rowId: string; timer: number } | undefined>(undefined);
   const deferredQuery = useDeferredValue(query.trim().toLowerCase());
   const assets = useMemo(
     () => (project.assets ?? []).filter((asset) =>
@@ -133,6 +145,48 @@ export function AssetsPanel({
     return Array.from(grouped.entries()).sort(([left], [right]) => left.localeCompare(right));
   }, [allExplorerRows, deferredQuery, itemFilter, project.canonRefs]);
 
+  useEffect(() => {
+    if (!isInitialized) {
+      setCollapsedGroups(new Set(explorerGroups.map(([group]) => group)));
+      setIsInitialized(true);
+    }
+  }, [explorerGroups, isInitialized]);
+
+  const expandAllAssets = () => setCollapsedGroups(new Set());
+  const collapseAllAssets = () => setCollapsedGroups(new Set(explorerGroups.map(([group]) => group)));
+
+  const handleCreateEntity = () => {
+    const trimmedName = newEntityName.trim();
+    if (!trimmedName) return;
+    onCreateEntity(newEntityType, trimmedName);
+    setIsCreateModalOpen(false);
+    setNewEntityName("");
+  };
+
+  const clearPendingInspectorClick = () => {
+    if (pendingInspectorClickRef.current) {
+      window.clearTimeout(pendingInspectorClickRef.current.timer);
+      pendingInspectorClickRef.current = undefined;
+    }
+  };
+
+  const handleExplorerRowPointerDown = (row: ExplorerRow) => {
+    clearPendingInspectorClick();
+    const selection = explorerSelection(row);
+    const timer = window.setTimeout(() => {
+      onOpenInspector(selection);
+      pendingInspectorClickRef.current = undefined;
+    }, CLICK_SEQUENCE_WINDOW_MS);
+    pendingInspectorClickRef.current = { rowId: row.id, timer };
+  };
+
+  const handleExplorerRowPointerUp = (row: ExplorerRow) => {
+    if (pendingInspectorClickRef.current) {
+      clearPendingInspectorClick();
+      onSelect(explorerSelection(row));
+    }
+  };
+
   return (
     <WorkspaceSidePanel title="Assets" side="left" collapsed={collapsed} onCollapsedChange={onCollapsedChange} onContextMenu={onContextMenu}>
       <div className="explorer-view-tabs" role="tablist" aria-label="Asset views">
@@ -143,11 +197,10 @@ export function AssetsPanel({
         <>
           <div className="explorer-toolbar">
             <label className="explorer-search"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search items" /></label>
-            <select value={newEntityType} onChange={(event) => setNewEntityType(event.target.value)} aria-label="New entity type">
-              {explorerTypes.map((type) => <option key={type} value={type}>{displayType(type)}</option>)}
-            </select>
-            <button type="button" title="New local entity" onClick={() => onCreateEntity(newEntityType)}><Plus size={15} /></button>
+            <button type="button" title="New local entity" onClick={() => setIsCreateModalOpen(true)}><Plus size={15} /></button>
             <button type="button" title="New local item type" onClick={onCreateType}>Type</button>
+            <button type="button" title="Expand all items" onClick={expandAllAssets}><ChevronDown size={15} /></button>
+            <button type="button" title="Collapse all items" onClick={collapseAllAssets}><ChevronRight size={15} /></button>
           </div>
           <div className="explorer-filter-row" role="tablist" aria-label="Item origin filter">
             {(["all", "canon", "local", "data"] as const).map((value) => <button key={value} type="button" className={itemFilter === value ? "active" : ""} onClick={() => setItemFilter(value)}>{value === "all" ? "All" : value === "data" ? "Data" : value === "canon" ? "Canon" : "Local"}</button>)}
@@ -166,16 +219,74 @@ export function AssetsPanel({
                   const rowSelected = selected?.id === row.id && ((row.kind === "canon" && selected.type === "canon") || (row.kind === "local" && selected.type === "explorerEntity") || (row.kind === "data" && selected.type === "dataObject"));
                   const RowIcon = explorerIconFor(row.type);
                   return <div className="asset-explorer-tree-node" key={`${row.kind}:${row.id}`} style={{ "--asset-tree-depth": depth } as CSSProperties}><div className={`explorer-entity-row ${rowSelected ? "active" : ""}`}>
-                    <button type="button" className="explorer-entity-open" title={row.label} onClick={() => onSelect(explorerSelection(row))}><RowIcon size={14} /><span className="explorer-entity-name">{row.label}</span><em className={`explorer-origin ${row.source.toLowerCase().replace(/\s+/g, "-")}`}>{row.source}</em></button>
-                    {row.kind === "local" ? <div className="explorer-row-actions"><button type="button" className="icon-only" title={`Actions for ${row.label}`} onClick={() => setActionsForId((current) => current === row.id ? undefined : row.id)}><MoreHorizontal size={15} /></button>{actionsForId === row.id ? <div className="explorer-row-menu"><button type="button" onClick={() => { onSelect(explorerSelection(row)); setActionsForId(undefined); }}>Open inspector</button><button type="button" className="danger" onClick={() => { onDeleteEntity(row.id); setActionsForId(undefined); }}><Trash2 size={13} /> Delete local entity</button></div> : null}</div> : null}
+                    <button type="button" className="explorer-entity-open" title={row.label} onPointerDown={() => handleExplorerRowPointerDown(row)} onPointerUp={() => handleExplorerRowPointerUp(row)} onPointerLeave={clearPendingInspectorClick}><RowIcon size={14} /><span className="explorer-entity-name">{row.label}</span><em className={`explorer-origin ${row.source.toLowerCase().replace(/\s+/g, "-")}`}>{row.source}</em></button>
+                    {row.kind === "local" ? <div className="explorer-row-actions"><button type="button" className="icon-only" title={`Actions for ${row.label}`} onClick={() => setActionsForId((current) => current === row.id ? undefined : row.id)}><MoreHorizontal size={15} /></button>{actionsForId === row.id ? <div className="explorer-row-menu"><button type="button" onClick={() => { onOpenInspector(explorerSelection(row)); setActionsForId(undefined); }}>Open inspector</button><button type="button" className="danger" onClick={() => { onDeleteEntity(row.id); setActionsForId(undefined); }}><Trash2 size={13} /> Delete local entity</button></div> : null}</div> : null}
                   </div>{node.children.length ? <div className="asset-explorer-tree-children">{node.children.map((child) => renderRow(child, depth + 1))}</div> : null}</div>;
                   };
                   return explorerRowTree(rows).map((node) => renderRow(node));
                 })() : null}
               </section>;
             })}
-            {explorerGroups.length === 0 ? <span className="empty-line">No items match this search.</span> : null}
+            {explorerGroups.length === 0 && !propertiesConfig ? (
+              <div className="empty-state" style={{ padding: "16px", textAlign: "center" }}>
+                <span className="empty-line" style={{ display: "block", marginBottom: "12px" }}>No properties configured. Initialize to see canon references.</span>
+                <button 
+                  type="button" 
+                  onClick={onInitializeProperties}
+                  style={{
+                    padding: "8px 16px",
+                    backgroundColor: "#3b82f6",
+                    color: "white",
+                    border: "none",
+                    borderRadius: "4px",
+                    cursor: "pointer",
+                    fontSize: "14px"
+                  }}
+                >
+                  <Plus size={14} style={{ marginRight: "6px", verticalAlign: "middle" }} />
+                  Initialize Properties
+                </button>
+              </div>
+            ) : explorerGroups.length === 0 ? (
+              <span className="empty-line">No items match this search.</span>
+            ) : null}
           </div>
+          {isCreateModalOpen ? (
+            <div className="modal-overlay" onClick={() => setIsCreateModalOpen(false)}>
+              <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+                <header className="modal-header">
+                  <h3>Create New Entity</h3>
+                  <button type="button" className="icon-only" onClick={() => setIsCreateModalOpen(false)}><X size={16} /></button>
+                </header>
+                <div className="modal-body">
+                  <label>
+                    <span>Name</span>
+                    <input
+                      type="text"
+                      value={newEntityName}
+                      onChange={(e) => setNewEntityName(e.target.value)}
+                      placeholder="Entity name"
+                      autoFocus
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") handleCreateEntity();
+                        if (e.key === "Escape") setIsCreateModalOpen(false);
+                      }}
+                    />
+                  </label>
+                  <label>
+                    <span>Type</span>
+                    <select value={newEntityType} onChange={(event) => setNewEntityType(event.target.value)}>
+                      {explorerTypes.map((type) => <option key={type} value={type}>{displayType(type)}</option>)}
+                    </select>
+                  </label>
+                </div>
+                <footer className="modal-footer">
+                  <button type="button" onClick={() => setIsCreateModalOpen(false)}>Cancel</button>
+                  <button type="button" className="primary" onClick={handleCreateEntity} disabled={!newEntityName.trim()}>Create</button>
+                </footer>
+              </div>
+            </div>
+          ) : null}
         </>
       ) : (
         <>

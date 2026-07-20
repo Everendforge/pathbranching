@@ -67,9 +67,6 @@ export type AuthoringDisplaySettings = {
   showDialogueCount: boolean;
   showCharacterCount: boolean;
   showWordCount: boolean;
-  speechBeatCounterEnabled: boolean;
-  speechBeatCounterUnit: "words" | "characters";
-  speechBeatCounterTarget: number;
 };
 
 export type NodeColorSettings = {
@@ -133,9 +130,6 @@ export const DEFAULT_AUTHORING_DISPLAY_SETTINGS: AuthoringDisplaySettings = {
   showDialogueCount: true,
   showCharacterCount: true,
   showWordCount: false,
-  speechBeatCounterEnabled: true,
-  speechBeatCounterUnit: "characters",
-  speechBeatCounterTarget: 120,
 };
 
 export type PathBranchingWorkspaceSession = {
@@ -188,9 +182,6 @@ export function normalizeAuthoringDisplaySettings(value: unknown): AuthoringDisp
     ? (value as Partial<AuthoringDisplaySettings>)
     : {};
   const hasCharacterCountSetting = typeof settings.showCharacterCount === "boolean";
-  const target = typeof settings.speechBeatCounterTarget === "number" && Number.isFinite(settings.speechBeatCounterTarget)
-    ? Math.min(2000, Math.max(1, Math.round(settings.speechBeatCounterTarget)))
-    : DEFAULT_AUTHORING_DISPLAY_SETTINGS.speechBeatCounterTarget;
   return {
     showDecisionCount: typeof settings.showDecisionCount === "boolean" ? settings.showDecisionCount : DEFAULT_AUTHORING_DISPLAY_SETTINGS.showDecisionCount,
     showOutcomeCount: typeof settings.showOutcomeCount === "boolean" ? settings.showOutcomeCount : DEFAULT_AUTHORING_DISPLAY_SETTINGS.showOutcomeCount,
@@ -199,9 +190,6 @@ export function normalizeAuthoringDisplaySettings(value: unknown): AuthoringDisp
     showWordCount: hasCharacterCountSetting && typeof settings.showWordCount === "boolean"
       ? settings.showWordCount
       : DEFAULT_AUTHORING_DISPLAY_SETTINGS.showWordCount,
-    speechBeatCounterEnabled: typeof settings.speechBeatCounterEnabled === "boolean" ? settings.speechBeatCounterEnabled : DEFAULT_AUTHORING_DISPLAY_SETTINGS.speechBeatCounterEnabled,
-    speechBeatCounterUnit: settings.speechBeatCounterUnit === "words" ? "words" : "characters",
-    speechBeatCounterTarget: target,
   };
 }
 

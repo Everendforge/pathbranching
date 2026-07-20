@@ -381,6 +381,22 @@ export type SpeechBeatLengthTarget = {
   target: number;
 };
 
+/**
+ * Universe-scoped default for the speech-beat length counter. Persisted with
+ * the project so the preference travels with the universe instead of living in
+ * local application settings. Individual events may still override it through
+ * their own {@link SpeechBeatLengthTarget}.
+ */
+export type SpeechBeatCounterPreference = {
+  enabled: boolean;
+  unit: "words" | "characters";
+  target: number;
+};
+
+export type AuthoringPreferences = {
+  speechBeatCounter?: SpeechBeatCounterPreference;
+};
+
 export type EventNode = {
   id: string;
   legacyId?: string;
@@ -804,6 +820,7 @@ export type BranchingProject = {
   graphModules?: GraphModuleDefinition[];
   canvas?: CanvasAuthoringState;
   panels?: PanelAuthoringState;
+  authoringPreferences?: AuthoringPreferences;
   entrySequenceId?: string;
   eventCategories?: EventCategoryDefinition[];
   canonRefs: CanonRef[];

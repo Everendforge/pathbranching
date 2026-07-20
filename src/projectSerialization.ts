@@ -1,4 +1,5 @@
 import type {
+  AuthoringPreferences,
   BranchingProject,
   DataClassDefinition,
   DialogueNode,
@@ -7,6 +8,7 @@ import type {
   LogicVariable,
   LogicVariableGroup,
   ScriptDocument,
+  SpeechBeatCounterPreference,
   Transition,
 } from "./domain.js";
 import { normalizeBranchMembership } from "./storyOutlineModel.js";
@@ -120,6 +122,43 @@ function labelFromCategoryId(id: string) {
       .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
       .join(" ") || id
   );
+}
+
+export const DEFAULT_SPEECH_BEAT_COUNTER_PREFERENCE: SpeechBeatCounterPreference = {
+  enabled: true,
+  unit: "characters",
+  target: 120,
+};
+
+function normalizeSpeechBeatCounterPreference(
+  value: unknown,
+): SpeechBeatCounterPreference {
+  const source =
+    value && typeof value === "object"
+      ? (value as Partial<SpeechBeatCounterPreference>)
+      : {};
+  const target =
+    typeof source.target === "number" && Number.isFinite(source.target)
+      ? Math.min(2000, Math.max(1, Math.round(source.target)))
+      : DEFAULT_SPEECH_BEAT_COUNTER_PREFERENCE.target;
+  return {
+    enabled:
+      typeof source.enabled === "boolean"
+        ? source.enabled
+        : DEFAULT_SPEECH_BEAT_COUNTER_PREFERENCE.enabled,
+    unit: source.unit === "words" ? "words" : "characters",
+    target,
+  };
+}
+
+function normalizeAuthoringPreferences(
+  project: BranchingProject,
+): AuthoringPreferences {
+  return {
+    speechBeatCounter: normalizeSpeechBeatCounterPreference(
+      project.authoringPreferences?.speechBeatCounter,
+    ),
+  };
 }
 
 function normalizeEventCategories(
@@ -402,6 +441,7 @@ export function normalizeProject(project: BranchingProject): BranchingProject {
       activeScope,
       scopes: project.canvas?.scopes ?? {},
     },
+    authoringPreferences: normalizeAuthoringPreferences(project),
     entrySequenceId,
     eventCategories: normalizeEventCategories(project),
     canonRefs: project.canonRefs ?? [],

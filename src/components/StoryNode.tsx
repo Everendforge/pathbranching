@@ -1,13 +1,79 @@
 import { Handle, NodeToolbar, Position, type NodeProps, type NodeTypes } from "@xyflow/react";
-import { useEffect, useRef, useState, type CSSProperties, type MouseEvent, type PointerEvent } from "react";
-import { AlignLeft, BookOpen, ChevronDown, ChevronUp, CircleDot, CircleHelp, FileText, GitBranch, ImagePlus, MessageSquare, Split, Trash2, UserRound, X } from "lucide-react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type MouseEvent, type PointerEvent } from "react";
+import { AlignLeft, BookOpen, ChevronDown, ChevronUp, CircleDot, CircleHelp, Clapperboard, FileText, GitBranch, ImagePlus, MessageSquare, Plus, Split, Trash2, UserRound, X } from "lucide-react";
 import type { CanvasInfoBadge, StoryCanvasNode, StoryCanvasNodeData } from "../canvas/storyCanvasModel.js";
 import type { Outcome, SceneImageAttachment } from "../domain.js";
 import type { LocaleNames } from "../localization.js";
 import { UNKNOWN_SPEAKER_REF, speakerLabel } from "../speakerRoles.js";
+import { SpeakerSelector } from "./SpeakerSelector.js";
 
 function badgeText(value: string) {
   return value.length > 22 ? `${value.slice(0, 19)}...` : value;
+}
+
+const BEAT_FONT_MIN_PX = 12;
+const BEAT_FONT_MAX_PX = 38;
+
+/**
+ * Builds a representative filler string of the requested size so the baseline
+ * dialogue font can be sized against the counter maximum instead of the
+ * current content. Uses average-width lowercase characters and typical word
+ * lengths so the baseline reflects realistic text density rather than the
+ * widest possible glyphs (which left the box looking half-empty).
+ */
+function buildBeatFillerString(count: number, unit: "words" | "characters") {
+  const safeCount = Math.max(1, Math.min(4000, Math.round(count)));
+  if (unit === "words") {
+    return Array.from({ length: safeCount }, () => "men").join(" ");
+  }
+  let filler = "";
+  while (filler.length < safeCount) {
+    filler += "men ";
+  }
+  return filler.slice(0, safeCount);
+}
+
+/**
+ * Binary-searches the largest font size (within bounds) at which `text` fits
+ * inside a detached clone of the beat content element, so measuring never
+ * disturbs the live contentEditable selection.
+ */
+function measureBeatFontFit(reference: HTMLDivElement, text: string) {
+  const clone = reference.cloneNode(false) as HTMLDivElement;
+  clone.removeAttribute("contenteditable");
+  clone.removeAttribute("role");
+  clone.style.position = "absolute";
+  clone.style.left = "-99999px";
+  clone.style.top = "0";
+  clone.style.visibility = "hidden";
+  clone.style.pointerEvents = "none";
+  clone.style.width = `${reference.clientWidth}px`;
+  clone.style.height = `${reference.clientHeight}px`;
+  clone.style.overflow = "hidden";
+  clone.textContent = text;
+  reference.parentElement?.appendChild(clone);
+  const fitsAt = (px: number) => {
+    clone.style.fontSize = `${px}px`;
+    return clone.scrollHeight <= clone.clientHeight;
+  };
+  let result = BEAT_FONT_MIN_PX;
+  if (fitsAt(BEAT_FONT_MAX_PX)) {
+    result = BEAT_FONT_MAX_PX;
+  } else {
+    let low = BEAT_FONT_MIN_PX;
+    let high = BEAT_FONT_MAX_PX;
+    while (high - low > 0.5) {
+      const mid = (low + high) / 2;
+      if (fitsAt(mid)) {
+        low = mid;
+      } else {
+        high = mid;
+      }
+    }
+    result = low;
+  }
+  clone.remove();
+  return result;
 }
 
 const infoBadgeLabels: Record<CanvasInfoBadge["kind"], string> = {
@@ -96,6 +162,18 @@ type BeatQuickEditor = {
   characterRef?: string;
   characterVariantId?: string;
   textCounter?: { count: number; unit: "words" | "characters"; target: number };
+  counterPreference?: {
+    enabled: boolean;
+    unit: "words" | "characters";
+    target: number;
+    eventOverride?: boolean;
+  };
+  onCounterPreferenceUpdate?: (updates: {
+    enabled?: boolean;
+    unit?: "words" | "characters";
+    target?: number;
+  }) => void;
+  presentEntityIds?: string[];
   speakerOptions: Array<{
     id: string;
     label: string;
@@ -109,6 +187,9 @@ type BeatQuickEditor = {
   onAuxiliaryPanelChange?: (panel: "directorNote" | "sceneImage", open: boolean) => void;
   onCharacterUpdate: (characterRef?: string) => void;
   onCharacterVariantUpdate?: (variantId: string) => void;
+  beatConnector?: {
+    onConnect: (kind: "speechBeat" | "decision" | "directionBeat") => void;
+  };
 };
 
 type EventCoverImage = {
@@ -147,6 +228,33 @@ function isBeatQuickEditor(value: unknown): value is BeatQuickEditor {
     Array.isArray((value as BeatQuickEditor).languages) &&
     Array.isArray((value as BeatQuickEditor).speakerOptions) &&
     typeof (value as BeatQuickEditor).onTextUpdate === "function",
+  );
+}
+
+type DialogueTriggerEditor = {
+  speakerOptions: Array<{
+    id: string;
+    label: string;
+    portraitUrl?: string;
+    variants: Array<{ id: string; label: string; portraitUrl?: string }>;
+  }>;
+  presentEntityIds: string[];
+  selectedCharacterId?: string;
+  triggerActions: Array<{ id: string; label: string }>;
+  selectedActionId?: string;
+  onCharacterChange: (characterId?: string) => void;
+  onActionChange: (actionId?: string) => void;
+};
+
+function isDialogueTriggerEditor(value: unknown): value is DialogueTriggerEditor {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      Array.isArray((value as DialogueTriggerEditor).speakerOptions) &&
+      Array.isArray((value as DialogueTriggerEditor).presentEntityIds) &&
+      Array.isArray((value as DialogueTriggerEditor).triggerActions) &&
+      typeof (value as DialogueTriggerEditor).onCharacterChange === "function" &&
+      typeof (value as DialogueTriggerEditor).onActionChange === "function",
   );
 }
 
@@ -217,6 +325,8 @@ function StoryNode({ id, data, selected }: NodeProps<StoryCanvasNode>) {
   const nodeData = data as StoryCanvasNodeData;
   const [openBeatMenu, setOpenBeatMenu] = useState(false);
   const [editingDecisionOptionId, setEditingDecisionOptionId] = useState<string>();
+  const [connectorMenuOpen, setConnectorMenuOpen] = useState(false);
+  const connectorRef = useRef<HTMLDivElement>(null);
   const decisionEditorRef = useRef<HTMLDivElement>(null);
   const quickEditor = isBeatQuickEditor(nodeData.details?.quickEditor)
     ? nodeData.details.quickEditor
@@ -251,11 +361,82 @@ function StoryNode({ id, data, selected }: NodeProps<StoryCanvasNode>) {
   const setAuxiliaryPanelOpen = (panel: "directorNote" | "sceneImage", open: boolean) =>
     quickEditor?.onAuxiliaryPanelChange?.(panel, open);
   const beatContentRef = useRef<HTMLDivElement>(null);
+  const counterEditorRef = useRef<HTMLDivElement>(null);
+  const [counterEditorOpen, setCounterEditorOpen] = useState(false);
+  const beatCounterTarget = quickEditor?.textCounter?.target;
+  const beatCounterUnit = quickEditor?.textCounter?.unit;
+  // Size the dialogue text against the counter maximum (worst-case filler) so
+  // the baseline stays stable no matter how much has been typed. The font only
+  // shrinks below that baseline once the actual content exceeds the maximum. If
+  // even the minimum size cannot contain the content, fall back to internal
+  // scrolling (the counter remains the only overflow cue).
+  const fitBeatText = useCallback(() => {
+    const element = beatContentRef.current;
+    if (!element || element.clientHeight <= 0) return;
+    const baselineFont = beatCounterTarget && beatCounterTarget > 0
+      ? measureBeatFontFit(element, buildBeatFillerString(beatCounterTarget, beatCounterUnit ?? "characters"))
+      : BEAT_FONT_MAX_PX;
+    const actualText = element.textContent ?? "";
+    const contentFont = actualText.trim()
+      ? measureBeatFontFit(element, actualText)
+      : BEAT_FONT_MAX_PX;
+    const size = Math.max(
+      BEAT_FONT_MIN_PX,
+      Math.min(baselineFont, contentFont),
+    );
+    element.style.fontSize = `${size}px`;
+    element.style.overflowY =
+      element.scrollHeight > element.clientHeight ? "auto" : "hidden";
+  }, [beatCounterTarget, beatCounterUnit]);
   useEffect(() => {
     const element = beatContentRef.current;
-    if (!element || document.activeElement === element || element.textContent === draftExternalText) return;
-    element.textContent = draftExternalText;
-  }, [draftExternalText, draftLocale]);
+    if (!element) return;
+    if (document.activeElement !== element && element.textContent !== draftExternalText) {
+      element.textContent = draftExternalText;
+    }
+    fitBeatText();
+  }, [draftExternalText, draftLocale, fitBeatText]);
+  useLayoutEffect(() => {
+    const element = beatContentRef.current;
+    if (!element || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => fitBeatText());
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [fitBeatText]);
+  useEffect(() => {
+    if (!counterEditorOpen) return;
+    const closeOnOutsidePointerDown = (event: globalThis.PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && counterEditorRef.current?.contains(target)) return;
+      setCounterEditorOpen(false);
+    };
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") setCounterEditorOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointerDown, true);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePointerDown, true);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [counterEditorOpen]);
+  useEffect(() => {
+    if (!connectorMenuOpen) return;
+    const closeOnOutsidePointerDown = (event: globalThis.PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && connectorRef.current?.contains(target)) return;
+      setConnectorMenuOpen(false);
+    };
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") setConnectorMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointerDown, true);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePointerDown, true);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [connectorMenuOpen]);
   const isEvent = nodeData.kind === "event";
   const showEventOverview = isEvent && nodeData.details?.showEventOverview === true;
   const eventDetails = showEventOverview
@@ -729,44 +910,19 @@ function StoryNode({ id, data, selected }: NodeProps<StoryCanvasNode>) {
               {speakerPortraitUrl ? <img className="speech-beat-avatar" src={speakerPortraitUrl} alt="" /> : <span className="speech-beat-avatar-fallback">{portraitFallback}</span>}
             </div>
             <div className="speech-beat-menu-anchor nodrag nopan" onPointerDown={stopCanvasInteraction}>
-              <button
-                type="button"
-                className="speech-beat-menu-trigger speech-beat-speaker"
-                aria-label="Character"
-                aria-haspopup="listbox"
-                aria-expanded={openBeatMenu}
-                onClick={(event) => {
-                  stopCanvasInteraction(event);
-                  setOpenBeatMenu((open) => !open);
+              <SpeakerSelector
+                value={speakerRef}
+                options={speakerOptions}
+                presentEntityIds={quickEditor?.presentEntityIds ?? []}
+                onChange={(characterId) => {
+                  quickEditor?.onCharacterUpdate(characterId);
                 }}
-              >
-                <span>{speakerDisplayName}</span>
-                <span className="speech-beat-menu-chevron" aria-hidden="true">⌄</span>
-              </button>
-              {openBeatMenu ? <div className="speech-beat-menu" role="listbox" aria-label="Character">
-                <button type="button" role="option" aria-selected={!speakerRef} onClick={(event) => {
-                  stopCanvasInteraction(event);
-                  quickEditor?.onCharacterUpdate(undefined);
-                  setOpenBeatMenu(false);
-                }}>Narrator</button>
-                <button type="button" role="option" aria-selected={speakerRef === UNKNOWN_SPEAKER_REF} onClick={(event) => {
-                  stopCanvasInteraction(event);
-                  quickEditor?.onCharacterUpdate(UNKNOWN_SPEAKER_REF);
-                  setOpenBeatMenu(false);
-                }}>???</button>
-                {speakerOptions.map((speaker) => <button key={speaker.id} type="button" role="option" aria-selected={speaker.id === speakerRef} onClick={(event) => {
-                  stopCanvasInteraction(event);
-                  quickEditor?.onCharacterUpdate(speaker.id);
-                  setOpenBeatMenu(false);
-                }}>
-                  {speaker.portraitUrl ? <img className="speech-beat-menu-portrait" src={speaker.portraitUrl} alt="" /> : null}
-                  <span>{speaker.label}</span>
-                </button>)}
-              </div> : null}
+                onClose={() => setOpenBeatMenu(false)}
+                onCanvasInteraction={stopCanvasInteraction}
+              />
             </div>
             {selectedSpeaker && selectedSpeaker.variants.length > 1 ? (
               <label className="speech-beat-variant nodrag nopan">
-                <span>Variant</span>
                 <select
                   value={selectedVariantId}
                   onPointerDown={stopCanvasInteraction}
@@ -808,12 +964,91 @@ function StoryNode({ id, data, selected }: NodeProps<StoryCanvasNode>) {
                 stopCanvasInteraction(event);
                 const nextText = event.currentTarget.textContent ?? "";
                 quickEditor?.onTextUpdate(selectedLocale, nextText);
+                fitBeatText();
               }}
             />
             {textCounter ? (
-              <output className={`speech-beat-text-counter${textCounter.count > textCounter.target ? " over" : ""}`}>
-                {textCounter.count} / {textCounter.target} {textCounter.unit === "words" ? "words" : "characters"}
-              </output>
+              <div
+                ref={counterEditorRef}
+                className={`speech-beat-counter-tools nodrag nopan${counterEditorOpen ? " open" : ""}`}
+              >
+                <output
+                  className={`speech-beat-text-counter${textCounter.count > textCounter.target ? " over" : ""}`}
+                  title="Right-click to edit the maximum for this universe"
+                  onPointerDown={stopCanvasInteraction}
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    stopCanvasInteraction(event);
+                    if (quickEditor?.onCounterPreferenceUpdate) setCounterEditorOpen((open) => !open);
+                  }}
+                >
+                  {textCounter.count} / {textCounter.target} {textCounter.unit === "words" ? "words" : "characters"}
+                </output>
+                {counterEditorOpen && quickEditor?.onCounterPreferenceUpdate ? (
+                  <div
+                    className="speech-beat-counter-popover"
+                    onPointerDown={stopCanvasInteraction}
+                    onClick={stopCanvasInteraction}
+                  >
+                    <div className="speech-beat-counter-popover-header">
+                      <strong>Speech beat maximum</strong>
+                      <button
+                        type="button"
+                        aria-label="Close counter editor"
+                        title="Close"
+                        onPointerDown={stopCanvasInteraction}
+                        onClick={(event) => {
+                          stopCanvasInteraction(event);
+                          setCounterEditorOpen(false);
+                        }}
+                      >
+                        <X size={12} aria-hidden="true" />
+                      </button>
+                    </div>
+                    <label className="speech-beat-counter-field">
+                      <span>Measure</span>
+                      <select
+                        value={quickEditor.counterPreference?.unit ?? textCounter.unit}
+                        onPointerDown={stopCanvasInteraction}
+                        onChange={(event) =>
+                          quickEditor.onCounterPreferenceUpdate?.({
+                            unit: event.target.value as "words" | "characters",
+                          })
+                        }
+                      >
+                        <option value="characters">Characters</option>
+                        <option value="words">Words</option>
+                      </select>
+                    </label>
+                    <label className="speech-beat-counter-field">
+                      <span>Maximum</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={2000}
+                        step={1}
+                        value={quickEditor.counterPreference?.target ?? textCounter.target}
+                        onPointerDown={stopCanvasInteraction}
+                        onKeyDown={(event) => {
+                          event.stopPropagation();
+                          if (event.key === "Escape") setCounterEditorOpen(false);
+                        }}
+                        onChange={(event) => {
+                          const next = Number(event.target.value);
+                          if (Number.isFinite(next) && next > 0) {
+                            quickEditor.onCounterPreferenceUpdate?.({ target: next });
+                          }
+                        }}
+                      />
+                    </label>
+                    <p className="speech-beat-counter-note">
+                      {quickEditor.counterPreference?.eventOverride
+                        ? "This event overrides the universe maximum; edit the event to change it."
+                        : "Saved with the universe and shared by every speech beat."}
+                    </p>
+                  </div>
+                ) : null}
+              </div>
             ) : null}
           </div>
         </div>
@@ -877,6 +1112,62 @@ function StoryNode({ id, data, selected }: NodeProps<StoryCanvasNode>) {
                   ><ImagePlus size={16} /> Upload a PNG or JPEG image</button>
                 </>
               )}
+            </div>
+          </div>
+        ) : null}
+        {isSpeech && canSource && quickEditor?.beatConnector ? (
+          <div
+            ref={connectorRef}
+            className={`speech-beat-connector nodrag nopan${connectorMenuOpen ? " open" : ""}`}
+          >
+            <button
+              type="button"
+              className="speech-beat-connector-toggle"
+              aria-label="Add connected node"
+              aria-expanded={connectorMenuOpen}
+              title="Add connected node"
+              onPointerDown={stopCanvasInteraction}
+              onClick={(event) => {
+                stopCanvasInteraction(event);
+                setConnectorMenuOpen((open) => !open);
+              }}
+            >
+              <Plus size={14} aria-hidden="true" />
+            </button>
+            <div className="speech-beat-connector-menu">
+              <button
+                type="button"
+                onPointerDown={stopCanvasInteraction}
+                onClick={(event) => {
+                  stopCanvasInteraction(event);
+                  quickEditor.beatConnector?.onConnect("speechBeat");
+                  setConnectorMenuOpen(false);
+                }}
+              >
+                <MessageSquare size={13} aria-hidden="true" /> Dialogue
+              </button>
+              <button
+                type="button"
+                onPointerDown={stopCanvasInteraction}
+                onClick={(event) => {
+                  stopCanvasInteraction(event);
+                  quickEditor.beatConnector?.onConnect("decision");
+                  setConnectorMenuOpen(false);
+                }}
+              >
+                <Split size={13} aria-hidden="true" /> Decision
+              </button>
+              <button
+                type="button"
+                onPointerDown={stopCanvasInteraction}
+                onClick={(event) => {
+                  stopCanvasInteraction(event);
+                  quickEditor.beatConnector?.onConnect("directionBeat");
+                  setConnectorMenuOpen(false);
+                }}
+              >
+                <Clapperboard size={13} aria-hidden="true" /> Director Direction
+              </button>
             </div>
           </div>
         ) : null}
@@ -1026,6 +1317,8 @@ function StoryNode({ id, data, selected }: NodeProps<StoryCanvasNode>) {
     const portraitUrl = typeof nodeData.details?.dialogueTriggerPortraitUrl === "string"
       ? nodeData.details.dialogueTriggerPortraitUrl
       : undefined;
+    const dialogueTriggerEditor = nodeData.details?.dialogueTriggerEditor;
+    const hasEditor = isDialogueTriggerEditor(dialogueTriggerEditor);
     return (
       <div
         className={`story-node dialogueStart dialogue-trigger-node${focusClass}${inspectorFocusClass}${selected ? " selected" : ""}`}
@@ -1039,8 +1332,42 @@ function StoryNode({ id, data, selected }: NodeProps<StoryCanvasNode>) {
           )}
         </div>
         <div className="dialogue-trigger-copy">
-          <div className="node-title">{nodeData.title}</div>
-          {nodeData.subtitle ? <div className="node-subtitle">{nodeData.subtitle}</div> : null}
+          {hasEditor ? (
+            <>
+              <div className="dialogue-trigger-heading">Trigger</div>
+              <div className="speech-beat-menu-anchor nodrag nopan" onPointerDown={stopCanvasInteraction}>
+                <SpeakerSelector
+                  value={dialogueTriggerEditor.selectedCharacterId}
+                  options={dialogueTriggerEditor.speakerOptions}
+                  presentEntityIds={dialogueTriggerEditor.presentEntityIds}
+                  onChange={(characterId) => {
+                    dialogueTriggerEditor.onCharacterChange(characterId);
+                  }}
+                  onClose={() => {}}
+                  onCanvasInteraction={stopCanvasInteraction}
+                />
+              </div>
+              <select
+                className="dialogue-trigger-property nodrag nopan"
+                value={dialogueTriggerEditor.selectedActionId ?? ""}
+                disabled={!dialogueTriggerEditor.selectedCharacterId}
+                onPointerDown={stopCanvasInteraction}
+                onChange={(event) => {
+                  stopCanvasInteraction(event);
+                  dialogueTriggerEditor.onActionChange(event.target.value || undefined);
+                }}
+              >
+                <option value="">Choose action…</option>
+                {dialogueTriggerEditor.triggerActions.map((action) => (
+                  <option key={action.id} value={action.id}>
+                    {action.label}
+                  </option>
+                ))}
+              </select>
+            </>
+          ) : (
+            <div className="node-title">{nodeData.title}</div>
+          )}
         </div>
         {canSource ? <Handle type="source" position={Position.Right} /> : null}
       </div>

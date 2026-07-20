@@ -2,7 +2,7 @@ import type { BranchingProject, ConditionInput, Consequence, EventNode, RuleSet,
 import { conditionInputsFromConsequences, walkConditions } from "./logic.js";
 import { ruleSetPhasesByOwner, type RuleBindingOwnerKind } from "./ruleLibrary.js";
 import { mappingsForCanonRef } from "./integrationConfig.js";
-import { propertySupportsDialogueTrigger } from "./explorerSchema.js";
+import { entitySupportsDialogueTrigger } from "./explorerSchema.js";
 import { isGenericSpeakerRef } from "./speakerRoles.js";
 import { canonVariantsForRef } from "./worldnotionVariants.js";
 
@@ -49,12 +49,6 @@ function validateCanonRef(
       }),
     );
   }
-}
-
-function canonRefHasProperty(ref: BranchingProject["canonRefs"][number], propertyId: string) {
-  return [ref.properties, ref.frontmatter].some((record) =>
-    Boolean(record && Object.prototype.hasOwnProperty.call(record, propertyId)),
-  );
 }
 
 function validateConditionRefs(
@@ -509,16 +503,12 @@ export function validateProject(project: BranchingProject): ValidationFinding[] 
       if (!presentEntityIds.includes(source.id)) {
         findings.push(finding("invalid_dialogue_trigger", "error", `Dialogue Trigger "${start.id}" references entity "${source.id}", which is not present in event "${event.id}".`, { id: start.id, ref: source.id }));
       }
-      if (!source.propertyId) {
-        findings.push(finding("invalid_dialogue_trigger", "warning", `Dialogue Trigger "${start.id}" has no Dialogue Trigger property selected.`, { id: start.id }));
-        return;
-      }
-      if (!propertySupportsDialogueTrigger(project, "canon", source.propertyId)) {
-        findings.push(finding("invalid_dialogue_trigger", "error", `Property "${source.propertyId}" is not enabled as an Entity presentable Dialogue Trigger property.`, { id: start.id, ref: source.propertyId }));
-      }
       const ref = project.canonRefs.find((candidate) => candidate.id === source.id);
-      if (ref && !canonRefHasProperty(ref, source.propertyId)) {
-        findings.push(finding("invalid_dialogue_trigger", "error", `Entity "${source.id}" does not contain property "${source.propertyId}" required by Dialogue Trigger "${start.id}".`, { id: start.id, ref: source.propertyId }));
+      if (ref && !entitySupportsDialogueTrigger(project, ref)) {
+        findings.push(finding("invalid_dialogue_trigger", "error", `Entity "${source.id}" is not configured as a Dialogue Trigger. Mark one of its properties as Entity presentable and Dialogue Trigger reference.`, { id: start.id, ref: source.id }));
+      }
+      if (!source.propertyId) {
+        findings.push(finding("invalid_dialogue_trigger", "warning", `Dialogue Trigger "${start.id}" has no trigger action selected.`, { id: start.id }));
       }
     });
 

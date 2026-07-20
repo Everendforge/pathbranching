@@ -56,6 +56,8 @@ import {
   propertyCapability,
   propertyIsEntityPresentable,
   propertySupportsDialogueTrigger,
+  entitySupportsDialogueTrigger,
+  DIALOGUE_TRIGGER_ACTIONS,
 } from "./explorerSchema.js";
 import {
   canonVariantsForRef,
@@ -70,6 +72,7 @@ import {
   ChevronDown,
   ChevronRight,
   ChevronUp,
+  Circle,
   Crosshair,
   Castle,
   CircleDot,
@@ -85,6 +88,7 @@ import {
   GitBranch,
   Home,
   ImagePlus,
+  Info,
   Link,
   Maximize2,
   MessageSquare,
@@ -93,9 +97,11 @@ import {
   Moon,
   MessageSquareText,
   OctagonAlert,
+  Package,
   RefreshCw,
   SearchCheck,
   Settings,
+  ShieldCheck,
   Split,
   Sun,
   Sparkles,
@@ -103,6 +109,7 @@ import {
   Pencil,
   Power,
   Trash2,
+  UserRound,
   X,
 } from "lucide-react";
 import pathbranchingIcon from "./assets/pathbranching-icon.png";
@@ -152,6 +159,7 @@ import type {
   ScriptBlock,
   SceneImageAttachment,
   Sequence,
+  SpeechBeatCounterPreference,
   Transition,
   ValidationFinding,
 } from "./domain.js";
@@ -231,6 +239,7 @@ import {
   verifyDesktopBridge,
   type ProjectFileState,
 } from "./projectPersistence.js";
+import { DEFAULT_SPEECH_BEAT_COUNTER_PREFERENCE } from "./projectSerialization.js";
 import {
   workingCopyPathForCanonRef,
   type PathBranchingWorkspace,
@@ -259,6 +268,7 @@ import type { SuiteChrome, SuiteSettings } from "./suiteChrome.js";
 import { BrandLoadingScreen } from "./components/BrandLoadingScreen.js";
 import { StoryCreationEmptyState } from "./components/StoryCreationEmptyState.js";
 import { OnboardingGuide } from "./components/OnboardingGuide.js";
+import { InteractionTutorial } from "./components/InteractionTutorial.js";
 import {
   buildPathTree,
   buildSequenceConnectionPreview,
@@ -357,6 +367,8 @@ const WORKSPACE_PANEL_LABELS: Record<WorkspacePanelId, string> = {
   connect: "Connect",
 };
 const PATHBRANCHING_ONBOARDING_KEY = "pathbranching.onboarding.v1";
+const PATHBRANCHING_INTERACTION_TUTORIAL_KEY =
+  "pathbranching.interactionTutorial.v1";
 
 type CanonTreeNode = {
   kind: "folder" | "ref";
@@ -467,16 +479,40 @@ function canonRefHasProperty(ref: CanonRef, propertyId: string) {
   );
 }
 
-function dialogueTriggerPropertiesForEntity(
+function canonRefPropertyValue(ref: CanonRef, propertyId: string): unknown {
+  return ref.properties?.[propertyId] ?? ref.frontmatter?.[propertyId];
+}
+
+function canonRefIsEntityPresentable(
   project: BranchingProject,
   propertiesConfig: Record<string, unknown> | undefined,
   ref: CanonRef,
-) {
-  return flattenCanonExplorerProperties(canonExplorerProperties(propertiesConfig)).filter(
-    (property) =>
-      propertySupportsDialogueTrigger(project, "canon", property.id) &&
-      canonRefHasProperty(ref, property.id),
-  );
+): boolean {
+  // Check if this canonRef's type has entityPresentable enabled
+  if (ref.kind && propertyIsEntityPresentable(project, "canon", `type:${ref.kind}`)) {
+    return true;
+  }
+  
+  // Check if this canonRef is referenced as a value in any entityPresentable property
+  const presentableProperties = flattenCanonExplorerProperties(canonExplorerProperties(propertiesConfig))
+    .filter(property => propertyIsEntityPresentable(project, "canon", property.id));
+  
+  for (const property of presentableProperties) {
+    // Check all canonRefs to see if any reference this entity in the presentable property
+    const isReferencedInProperty = project.canonRefs.some(canonRef => {
+      const value = canonRefPropertyValue(canonRef, property.id);
+      if (Array.isArray(value)) {
+        return value.includes(ref.id);
+      }
+      return value === ref.id;
+    });
+    
+    if (isReferencedInProperty) {
+      return true;
+    }
+  }
+  
+  return false;
 }
 
 function folderPathForFolderDescription(ref: CanonRef) {
@@ -1236,6 +1272,59 @@ function nearestFreeCanvasPosition(
   }
 
   return requested;
+}
+
+/**
+ * Places a node that springs from a source node's output. Prefers the same
+ * height (Y) as the source with a minimum horizontal separation. When that
+ * slot (or the column to the right) is already occupied, it distributes the
+ * new node vertically into the nearest free slot with a minimum vertical gap,
+ * keeping consecutive nodes (and any route gate in the way) presentable.
+ */
+function connectedNarrativeNodePosition(
+  nodes: StoryCanvasNode[],
+  source: StoryCanvasNode,
+  targetSize: { width: number; height: number },
+  options: { snapToGrid: boolean; gridSize: number },
+): CanvasPoint {
+  const sourceSize = canvasNodeSize(source);
+  const horizontalGap = CANVAS_NODE_GAP * 3;
+  const verticalGap = CANVAS_NODE_GAP;
+  const x = source.position.x + sourceSize.width + horizontalGap;
+  const desiredY = source.position.y;
+  const columnLeft = x - horizontalGap / 2;
+  const columnRight = x + targetSize.width + horizontalGap / 2;
+  const columnObstacles = nodes
+    .filter(
+      (node) =>
+        node.id !== source.id &&
+        node.data.kind !== "workspace" &&
+        !node.data.isContainer,
+    )
+    .map((node) => {
+      const size = canvasNodeSize(node);
+      return {
+        top: node.position.y,
+        bottom: node.position.y + size.height,
+        left: node.position.x,
+        right: node.position.x + size.width,
+      };
+    })
+    .filter((obstacle) => obstacle.right > columnLeft && obstacle.left < columnRight);
+  const fitsAt = (y: number) =>
+    !columnObstacles.some(
+      (obstacle) =>
+        y < obstacle.bottom + verticalGap && y + targetSize.height + verticalGap > obstacle.top,
+    );
+  const candidateYs = [
+    desiredY,
+    ...columnObstacles.map((obstacle) => obstacle.bottom + verticalGap),
+    ...columnObstacles.map((obstacle) => obstacle.top - targetSize.height - verticalGap),
+  ]
+    .filter((y) => fitsAt(y))
+    .sort((left, right) => Math.abs(left - desiredY) - Math.abs(right - desiredY));
+  const y = candidateYs.length > 0 ? candidateYs[0] : desiredY;
+  return snapCanvasPoint({ x, y }, options.snapToGrid, options.gridSize);
 }
 
 function visibleCanvasFlowBounds(reactFlowInstance: ReactFlowInstance<any, any>) {
@@ -2340,8 +2429,19 @@ function CanonEntityRefPicker({
   const selectedRef = value
     ? canonRefs.find((ref) => ref.id === value)
     : undefined;
+  
+  // Sort matches: present entities first, then alphabetically
   const matches = normalizedQuery
-    ? canonRefs.filter((ref) => canonRefMatches(ref, normalizedQuery)).slice(0, 24)
+    ? canonRefs
+        .filter((ref) => canonRefMatches(ref, normalizedQuery))
+        .sort((a, b) => {
+          const aPresent = presentEntityRefs.includes(a.id);
+          const bPresent = presentEntityRefs.includes(b.id);
+          if (aPresent && !bPresent) return -1;
+          if (!aPresent && bPresent) return 1;
+          return (a.label ?? a.id).localeCompare(b.label ?? b.id);
+        })
+        .slice(0, 24)
     : [];
 
   return (
@@ -2357,7 +2457,7 @@ function CanonEntityRefPicker({
       </div>
       {selectedRef ? (
         <div className="reference-picker-values">
-          <span>
+          <span className="speaker-tag">
             {selectedRef.label ?? selectedRef.id}
             <small>{selectedRef.kind ?? "canon"}</small>
             <button type="button" onClick={() => onChange(undefined)} title="Clear speaker">×</button>
@@ -2373,13 +2473,14 @@ function CanonEntityRefPicker({
                 key={ref.id}
                 type="button"
                 disabled={ref.id === value}
+                className={isPresent ? "present-entity" : ""}
                 onClick={() => {
                   onChange(ref.id);
                   setQuery("");
                 }}
               >
                 <strong>{ref.label ?? ref.id}</strong>
-                <span>{ref.kind ?? "canon"} · {isPresent ? "present in event" : "add to event"}</span>
+                <span>{ref.kind ?? "canon"} · {isPresent ? "✓ present in event" : "add to event"}</span>
               </button>
             );
           })}
@@ -2968,6 +3069,7 @@ function PathBranchingSettingsModal({
   theme,
   onUpdateEventCategories,
   onAuthoringDisplayChange,
+  onUpdateSpeechBeatCounter,
   onCanvasBackgroundChange,
   onNodeColorChange,
   onThemeChange,
@@ -2995,6 +3097,7 @@ function PathBranchingSettingsModal({
   theme: ThemeId;
   onUpdateEventCategories: (categories: EventCategoryDefinition[]) => void;
   onAuthoringDisplayChange: (updates: Partial<AuthoringDisplaySettings>) => void;
+  onUpdateSpeechBeatCounter: (updates: Partial<SpeechBeatCounterPreference>) => void;
   onCanvasBackgroundChange: (
     updates: Partial<CanvasBackgroundSettings>,
   ) => void;
@@ -3374,23 +3477,40 @@ function PathBranchingSettingsModal({
                   </div>
                   <div className="settings-page-title compact">
                     <h3>Speech beat counter</h3>
-                    <p>Used when an event does not define its own speech pacing target.</p>
+                    <p>The default maximum per speech beat is saved with the universe. You can also right-click a speech beat counter on the canvas to edit it; individual events can still override it from the event editor.</p>
                   </div>
                   <div className="settings-grid">
                     <label>
                       <span>Show counter</span>
-                      <input type="checkbox" checked={settings.authoringDisplay.speechBeatCounterEnabled} onChange={(event) => onAuthoringDisplayChange({ speechBeatCounterEnabled: event.target.checked })} />
+                      <input
+                        type="checkbox"
+                        disabled={!project}
+                        checked={project?.authoringPreferences?.speechBeatCounter?.enabled ?? DEFAULT_SPEECH_BEAT_COUNTER_PREFERENCE.enabled}
+                        onChange={(event) => onUpdateSpeechBeatCounter({ enabled: event.target.checked })}
+                      />
                     </label>
                     <label>
                       <span>Measure</span>
-                      <select disabled={!settings.authoringDisplay.speechBeatCounterEnabled} value={settings.authoringDisplay.speechBeatCounterUnit} onChange={(event) => onAuthoringDisplayChange({ speechBeatCounterUnit: event.target.value as "words" | "characters" })}>
-                        <option value="words">Words</option>
+                      <select
+                        disabled={!project}
+                        value={project?.authoringPreferences?.speechBeatCounter?.unit ?? DEFAULT_SPEECH_BEAT_COUNTER_PREFERENCE.unit}
+                        onChange={(event) => onUpdateSpeechBeatCounter({ unit: event.target.value as "words" | "characters" })}
+                      >
                         <option value="characters">Characters</option>
+                        <option value="words">Words</option>
                       </select>
                     </label>
                     <label>
-                      <span>Target</span>
-                      <input type="number" min={1} max={2000} step={1} disabled={!settings.authoringDisplay.speechBeatCounterEnabled} value={settings.authoringDisplay.speechBeatCounterTarget} onChange={(event) => onAuthoringDisplayChange({ speechBeatCounterTarget: Number(event.target.value) })} />
+                      <span>Maximum</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={2000}
+                        step={1}
+                        disabled={!project}
+                        value={project?.authoringPreferences?.speechBeatCounter?.target ?? DEFAULT_SPEECH_BEAT_COUNTER_PREFERENCE.target}
+                        onChange={(event) => onUpdateSpeechBeatCounter({ target: Number(event.target.value) })}
+                      />
                     </label>
                   </div>
                 </section>
@@ -4009,12 +4129,14 @@ function OutlineBadges({ badges }: { badges: string[] }) {
 
 function SequenceOutlinePanel({
   project,
+  propertiesConfig,
   sequence,
   selectedId,
   onSelect,
   onUpdateSequence,
 }: {
   project: BranchingProject;
+  propertiesConfig?: Record<string, unknown>;
   sequence?: Sequence;
   selectedId?: string;
   onSelect: (id: string) => void;
@@ -4025,6 +4147,10 @@ function SequenceOutlinePanel({
       connection.fromSequenceId === sequence?.id ||
       connection.toSequenceId === sequence?.id,
   );
+
+  const characterOptions = project.canonRefs
+    .filter((ref) => canonRefIsEntityPresentable(project, propertiesConfig, ref))
+    .map((ref) => ({ id: ref.id, label: ref.label ?? ref.id }));
 
   if (!sequence) {
     return (
@@ -4080,6 +4206,24 @@ function SequenceOutlinePanel({
             {sequence.eventIds.map((eventId) => (
               <option key={eventId} value={eventId}>
                 {findEvent(project, eventId)?.name ?? eventId}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="field-label">
+          Protagonist
+          <select
+            value={sequence.characterRef ?? ""}
+            onChange={(event) =>
+              onUpdateSequence(sequence.id, {
+                characterRef: event.target.value || undefined,
+              })
+            }
+          >
+            <option value="">No protagonist</option>
+            {characterOptions.map((option) => (
+              <option key={option.id} value={option.id}>
+                {option.label}
               </option>
             ))}
           </select>
@@ -4494,6 +4638,7 @@ function FilesPanel({
   onOutlineTabChange,
   onNavigatePathNode,
   onContextMenu,
+  propertiesConfig,
 }: {
   project: BranchingProject;
   files: PathBranchingFileItem[];
@@ -4504,6 +4649,7 @@ function FilesPanel({
   selectedId?: string;
   onNavigatePathNode: (node: PathTreeNode) => void;
   onContextMenu?: (event: ReactMouseEvent<HTMLElement>) => void;
+  propertiesConfig?: Record<string, unknown>;
   onToggle: () => void;
   onResize: (width: number) => void;
   onResetWidth: () => void;
@@ -4674,6 +4820,7 @@ function FilesPanel({
         {activeOutlineTab === "sequence" ? (
           <SequenceOutlinePanel
             project={project}
+            propertiesConfig={propertiesConfig}
             sequence={activeSequence}
             selectedId={selectedId}
             onSelect={onSelect}
@@ -5001,6 +5148,9 @@ function EventAuthoringDock({
   onOpenInspectorTab,
   onCloseInspectorTab,
   onCloseAllInspectorTabs,
+  onCloseInspectorTabsAbove,
+  onCloseInspectorTabsBelow,
+  onCloseOtherInspectorTabs,
   onDisableInspectorDebug,
   onToggleInspectorMaximized,
   children,
@@ -5030,6 +5180,9 @@ function EventAuthoringDock({
   onOpenInspectorTab: (id: string) => void;
   onCloseInspectorTab: (id: string) => void;
   onCloseAllInspectorTabs: () => void;
+  onCloseInspectorTabsAbove: (id: string) => void;
+  onCloseInspectorTabsBelow: (id: string) => void;
+  onCloseOtherInspectorTabs: (id: string) => void;
   onDisableInspectorDebug: () => void;
   onToggleInspectorMaximized: () => void;
   children: ReactNode;
@@ -5043,7 +5196,7 @@ function EventAuthoringDock({
   const [inspectorHeights, setInspectorHeights] = useState<Record<string, number>>({});
   const [tabContextMenu, setTabContextMenu] = useState<
     | { kind: "event"; eventId: string; x: number; y: number }
-    | { kind: "inspector"; x: number; y: number }
+    | { kind: "inspector"; tabId: string; x: number; y: number }
   >();
   const currentSequence = project.sequences.find(
     (sequence) => sequence.id === activeSequenceId(project),
@@ -5266,11 +5419,12 @@ function EventAuthoringDock({
   );
 
   const openInspectorTabCloseMenu = useCallback(
-    (contextEvent: ReactMouseEvent<HTMLButtonElement>) => {
+    (contextEvent: ReactMouseEvent<HTMLButtonElement>, tabId: string) => {
       contextEvent.preventDefault();
       contextEvent.stopPropagation();
       setTabContextMenu({
         kind: "inspector",
+        tabId,
         ...clampFloatingMenuPosition(
           contextEvent.clientX,
           contextEvent.clientY,
@@ -5351,7 +5505,7 @@ function EventAuthoringDock({
                       </button>
                       {tab.mode === "debug" ? (
                         <button type="button" title="Disable Inspector Debug" onClick={onDisableInspectorDebug}><Power size={14} /></button>
-                      ) : <button type="button" title="Close inspector" onClick={() => onCloseInspectorTab(tab.id)} onContextMenu={openInspectorTabCloseMenu}><X size={14} /></button>}
+                      ) : <button type="button" title="Close inspector" onClick={() => onCloseInspectorTab(tab.id)} onContextMenu={(e) => openInspectorTabCloseMenu(e, tab.id)}><X size={14} /></button>}
                     </div>
                   </div>
                   {expanded ? <div className="event-inspector-body"><div className="event-inspector-body-scroll">{tab.mode === "debug" ? <DebugInspector project={project} nodes={nodes} selection={tab.selection} /> : isValidElement(children) ? cloneElement(children as ReactElement<{ selection?: Selection }>, { selection: tab.selection }) : children}</div></div> : null}
@@ -5445,7 +5599,7 @@ function EventAuthoringDock({
                     <button type="button" title={expanded ? "Minimize inspector" : "Expand inspector"} onClick={() => toggleInspectorTab(tab.id)}>{expanded ? <ChevronDown size={14} /> : <ChevronUp size={14} />}</button>
                     {tab.mode === "debug" ? (
                       <button type="button" title="Disable Inspector Debug" onClick={onDisableInspectorDebug}><Power size={14} /></button>
-                    ) : <button type="button" title="Close inspector" onClick={() => onCloseInspectorTab(tab.id)} onContextMenu={openInspectorTabCloseMenu}><X size={14} /></button>}
+                    ) : <button type="button" title="Close inspector" onClick={() => onCloseInspectorTab(tab.id)} onContextMenu={(e) => openInspectorTabCloseMenu(e, tab.id)}><X size={14} /></button>}
                   </div>
                 </div>
                 {expanded ? <div className="event-inspector-body"><div className="event-inspector-body-scroll">{tab.mode === "debug" ? <DebugInspector project={project} nodes={nodes} selection={tab.selection} /> : isValidElement(children) ? cloneElement(children as ReactElement<{ selection?: Selection }>, { selection: tab.selection }) : children}</div></div> : null}
@@ -5591,12 +5745,44 @@ function EventAuthoringDock({
           >
             Close all tabs
           </button>
-          </> : <button type="button" onClick={() => {
-            onCloseAllInspectorTabs();
-            setTabContextMenu(undefined);
-          }}>
+          </> : <>
+          <button
+            type="button"
+            onClick={() => {
+              onCloseInspectorTabsAbove(tabContextMenu.tabId);
+              setTabContextMenu(undefined);
+            }}
+          >
+            Close tabs above
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              onCloseInspectorTabsBelow(tabContextMenu.tabId);
+              setTabContextMenu(undefined);
+            }}
+          >
+            Close tabs below
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              onCloseOtherInspectorTabs(tabContextMenu.tabId);
+              setTabContextMenu(undefined);
+            }}
+          >
+            Close other tabs
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              onCloseAllInspectorTabs();
+              setTabContextMenu(undefined);
+            }}
+          >
             Close all inspector tabs
-          </button>}
+          </button>
+          </>}
         </div>
       ) : null}
     </aside>
@@ -5771,6 +5957,7 @@ function Inspector({
   >("route");
   const [objectInspectorTab, setObjectInspectorTab] = useState("overview");
   const [inspectorLocale, setInspectorLocale] = useState(project.localizationCatalog?.primaryLocale ?? "und");
+  const [metadataSectionCollapsed, setMetadataSectionCollapsed] = useState(true);
   const selectedNode =
     selection?.type === "node"
       ? nodes.find((node) => node.id === selection.id)
@@ -6030,9 +6217,6 @@ function Inspector({
   const selectedTriggerEntity = triggerSource?.kind === "canonRef"
     ? presentEntities.find((ref) => ref.id === triggerSource.id)
     : undefined;
-  const triggerProperties = selectedTriggerEntity
-    ? dialogueTriggerPropertiesForEntity(project, propertiesConfig, selectedTriggerEntity)
-    : [];
   const selectedCanonImages = selectedCanon
     ? canonImagePropertiesForRef(propertiesConfig, selectedCanon)
     : [];
@@ -6469,7 +6653,7 @@ function Inspector({
             <CanonRefsPicker
               title="Entities present in event"
               value={event.presentEntityRefs ?? event.canonRefs}
-              canonRefs={project.canonRefs}
+              canonRefs={project.canonRefs.filter(canonRef => canonRefIsEntityPresentable(project, propertiesConfig, canonRef))}
               onChange={(presentEntityRefs) => onUpdateEvent(event.id, { presentEntityRefs })}
             />
             <CanonContextList
@@ -6778,14 +6962,23 @@ function Inspector({
                   ) : null}
                 </>
               ) : null}
-              <label className="field-label">
-                {selectedDialogueBeatContext.beat.kind === "speech" ? "Dialogue text" : "Stage direction"}
-                <select
-                  value={inspectorLocale}
-                  onChange={(event) => setInspectorLocale(event.target.value)}
-                >
-                  {normalizeLocaleList(project.localizationCatalog?.primaryLocale ?? "und", project.localizationCatalog?.locales ?? []).map((locale) => <option key={locale} value={locale}>{localeDisplayName(locale, localeNames)}{locale === project.localizationCatalog?.primaryLocale ? " · Primary" : ""}</option>)}
-                </select>
+              <div className="dialogue-text-editor">
+                <div className="dialogue-text-header">
+                  <strong>{selectedDialogueBeatContext.beat.kind === "speech" ? "Dialogue text" : "Stage direction"}</strong>
+                  <div className="locale-selector-pills">
+                    {normalizeLocaleList(project.localizationCatalog?.primaryLocale ?? "und", project.localizationCatalog?.locales ?? []).map((locale) => (
+                      <button
+                        key={locale}
+                        type="button"
+                        className={`locale-pill ${inspectorLocale === locale ? "active" : ""}`}
+                        onClick={() => setInspectorLocale(locale)}
+                        title={localeDisplayName(locale, localeNames)}
+                      >
+                        {locale === project.localizationCatalog?.primaryLocale ? "★ " : ""}{locale.split("-")[0].toUpperCase()}
+                      </button>
+                    ))}
+                  </div>
+                </div>
                 <textarea
                   rows={7}
                   value={blockValues(project, selectedDialogueBeatContext.beat.blockRef.scriptId, selectedDialogueBeatContext.block, project.localizationCatalog?.primaryLocale ?? "und")[inspectorLocale] ?? ""}
@@ -6796,8 +6989,69 @@ function Inspector({
                       event.target.value,
                     )
                   }
+                  placeholder={`Enter ${selectedDialogueBeatContext.beat.kind === "speech" ? "dialogue" : "stage direction"} text...`}
                 />
-              </label>
+              </div>
+              
+              <details className="metadata-section" open={!metadataSectionCollapsed} onToggle={(e) => setMetadataSectionCollapsed(!(e.target as HTMLDetailsElement).open)}>
+                <summary>
+                  {metadataSectionCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                  Metadata
+                </summary>
+                <div className="metadata-content">
+                  <label className="field-label">
+                    Director note
+                    <textarea
+                      rows={3}
+                      value={selectedDialogueBeatContext.beat.directorNote ?? ""}
+                      onChange={(event) =>
+                        selectedDialogueBeatContext.dialogueId
+                          ? onUpdateDialogueBeat(
+                              selectedDialogueBeatContext.eventId,
+                              selectedDialogueBeatContext.dialogueId,
+                              selectedDialogueBeatContext.beat.id,
+                              { directorNote: event.target.value || undefined }
+                            )
+                          : onUpdateEventDialogueBeat(
+                              selectedDialogueBeatContext.eventId,
+                              selectedDialogueBeatContext.beat.id,
+                              { directorNote: event.target.value || undefined }
+                            )
+                      }
+                      placeholder="Add a note for direction, mood, timing…"
+                    />
+                  </label>
+                  {selectedDialogueBeatContext.beat.sceneImage ? (
+                    <div className="field-label">
+                      <strong>Scene image</strong>
+                      <div className="scene-image-info">
+                        <span>{project.assets?.find((asset) => asset.id === selectedDialogueBeatContext.beat.sceneImage?.assetId)?.name ?? "Attached"}</span>
+                        <button
+                          type="button"
+                          className="danger-text"
+                          onClick={() =>
+                            selectedDialogueBeatContext.dialogueId
+                              ? onUpdateDialogueBeat(
+                                  selectedDialogueBeatContext.eventId,
+                                  selectedDialogueBeatContext.dialogueId,
+                                  selectedDialogueBeatContext.beat.id,
+                                  { sceneImage: undefined }
+                                )
+                              : onUpdateEventDialogueBeat(
+                                  selectedDialogueBeatContext.eventId,
+                                  selectedDialogueBeatContext.beat.id,
+                                  { sceneImage: undefined }
+                                )
+                          }
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              </details>
+
               <button
                 type="button"
                 className="danger"
@@ -6838,13 +7092,13 @@ function Inspector({
         {selectedDialogueStartContext?.start ? (
           <section className="inspector-section">
             <h2>Dialogue Trigger</h2>
-            <p className="inspector-help">This node has an output only. It starts from one present entity and one property marked as a Dialogue Trigger reference.</p>
+            <p className="inspector-help">This node has an output only. It starts from one present entity configured as a Dialogue Trigger and an interaction action.</p>
             <CanonEntityRefPicker
               title="Present entity"
-              placeholder="Search every entity category…"
+              placeholder="Search Dialogue Trigger entities…"
               emptyLabel="No entity selected"
               value={triggerSource?.kind === "canonRef" ? triggerSource.id : undefined}
-              canonRefs={project.canonRefs}
+              canonRefs={project.canonRefs.filter((ref) => entitySupportsDialogueTrigger(project, ref))}
               presentEntityRefs={presentEntityIds}
               onChange={(entityId) => {
                 const triggerEvent = findEvent(project, selectedDialogueStartContext.eventId);
@@ -6862,7 +7116,7 @@ function Inspector({
               }}
             />
             <label className="field-label">
-              Dialogue Trigger property
+              Trigger action
               <select
                 value={triggerSource?.propertyId ?? ""}
                 disabled={!selectedTriggerEntity}
@@ -6875,12 +7129,12 @@ function Inspector({
                   } : start),
                 })}
               >
-                <option value="">Choose a trigger property…</option>
-                {triggerProperties.map((property) => <option key={property.id} value={property.id}>{property.label}</option>)}
+                <option value="">Choose an action…</option>
+                {DIALOGUE_TRIGGER_ACTIONS.map((action) => <option key={action.id} value={action.id}>{action.label}</option>)}
               </select>
             </label>
-            {selectedTriggerEntity && triggerProperties.length === 0 ? (
-              <p className="warning-text">This entity has no property marked both Entity presentable and Dialogue Trigger reference.</p>
+            {selectedTriggerEntity && !entitySupportsDialogueTrigger(project, selectedTriggerEntity) ? (
+              <p className="warning-text">This entity is not configured as a Dialogue Trigger. Mark one of its properties as Entity presentable and Dialogue Trigger reference.</p>
             ) : null}
           </section>
         ) : null}
@@ -7836,100 +8090,175 @@ function Inspector({
             <h2>{selectedExplorerSchemaSource === "canon" ? "Canon property" : "Local property"}</h2>
             <p className="inspector-connection-hint">
               {selectedExplorerSchemaSource === "canon"
-                ? "WorldNotion remains the source of truth. These capabilities are stored as Pathbranching overrides."
-                : "Configure how this local property participates in Pathbranching."}
+                ? "Configure PathBranching capabilities for this canon property."
+                : "Configure how this local property participates in PathBranching."}
             </p>
-            <InspectorContentTabs value={objectInspectorTab} onChange={setObjectInspectorTab} tabs={[{ id: "overview", label: "Overview" }, { id: "characters", label: "Characters" }]} />
-            {objectInspectorTab === "overview" ? <>
-            {selectedExplorerSchemaSource === "local" ? (
-              <>
-                <label className="field-label">
-                  Name
-                  <input
-                    value={selectedExplorerProperty.label}
-                    onChange={(event) =>
-                      onUpdateLocalExplorerProperty(selectedExplorerProperty.id, {
-                        label: event.target.value,
-                      })
-                    }
-                  />
-                </label>
-                <label className="field-label">
-                  Value type
-                  <select
-                    value={selectedExplorerProperty.valueType}
-                    onChange={(event) =>
-                      onUpdateLocalExplorerProperty(selectedExplorerProperty.id, {
-                        valueType: event.target.value,
-                      })
-                    }
+            
+            {/* Capabilities as Cards */}
+            <div className="logic-property-capabilities">
+              <div className="logic-property-editor-subheading"><strong>Capabilities</strong><span>Configure behavior</span></div>
+              {(() => {
+                const source = selectedExplorerSchemaSource ?? "local";
+                const override = propertyCapability(project, source, selectedExplorerProperty.id);
+                const entityPresentable = propertyIsEntityPresentable(project, source, selectedExplorerProperty.id);
+                const dialogueTrigger = propertySupportsDialogueTrigger(project, source, selectedExplorerProperty.id);
+                return <>
+                  <button
+                    type="button"
+                    className={`logic-capability-card${(override?.conditionReadable ?? true) ? " active" : ""}`}
+                    onClick={() => onUpdateLogicPropertyOverride(selectedExplorerProperty.id, source, { conditionReadable: !(override?.conditionReadable ?? true) })}
+                    aria-pressed={override?.conditionReadable ?? true}
                   >
-                    <option value="text">Text</option>
-                    <option value="number">Number</option>
-                    <option value="boolean">Boolean</option>
-                    <option value="select">Select</option>
-                    <option value="multiselect">Multi-select</option>
-                    <option value="entity-ref">Entity reference</option>
-                  </select>
-                </label>
-                <label className="field-label">
-                  Applies to types
-                  <input
-                    value={(selectedExplorerProperty.appliesToTypes ?? []).join(", ")}
-                    onChange={(event) =>
-                      onUpdateLocalExplorerProperty(selectedExplorerProperty.id, {
-                        appliesToTypes: event.target.value
-                          .split(",")
-                          .map((value) => value.trim())
-                          .filter(Boolean),
-                      })
-                    }
-                  />
-                </label>
-                <label className="field-label">
-                  Description
-                  <textarea
-                    rows={4}
-                    value={selectedExplorerProperty.description ?? ""}
-                    onChange={(event) =>
-                      onUpdateLocalExplorerProperty(selectedExplorerProperty.id, {
-                        description: event.target.value,
-                      })
-                    }
-                  />
-                </label>
-              </>
-            ) : (
-              <dl>
-                <div><dt>ID</dt><dd>{selectedExplorerProperty.id}</dd></div>
-                <div><dt>Value type</dt><dd>{selectedExplorerProperty.valueType}</dd></div>
-                <div><dt>Applies to</dt><dd>{selectedExplorerProperty.appliesToTypes?.join(", ") || "all types"}</dd></div>
-              </dl>
-            )}
-            {(() => {
-              const source = selectedExplorerSchemaSource ?? "local";
-              const override = propertyCapability(project, source, selectedExplorerProperty.id);
-              const entityPresentable = propertyIsEntityPresentable(project, source, selectedExplorerProperty.id);
-              const dialogueTrigger = propertySupportsDialogueTrigger(project, source, selectedExplorerProperty.id);
-              return <>
-                <label><input type="checkbox" checked={override?.conditionReadable ?? true} onChange={(event) => onUpdateLogicPropertyOverride(selectedExplorerProperty.id, source, { conditionReadable: event.target.checked })} /> Conditions</label>
-                <label><input type="checkbox" checked={override?.actionWritable ?? source === "local"} onChange={(event) => onUpdateLogicPropertyOverride(selectedExplorerProperty.id, source, { actionWritable: event.target.checked })} /> Actions</label>
-                <label><input type="checkbox" checked={override?.grantable ?? false} onChange={(event) => onUpdateLogicPropertyOverride(selectedExplorerProperty.id, source, { grantable: event.target.checked })} /> Grantable</label>
-                <label><input type="checkbox" checked={entityPresentable} onChange={(event) => onUpdateLogicPropertyOverride(selectedExplorerProperty.id, source, { entityPresentable: event.target.checked, dialogueTrigger: event.target.checked ? dialogueTrigger : false })} /> Entity presentable</label>
-                {entityPresentable ? <label className="nested-capability"><input type="checkbox" checked={dialogueTrigger} onChange={(event) => onUpdateLogicPropertyOverride(selectedExplorerProperty.id, source, { dialogueTrigger: event.target.checked })} /> Referenced as Dialogue Trigger</label> : null}
-                <label className="field-label">Can relate to<input value={(override?.relationTargetTypes ?? []).join(", ")} placeholder="character, worldbuilding" onChange={(event) => onUpdateLogicPropertyOverride(selectedExplorerProperty.id, source, { relationTargetTypes: event.target.value.split(",").map((item) => item.trim()).filter(Boolean) })} /></label>
-              </>;
-            })()}
-            </> : <section className="character-categories-editor">
-              <p className="inspector-connection-hint">Choose which canon categories can be selected as a character in Speech Beats. Defaults are locked; this inspector adds the optional ones.</p>
-              {canonCategories.length ? <div className="character-category-options">
-                {canonCategories.map((category) => {
-                  const isDefault = defaultCharacterCategories.includes(category);
-                  const isAdditional = additionalCharacterCategories.includes(category);
-                  return <label key={category}><input type="checkbox" checked={isDefault || isAdditional} disabled={isDefault} onChange={(event) => onUpdateCharacterCategories(event.target.checked ? [...additionalCharacterCategories, category] : additionalCharacterCategories.filter((item) => item !== category))} /> {category}</label>;
-                })}
-              </div> : <p className="empty-line">No canon categories are available yet.</p>}
-            </section>}
+                    <div className="logic-capability-icon"><ShieldCheck size={16} /></div>
+                    <div className="logic-capability-content">
+                      <strong>Available in conditions</strong>
+                      <span>Can be used in conditions and logic checks</span>
+                    </div>
+                    <div className="logic-capability-toggle">
+                      {(override?.conditionReadable ?? true) ? <CheckCircle2 size={18} /> : <Circle size={18} />}
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    className={`logic-capability-card${(override?.actionWritable ?? source === "local") ? " active" : ""}`}
+                    onClick={() => onUpdateLogicPropertyOverride(selectedExplorerProperty.id, source, { actionWritable: !(override?.actionWritable ?? source === "local") })}
+                    aria-pressed={override?.actionWritable ?? source === "local"}
+                  >
+                    <div className="logic-capability-icon"><Pencil size={16} /></div>
+                    <div className="logic-capability-content">
+                      <strong>Writable in actions</strong>
+                      <span>Can be modified by story actions</span>
+                    </div>
+                    <div className="logic-capability-toggle">
+                      {(override?.actionWritable ?? source === "local") ? <CheckCircle2 size={18} /> : <Circle size={18} />}
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    className={`logic-capability-card${(override?.grantable ?? false) ? " active" : ""}`}
+                    onClick={() => onUpdateLogicPropertyOverride(selectedExplorerProperty.id, source, { grantable: !(override?.grantable ?? false) })}
+                    aria-pressed={override?.grantable ?? false}
+                  >
+                    <div className="logic-capability-icon"><Package size={16} /></div>
+                    <div className="logic-capability-content">
+                      <strong>Grantable</strong>
+                      <span>Can be granted or unlocked during gameplay</span>
+                    </div>
+                    <div className="logic-capability-toggle">
+                      {(override?.grantable ?? false) ? <CheckCircle2 size={18} /> : <Circle size={18} />}
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    className={`logic-capability-card${entityPresentable ? " active" : ""}`}
+                    onClick={() => onUpdateLogicPropertyOverride(selectedExplorerProperty.id, source, { entityPresentable: !entityPresentable, dialogueTrigger: !entityPresentable ? dialogueTrigger : false })}
+                    aria-pressed={entityPresentable}
+                  >
+                    <div className="logic-capability-icon"><UserRound size={16} /></div>
+                    <div className="logic-capability-content">
+                      <strong>Can be used as character</strong>
+                      <span>Values appear as characters/items in events</span>
+                    </div>
+                    <div className="logic-capability-toggle">
+                      {entityPresentable ? <CheckCircle2 size={18} /> : <Circle size={18} />}
+                    </div>
+                  </button>
+
+                  {entityPresentable ? (
+                    <button
+                      type="button"
+                      className={`logic-capability-card${dialogueTrigger ? " active" : ""} nested`}
+                      onClick={() => onUpdateLogicPropertyOverride(selectedExplorerProperty.id, source, { dialogueTrigger: !dialogueTrigger })}
+                      aria-pressed={dialogueTrigger}
+                    >
+                      <div className="logic-capability-icon"><MessageSquare size={16} /></div>
+                      <div className="logic-capability-content">
+                        <strong>Dialogue trigger source</strong>
+                        <span>Can start dialogue based on property value</span>
+                      </div>
+                      <div className="logic-capability-toggle">
+                        {dialogueTrigger ? <CheckCircle2 size={18} /> : <Circle size={18} />}
+                      </div>
+                    </button>
+                  ) : null}
+                </>;
+              })()}
+            </div>
+
+            {/* Schema Fields (Collapsible) */}
+            <details className="logic-property-technical-info">
+              <summary><Info size={12} /> Schema fields</summary>
+              <div className="logic-property-technical-content">
+                {selectedExplorerSchemaSource === "local" ? (
+                  <>
+                    <label className="field-label">
+                      Name
+                      <input
+                        value={selectedExplorerProperty.label}
+                        onChange={(event) =>
+                          onUpdateLocalExplorerProperty(selectedExplorerProperty.id, {
+                            label: event.target.value,
+                          })
+                        }
+                      />
+                    </label>
+                    <label className="field-label">
+                      Value type
+                      <select
+                        value={selectedExplorerProperty.valueType}
+                        onChange={(event) =>
+                          onUpdateLocalExplorerProperty(selectedExplorerProperty.id, {
+                            valueType: event.target.value,
+                          })
+                        }
+                      >
+                        <option value="text">Text</option>
+                        <option value="number">Number</option>
+                        <option value="boolean">Boolean</option>
+                        <option value="select">Select</option>
+                        <option value="multiselect">Multi-select</option>
+                        <option value="entity-ref">Entity reference</option>
+                      </select>
+                    </label>
+                    <label className="field-label">
+                      Applies to types
+                      <input
+                        value={(selectedExplorerProperty.appliesToTypes ?? []).join(", ")}
+                        onChange={(event) =>
+                          onUpdateLocalExplorerProperty(selectedExplorerProperty.id, {
+                            appliesToTypes: event.target.value
+                              .split(",")
+                              .map((value) => value.trim())
+                              .filter(Boolean),
+                          })
+                        }
+                      />
+                    </label>
+                    <label className="field-label">
+                      Description
+                      <textarea
+                        rows={4}
+                        value={selectedExplorerProperty.description ?? ""}
+                        onChange={(event) =>
+                          onUpdateLocalExplorerProperty(selectedExplorerProperty.id, {
+                            description: event.target.value,
+                          })
+                        }
+                      />
+                    </label>
+                  </>
+                ) : (
+                  <dl>
+                    <div><dt>ID</dt><dd>{selectedExplorerProperty.id}</dd></div>
+                    <div><dt>Value type</dt><dd>{selectedExplorerProperty.valueType}</dd></div>
+                    <div><dt>Applies to</dt><dd>{selectedExplorerProperty.appliesToTypes?.join(", ") || "all types"}</dd></div>
+                  </dl>
+                )}
+              </div>
+            </details>
           </section>
         ) : null}
 
@@ -8545,6 +8874,7 @@ function StoryCanvas({
   onUpdateDialogueBeat,
   onUpdateEventDialogueBeat,
   onImportSceneImage,
+  onUpdateSpeechBeatCounter,
   onImportEventCoverImage,
   onAuxiliaryPanelChange,
   onUpdateScriptBlock,
@@ -8713,6 +9043,7 @@ function StoryCanvas({
   ) => void;
   onUpdateDialogueBeat: (eventId: string, dialogueId: string, beatId: string, updates: Partial<DialogueBeat>) => void;
   onUpdateEventDialogueBeat: (eventId: string, beatId: string, updates: Partial<DialogueBeat>) => void;
+  onUpdateSpeechBeatCounter: (updates: Partial<SpeechBeatCounterPreference>) => void;
   onImportSceneImage: (eventId: string, dialogueId: string | undefined, beatId: string) => void;
   onImportEventCoverImage: (eventId: string) => void;
   onAuxiliaryPanelChange: (nodeId: string, panel: "directorNote" | "sceneImage" | "coverImage" | "description", open: boolean) => void;
@@ -8935,6 +9266,83 @@ function StoryCanvas({
                     node.data.details?.start as DialogueStart | undefined,
                   )
                 : undefined,
+            dialogueTriggerEditor:
+              node.data.kind === "dialogueStart" && typeof node.data.details?.eventId === "string"
+                ? (() => {
+                    const eventId = node.data.details.eventId as string;
+                    const start = node.data.details?.start as DialogueStart | undefined;
+                    const triggerEvent = findEvent(project, eventId);
+                    const eligibleEntityIds = new Set(
+                      project.canonRefs
+                        .filter((ref) => entitySupportsDialogueTrigger(project, ref))
+                        .map((ref) => ref.id),
+                    );
+                    const presentEntityIds = (triggerEvent?.presentEntityRefs ?? triggerEvent?.canonRefs ?? [])
+                      .filter((id) => eligibleEntityIds.has(id));
+                    const speakerOptions = project.canonRefs
+                      .filter((canonRef) => eligibleEntityIds.has(canonRef.id))
+                      .map((canonRef) => {
+                        const variants = canonVariantsForRef(canonRef).map((variant) => {
+                          const portrait = canonPresentationImageForRef(
+                            propertiesConfig,
+                            { ...canonRef, frontmatter: resolveCanonVariantFrontmatter(canonRef, variant.id) },
+                            "portrait",
+                          );
+                          return {
+                            ...variant,
+                            portraitUrl: portrait ? canonVaultImageUrl(project, portrait.value) : undefined,
+                          };
+                        });
+                        const portrait = variants.find((variant) => variant.id === "base")?.portraitUrl;
+                        return {
+                          id: canonRef.id,
+                          label: canonRef.label ?? canonRef.id,
+                          portraitUrl: portrait,
+                          variants,
+                        };
+                      });
+                    const selectedCharacterId = start?.source?.kind === "canonRef" ? start.source.id : undefined;
+                    const selectedActionId = start?.source?.kind === "canonRef" ? start.source.propertyId : undefined;
+                    return {
+                      speakerOptions,
+                      presentEntityIds,
+                      selectedCharacterId,
+                      triggerActions: DIALOGUE_TRIGGER_ACTIONS,
+                      selectedActionId,
+                      onCharacterChange: (characterId?: string) => {
+                        const currentTriggerEvent = findEvent(project, eventId);
+                        if (!currentTriggerEvent || !start) return;
+                        const currentPresentEntityRefs = currentTriggerEvent.presentEntityRefs ?? currentTriggerEvent.canonRefs ?? [];
+                        const updatedPresentEntityRefs = characterId && !currentPresentEntityRefs.includes(characterId)
+                          ? [...currentPresentEntityRefs, characterId]
+                          : currentPresentEntityRefs;
+                        const newSource: DialogueStart["source"] | undefined = characterId
+                          ? { kind: "canonRef", id: characterId }
+                          : undefined;
+                        onUpdateEvent(eventId, {
+                          presentEntityRefs: updatedPresentEntityRefs,
+                          dialogueStarts: (currentTriggerEvent.dialogueStarts ?? []).map((s) =>
+                            s.id === start.id ? { ...s, source: newSource } : s,
+                          ),
+                        });
+                      },
+                      onActionChange: (actionId?: string) => {
+                        const currentTriggerEvent = findEvent(project, eventId);
+                        if (!currentTriggerEvent || !start) return;
+                        const currentStart = (currentTriggerEvent.dialogueStarts ?? []).find((s) => s.id === start.id);
+                        const currentSource = currentStart?.source;
+                        if (currentSource?.kind !== "canonRef") return;
+                        onUpdateEvent(eventId, {
+                          dialogueStarts: (currentTriggerEvent.dialogueStarts ?? []).map((s) =>
+                            s.id === start.id
+                              ? { ...s, source: { ...currentSource, propertyId: actionId } }
+                              : s,
+                          ),
+                        });
+                      },
+                    };
+                  })()
+                : undefined,
             eventEditor:
               node.data.kind === "event" && node.data.details?.showEventOverview === true
                 ? (() => {
@@ -9072,9 +9480,10 @@ function StoryCanvas({
                   const activeText = block
                     ? blockValues(project, blockRef.scriptId, block, primaryLocale)[canvasLocale] ?? ""
                     : "";
+                  const universeSpeechCounter = project.authoringPreferences?.speechBeatCounter;
                   const lengthTarget = beat.kind === "speech"
-                    ? beatEvent?.speechBeatLengthTarget ?? (authoringDisplay.speechBeatCounterEnabled
-                      ? { unit: authoringDisplay.speechBeatCounterUnit, target: authoringDisplay.speechBeatCounterTarget }
+                    ? beatEvent?.speechBeatLengthTarget ?? (universeSpeechCounter?.enabled
+                      ? { unit: universeSpeechCounter.unit, target: universeSpeechCounter.target }
                       : undefined)
                     : undefined;
                   const textCount = !lengthTarget
@@ -9106,8 +9515,20 @@ function StoryCanvas({
                     textCounter: lengthTarget && lengthTarget.target > 0
                       ? { count: textCount, unit: lengthTarget.unit, target: lengthTarget.target }
                       : undefined,
+                    counterPreference: beat.kind === "speech"
+                      ? {
+                          enabled: universeSpeechCounter?.enabled ?? DEFAULT_SPEECH_BEAT_COUNTER_PREFERENCE.enabled,
+                          unit: universeSpeechCounter?.unit ?? DEFAULT_SPEECH_BEAT_COUNTER_PREFERENCE.unit,
+                          target: universeSpeechCounter?.target ?? DEFAULT_SPEECH_BEAT_COUNTER_PREFERENCE.target,
+                          eventOverride: Boolean(beatEvent?.speechBeatLengthTarget),
+                        }
+                      : undefined,
+                    onCounterPreferenceUpdate: beat.kind === "speech"
+                      ? (updates: Partial<SpeechBeatCounterPreference>) => onUpdateSpeechBeatCounter(updates)
+                      : undefined,
+                    presentEntityIds: presentEntityRefs,
                     speakerOptions: project.canonRefs
-                      .filter((canonRef) => presentEntityRefs.includes(canonRef.id) || canonRef.id === currentCharacterRef)
+                      .filter((canonRef) => canonRefIsEntityPresentable(project, propertiesConfig, canonRef))
                       .map((canonRef) => {
                         const variants = canonVariantsForRef(canonRef).map((variant) => {
                           const portrait = canonPresentationImageForRef(
@@ -9169,6 +9590,30 @@ function StoryCanvas({
                       onUpdateScriptBlock(blockRef.scriptId, blockRef.blockId, {
                         characterVariantId: characterVariantId === "base" ? undefined : characterVariantId,
                       }),
+                    beatConnector:
+                      node.data.kind === "speechBeat" &&
+                      activeScope &&
+                      (activeScope.kind === "event" || activeScope.kind === "dialogue")
+                        ? {
+                            onConnect: (kind: "speechBeat" | "decision" | "directionBeat") => {
+                              const position = connectedNarrativeNodePosition(
+                                nodes,
+                                node,
+                                canvasNodeSizeForKind(kind),
+                                {
+                                  snapToGrid: canvasBackground.snapToGrid,
+                                  gridSize: canvasBackground.gridSize,
+                                },
+                              );
+                              onCreateConnectedNarrativeNode(
+                                activeScope as Extract<CanvasScope, { kind: "event" | "dialogue" }>,
+                                node.id,
+                                kind,
+                                position,
+                              );
+                            },
+                          }
+                        : undefined,
                   };
                 })()
               : undefined,
@@ -9201,7 +9646,7 @@ function StoryCanvas({
         };
       }),
     }),
-    [activeScope, authoringDisplay, canvasBackground.connectionPadding, canvasLocale, commitEdgeLabel, editingEdgeId, edges, inspectorEdgeStates, inspectorNodeStates, localeNames, locales, nodes, onAuxiliaryPanelChange, onCreateBoundaryEnd, onCreateBoundaryRoute, onCreateBoundaryRouteEvent, onCreateOutcome, onDeleteBoundaryEnd, onDeleteOutcome, onImportEventCoverImage, onImportSceneImage, onUpdateDecision, onUpdateDialogueBeat, onUpdateEvent, onUpdateEventDialogueBeat, onUpdateLocalizedText, onUpdateOutcome, onUpdateScriptBlock, onUpdateTransition, onWorkspaceBoundsChange, primaryLocale, project, propertiesConfig],
+    [activeScope, authoringDisplay, canvasBackground.connectionPadding, canvasBackground.gridSize, canvasBackground.snapToGrid, canvasLocale, commitEdgeLabel, editingEdgeId, edges, inspectorEdgeStates, inspectorNodeStates, localeNames, locales, nodes, onAuxiliaryPanelChange, onCreateBoundaryEnd, onCreateBoundaryRoute, onCreateBoundaryRouteEvent, onCreateConnectedNarrativeNode, onCreateOutcome, onDeleteBoundaryEnd, onDeleteOutcome, onImportEventCoverImage, onImportSceneImage, onUpdateDecision, onUpdateDialogueBeat, onUpdateEvent, onUpdateEventDialogueBeat, onUpdateLocalizedText, onUpdateOutcome, onUpdateScriptBlock, onUpdateTransition, onWorkspaceBoundsChange, primaryLocale, project, propertiesConfig],
   );
   const activeEventScope =
     activeScope?.kind === "event"
@@ -9456,6 +9901,36 @@ function StoryCanvas({
       });
     },
     [graph.nodes, onNavigateScope, onSelect, project, reactFlowInstance],
+  );
+
+  const closeExplorerInspectorTabsAbove = useCallback(
+    (tabId: string) => {
+      const allTabs = [...inspectorTabs];
+      const index = allTabs.findIndex((tab) => tab.id === tabId);
+      if (index <= 0) return;
+      const tabsToClose = allTabs.slice(0, index).map((tab) => tab.id);
+      tabsToClose.forEach((id) => onCloseInspectorTab(id));
+    },
+    [inspectorTabs, onCloseInspectorTab],
+  );
+
+  const closeExplorerInspectorTabsBelow = useCallback(
+    (tabId: string) => {
+      const allTabs = [...inspectorTabs];
+      const index = allTabs.findIndex((tab) => tab.id === tabId);
+      if (index < 0 || index >= allTabs.length - 1) return;
+      const tabsToClose = allTabs.slice(index + 1).map((tab) => tab.id);
+      tabsToClose.forEach((id) => onCloseInspectorTab(id));
+    },
+    [inspectorTabs, onCloseInspectorTab],
+  );
+
+  const closeOtherExplorerInspectorTabs = useCallback(
+    (tabId: string) => {
+      const tabsToClose = inspectorTabs.filter((tab) => tab.id !== tabId && tab.mode !== "debug").map((tab) => tab.id);
+      tabsToClose.forEach((id) => onCloseInspectorTab(id));
+    },
+    [inspectorTabs, onCloseInspectorTab],
   );
 
   const openContextMenu = useCallback(
@@ -9864,7 +10339,10 @@ function StoryCanvas({
             clearDirectedNodeHold();
             if (clickCount === 2) {
               clearPendingNodeClick();
-              openNodeCanvas(node);
+              // Double-click on a speech beat no longer enters the event script mode.
+              if (node.data.kind !== "speechBeat") {
+                openNodeCanvas(node);
+              }
               return;
             }
             if (clickCount > 2) {
@@ -10073,57 +10551,6 @@ function StoryCanvas({
             </>
           ) : contextMenu.kind === "route-gate" ? (
             <>
-              <span className="canvas-menu-label">Transition</span>
-              <button
-                type="button"
-                onClick={() => {
-                  if (contextMenu.routeSourceId) onInsertRouteGate(contextMenu.routeSourceId);
-                  setContextMenu(undefined);
-                }}
-              >
-                Insert Route Gate
-              </button>
-            </>
-          ) : contextMenu.kind === "connect-create" ? (
-            <>
-              <span className="canvas-menu-label">
-                {activeEventScope || activeDialogueScope
-                  ? "Create connected narrative node"
-                  : "Create connected event"}
-              </span>
-              {!activeDialogueScope ? (
-                <EventTypeMenuButton
-                  label="Events"
-                  options={eventTypeOptions}
-                  onSelect={(categoryId) => {
-                    if (contextMenu.sourceNodeId) {
-                      if (activeEventScope) {
-                        onCreateConnectedNestedEvent(
-                          activeEventScope.id,
-                          contextMenu.sourceNodeId,
-                          categoryId,
-                          positionForNewNode(
-                            { x: contextMenu.flowX, y: contextMenu.flowY },
-                            "event",
-                          ),
-                          contextMenu.sourceHandleId,
-                        );
-                      } else {
-                        onCreateConnectedEvent(
-                          contextMenu.sourceNodeId,
-                          categoryId,
-                          positionForNewNode(
-                            { x: contextMenu.flowX, y: contextMenu.flowY },
-                            "event",
-                          ),
-                          contextMenu.sourceHandleId,
-                        );
-                      }
-                    }
-                    setContextMenu(undefined);
-                  }}
-                />
-              ) : null}
               {activeScope?.kind === "event" || activeDialogueScope
                 ? (() => {
                     const scope = activeScope?.kind === "event"
@@ -10149,29 +10576,149 @@ function StoryCanvas({
                     };
                     return (
                       <>
-                        <button type="button" onClick={() => connectNarrativeNode("decision", "decision")}>
-                          Decision
+                        <span className="canvas-menu-label">Create connected narrative node</span>
+                        <button type="button" onClick={() => connectNarrativeNode("dialogueStart", "dialogueStart")}>
+                          Dialogue Trigger
                         </button>
                         <button type="button" onClick={() => connectNarrativeNode("speechBeat", "speechBeat")}>
-                          Speech Beat
+                          Dialogue
+                        </button>
+                        <button type="button" onClick={() => connectNarrativeNode("decision", "decision")}>
+                          Decision
                         </button>
                         <button type="button" onClick={() => connectNarrativeNode("directionBeat", "directionBeat")}>
                           Director Direction
                         </button>
+                        <hr style={{ margin: "8px 0", borderColor: "var(--color-border)" }} />
                         {activeEventScope ? (
                           <>
-                            <button type="button" onClick={() => connectNarrativeNode("dialogue", "dialogue")}>
-                              Dialogue
-                            </button>
-                            <button type="button" onClick={() => connectNarrativeNode("dialogueStart", "dialogueStart")}>
-                              Dialogue Trigger
+                            <EventTypeMenuButton
+                              label="Events"
+                              options={eventTypeOptions}
+                              onSelect={(categoryId) => {
+                                onCreateNestedEvent(activeEventScope.id, categoryId, {
+                                  ...positionForNewNode(
+                                    { x: contextMenu.flowX, y: contextMenu.flowY },
+                                    "event",
+                                  ),
+                                });
+                                setContextMenu(undefined);
+                              }}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => {
+                                onCreateDialogue(
+                                  activeEventScope.id,
+                                  positionForNewNode(
+                                    { x: contextMenu.flowX, y: contextMenu.flowY },
+                                    "dialogue",
+                                  ),
+                                );
+                                setContextMenu(undefined);
+                              }}
+                            >
+                              Dialogue Group
                             </button>
                           </>
                         ) : null}
                       </>
                     );
                   })()
+                : (
+                  <>
+                    <span className="canvas-menu-label">Transition</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (contextMenu.routeSourceId) onInsertRouteGate(contextMenu.routeSourceId);
+                        setContextMenu(undefined);
+                      }}
+                    >
+                      Insert Route Gate
+                    </button>
+                  </>
+                )}
+            </>
+          ) : contextMenu.kind === "connect-create" ? (
+            <>
+              <span className="canvas-menu-label">
+                {activeEventScope || activeDialogueScope
+                  ? "Create connected narrative node"
+                  : "Create connected event"}
+              </span>
+              {activeScope?.kind === "event" || activeDialogueScope
+                ? (() => {
+                    const scope = activeScope?.kind === "event"
+                      ? activeScope
+                      : activeDialogueScope;
+                    const sourceNodeId = contextMenu.sourceNodeId;
+                    if (!scope || !sourceNodeId) return null;
+                    const connectNarrativeNode = (
+                      kind: ConnectedNarrativeNodeKind,
+                      nodeKind: StoryCanvasNodeData["kind"],
+                    ) => {
+                      onCreateConnectedNarrativeNode(
+                        scope,
+                        sourceNodeId,
+                        kind,
+                        positionForNewNode(
+                          { x: contextMenu.flowX, y: contextMenu.flowY },
+                          nodeKind,
+                        ),
+                        contextMenu.sourceHandleId,
+                      );
+                      setContextMenu(undefined);
+                    };
+                    return (
+                      <>
+                        {activeEventScope ? (
+                          <>
+                            <button type="button" onClick={() => connectNarrativeNode("dialogueStart", "dialogueStart")}>
+                              Dialogue Trigger
+                            </button>
+                            <button type="button" onClick={() => connectNarrativeNode("speechBeat", "speechBeat")}>
+                              Dialogue
+                            </button>
+                          </>
+                        ) : null}
+                        <button type="button" onClick={() => connectNarrativeNode("decision", "decision")}>
+                          Decision
+                        </button>
+                        <button type="button" onClick={() => connectNarrativeNode("directionBeat", "directionBeat")}>
+                          Director Direction
+                        </button>
+                        <hr />
+                        <button type="button" onClick={() => connectNarrativeNode("dialogue", "dialogue")}>
+                          Dialogue Group
+                        </button>
+                      </>
+                    );
+                  })()
                 : null}
+              {!activeEventScope ? (
+                <>
+                  <hr />
+                  <EventTypeMenuButton
+                    label="Events"
+                    options={eventTypeOptions}
+                    onSelect={(categoryId) => {
+                      if (contextMenu.sourceNodeId) {
+                        onCreateConnectedEvent(
+                          contextMenu.sourceNodeId,
+                          categoryId,
+                          positionForNewNode(
+                            { x: contextMenu.flowX, y: contextMenu.flowY },
+                            "event",
+                          ),
+                          contextMenu.sourceHandleId,
+                        );
+                      }
+                      setContextMenu(undefined);
+                    }}
+                  />
+                </>
+              ) : null}
             </>
           ) : activeDialogueScope ? (
             <>
@@ -10232,30 +10779,54 @@ function StoryCanvas({
               <span className="canvas-menu-label">
                 {activeEventScope ? "Create inside event" : "Create event"}
               </span>
-              <EventTypeMenuButton
-                label="Events"
-                options={eventTypeOptions}
-                onSelect={(categoryId) => {
-                  if (activeEventScope) {
-                    onCreateNestedEvent(activeEventScope.id, categoryId, {
-                      ...positionForNewNode(
-                        { x: contextMenu.flowX, y: contextMenu.flowY },
-                        "event",
-                      ),
-                    });
-                  } else {
+              {activeEventScope ? null : (
+                <EventTypeMenuButton
+                  label="Events"
+                  options={eventTypeOptions}
+                  onSelect={(categoryId) => {
                     onCreateEvent(categoryId, {
                       ...positionForNewNode(
                         { x: contextMenu.flowX, y: contextMenu.flowY },
                         "event",
                       ),
                     });
-                  }
-                  setContextMenu(undefined);
-                }}
-              />
+                    setContextMenu(undefined);
+                  }}
+                />
+              )}
               {activeEventScope ? (
                 <>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onCreateDialogueStart(
+                        activeEventScope.id,
+                        positionForNewNode(
+                          { x: contextMenu.flowX, y: contextMenu.flowY },
+                          "dialogueStart",
+                        ),
+                      );
+                      setContextMenu(undefined);
+                    }}
+                  >
+                    Dialogue Trigger
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onCreateEventDialogueBeat(
+                        activeEventScope.id,
+                        "speech",
+                        positionForNewNode(
+                          { x: contextMenu.flowX, y: contextMenu.flowY },
+                          "speechBeat",
+                        ),
+                      );
+                      setContextMenu(undefined);
+                    }}
+                    >
+                      Dialogue
+                    </button>
                   <button
                     type="button"
                     onClick={() => {
@@ -10272,22 +10843,6 @@ function StoryCanvas({
                   >
                     Decision
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onCreateEventDialogueBeat(
-                        activeEventScope.id,
-                        "speech",
-                        positionForNewNode(
-                          { x: contextMenu.flowX, y: contextMenu.flowY },
-                          "speechBeat",
-                        ),
-                      );
-                      setContextMenu(undefined);
-                    }}
-                    >
-                      Speech Beat
-                    </button>
                     <button
                       type="button"
                       onClick={() => {
@@ -10304,6 +10859,20 @@ function StoryCanvas({
                     >
                       Director Direction
                     </button>
+                    <hr style={{ margin: "8px 0", borderColor: "var(--color-border)" }} />
+                    <EventTypeMenuButton
+                      label="Events"
+                      options={eventTypeOptions}
+                      onSelect={(categoryId) => {
+                        onCreateNestedEvent(activeEventScope.id, categoryId, {
+                          ...positionForNewNode(
+                            { x: contextMenu.flowX, y: contextMenu.flowY },
+                            "event",
+                          ),
+                        });
+                        setContextMenu(undefined);
+                      }}
+                    />
                     <button
                     type="button"
                     onClick={() => {
@@ -10317,22 +10886,7 @@ function StoryCanvas({
                       setContextMenu(undefined);
                     }}
                   >
-                    Dialogue
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onCreateDialogueStart(
-                        activeEventScope.id,
-                        positionForNewNode(
-                          { x: contextMenu.flowX, y: contextMenu.flowY },
-                          "dialogueStart",
-                        ),
-                      );
-                      setContextMenu(undefined);
-                    }}
-                  >
-                    Dialogue Trigger
+                    Dialogue Group
                   </button>
                 </>
               ) : (
@@ -10383,6 +10937,9 @@ function StoryCanvas({
         onOpenInspectorTab={onOpenInspectorTab}
         onCloseInspectorTab={onCloseInspectorTab}
         onCloseAllInspectorTabs={onCloseAllInspectorTabs}
+        onCloseInspectorTabsAbove={closeExplorerInspectorTabsAbove}
+        onCloseInspectorTabsBelow={closeExplorerInspectorTabsBelow}
+        onCloseOtherInspectorTabs={closeOtherExplorerInspectorTabs}
         onDisableInspectorDebug={onDisableInspectorDebug}
         onToggleInspectorMaximized={onToggleInspectorMaximized}
       >
@@ -10472,6 +11029,11 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
   const [showFeedback, setShowFeedback] = useState(false);
   const [workspace, setWorkspace] = useState<PathBranchingWorkspace>();
   const [onboardingDismissed, setOnboardingDismissed] = useState(false);
+  const [showInteractionTutorial, setShowInteractionTutorial] = useState(
+    () =>
+      window.localStorage.getItem(PATHBRANCHING_INTERACTION_TUTORIAL_KEY) !==
+      "dismissed",
+  );
   const [project, setProject] = useState<BranchingProject>();
   const [fileState, setFileState] = useState<ProjectFileState>({
     dirty: false,
@@ -11280,10 +11842,10 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
   );
 
   const createExplorerEntity = useCallback(
-    (type: string) => {
+    (type: string, name = "New Entity") => {
       const currentProject = projectRef.current;
       if (!currentProject) return;
-      const base = createLocalExplorerEntity(type);
+      const base = createLocalExplorerEntity(type, name);
       const existingIds = new Set([
         ...(currentProject.localExplorerEntities ?? []).map(
           (entity) => entity.id,
@@ -11352,10 +11914,10 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
     });
   }, [commitStructuralAction]);
 
-  const createExplorerProperty = useCallback(() => {
+  const createExplorerProperty = useCallback((label = "New local property", valueType: LocalExplorerProperty["valueType"] = "text") => {
     const currentProject = projectRef.current;
     if (!currentProject) return;
-    const property = createLocalExplorerProperty();
+    const property = createLocalExplorerProperty(label, valueType);
     void commitStructuralAction("Created local Explorer property", {
       project: {
         ...currentProject,
@@ -11371,6 +11933,31 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
       },
     });
   }, [commitStructuralAction]);
+
+  const initializePropertiesFromTemplate = useCallback(async () => {
+    const universePath = fileStateRef.current.universePath;
+    if (!universePath) {
+      console.warn("No active workspace to initialize properties");
+      return;
+    }
+    try {
+      const { initializePropertiesFile, openUniversePath } = await import("./projectPersistence.js");
+      const result = await initializePropertiesFile(universePath);
+      if (result.ok) {
+        // Reload the workspace to pick up the new properties
+        console.log("Properties file created successfully. Reloading workspace...");
+        // Trigger a workspace reload by re-indexing using openUniversePath
+        const reloadedWorkspaceData = await openUniversePath(universePath);
+        if (reloadedWorkspaceData?.workspace) {
+          applyWorkspace(reloadedWorkspaceData.workspace, reloadedWorkspaceData.path);
+        }
+      } else {
+        console.error("Failed to create properties file:", result.message);
+      }
+    } catch (error) {
+      console.error("Error initializing properties:", error);
+    }
+  }, [applyWorkspace]);
 
   const updateLocalExplorerType = useCallback(
     (id: string, updates: Partial<LocalExplorerType>) => {
@@ -11411,34 +11998,56 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
     [updateManualInspectorDraft],
   );
 
+  const deleteLocalExplorerProperty = useCallback(
+    (id: string) => {
+      const currentProject = projectRef.current;
+      if (!currentProject) return;
+      void commitStructuralAction("Deleted local Explorer property", {
+        project: {
+          ...currentProject,
+          localExplorerProperties: (currentProject.localExplorerProperties ?? []).filter(
+            (property) => property.id !== id,
+          ),
+        },
+      });
+    },
+    [commitStructuralAction],
+  );
+
   const updateLogicPropertyOverride = useCallback(
     (
       propertyId: string,
       source: "canon" | "local",
       changes: Partial<LogicPropertyOverride>,
     ) => {
-      updateManualInspectorDraft(
-        { type: "explorerProperty", id: propertyId, source },
-        (project) => {
-          const current = (project.logicPropertyOverrides ?? []).find(
-            (item) => item.propertyId === propertyId && item.source === source,
-          ) ?? { propertyId, source };
-          const normalizedChanges = changes.entityPresentable === false
-            ? { ...changes, dialogueTrigger: false }
-            : changes;
-          return {
-            ...project,
-            logicPropertyOverrides: [
-              ...(project.logicPropertyOverrides ?? []).filter(
-                (item) => item.propertyId !== propertyId || item.source !== source,
-              ),
-              { ...current, ...normalizedChanges },
-            ],
-          };
-        },
+      const currentProject = projectRef.current;
+      if (!currentProject) return;
+      
+      const current = (currentProject.logicPropertyOverrides ?? []).find(
+        (item) => item.propertyId === propertyId && item.source === source,
+      ) ?? { propertyId, source };
+      
+      const normalizedChanges = changes.entityPresentable === false
+        ? { ...changes, dialogueTrigger: false }
+        : changes;
+      
+      const updatedProject = {
+        ...currentProject,
+        logicPropertyOverrides: [
+          ...(currentProject.logicPropertyOverrides ?? []).filter(
+            (item) => item.propertyId !== propertyId || item.source !== source,
+          ),
+          { ...current, ...normalizedChanges },
+        ],
+      };
+      
+      // Commit directly without using drafts for immediate save
+      void commitStructuralAction(
+        "Updated property capability",
+        updatedProject,
       );
     },
-    [updateManualInspectorDraft],
+    [commitStructuralAction],
   );
 
   const publishLocalExplorerEntity = useCallback(
@@ -12334,6 +12943,58 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
       );
     },
     [],
+  );
+
+  const closeExplorerInspectorTabsAbove = useCallback(
+    (id: string) => {
+      setInspectorTabs((current) => {
+        const index = current.findIndex((tab) => tab.id === id);
+        if (index <= 0) return current;
+        const removed = new Set(
+          current.slice(0, index).filter((tab) => tab.mode !== "debug").map((tab) => tab.id),
+        );
+        if (removed.size === 0) return current;
+        if (expandedInspectorTabId && removed.has(expandedInspectorTabId)) {
+          setExpandedInspectorTabId(id);
+        }
+        return current.filter((tab) => !removed.has(tab.id));
+      });
+    },
+    [expandedInspectorTabId],
+  );
+
+  const closeExplorerInspectorTabsBelow = useCallback(
+    (id: string) => {
+      setInspectorTabs((current) => {
+        const index = current.findIndex((tab) => tab.id === id);
+        if (index < 0 || index >= current.length - 1) return current;
+        const removed = new Set(
+          current.slice(index + 1).filter((tab) => tab.mode !== "debug").map((tab) => tab.id),
+        );
+        if (removed.size === 0) return current;
+        if (expandedInspectorTabId && removed.has(expandedInspectorTabId)) {
+          setExpandedInspectorTabId(id);
+        }
+        return current.filter((tab) => !removed.has(tab.id));
+      });
+    },
+    [expandedInspectorTabId],
+  );
+
+  const closeOtherExplorerInspectorTabs = useCallback(
+    (id: string) => {
+      setInspectorTabs((current) => {
+        const removed = new Set(
+          current.filter((tab) => tab.id !== id && tab.mode !== "debug").map((tab) => tab.id),
+        );
+        if (removed.size === 0) return current;
+        if (expandedInspectorTabId && removed.has(expandedInspectorTabId)) {
+          setExpandedInspectorTabId(id);
+        }
+        return current.filter((tab) => !removed.has(tab.id));
+      });
+    },
+    [expandedInspectorTabId],
   );
 
   const loadInspectorTabGroup = useCallback(
@@ -14572,6 +15233,33 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
     [commitStructuralAction, project],
   );
 
+  const updateSpeechBeatCounter = useCallback(
+    (updates: Partial<SpeechBeatCounterPreference>) => {
+      if (!project) {
+        return;
+      }
+      const current =
+        project.authoringPreferences?.speechBeatCounter ??
+        DEFAULT_SPEECH_BEAT_COUNTER_PREFERENCE;
+      const next: SpeechBeatCounterPreference = {
+        enabled: updates.enabled ?? current.enabled,
+        unit: updates.unit ?? current.unit,
+        target:
+          typeof updates.target === "number" && Number.isFinite(updates.target)
+            ? Math.min(2000, Math.max(1, Math.round(updates.target)))
+            : current.target,
+      };
+      void commitStructuralAction("Updated speech beat counter", {
+        ...project,
+        authoringPreferences: {
+          ...project.authoringPreferences,
+          speechBeatCounter: next,
+        },
+      });
+    },
+    [commitStructuralAction, project],
+  );
+
 
   const deleteDataObject = useCallback(
     (id: string) => {
@@ -16326,6 +17014,7 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
       theme={activeTheme}
       onUpdateEventCategories={updateEventCategories}
       onAuthoringDisplayChange={changeAuthoringDisplay}
+      onUpdateSpeechBeatCounter={updateSpeechBeatCounter}
       onCanvasBackgroundChange={changeCanvasBackground}
       onNodeColorChange={changeNodeColors}
       onThemeChange={changeTheme}
@@ -16403,6 +17092,16 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
     if (fileState.universePath) window.localStorage.removeItem(`${PATHBRANCHING_ONBOARDING_KEY}:${fileState.universePath}`);
     setOnboardingDismissed(false);
   };
+  const dismissInteractionTutorial = () => {
+    window.localStorage.setItem(
+      PATHBRANCHING_INTERACTION_TUTORIAL_KEY,
+      "dismissed",
+    );
+    setShowInteractionTutorial(false);
+  };
+  const interactionTutorialLocale = resolveInterfaceLocale(
+    suiteChrome?.suiteSettings?.localePreference ?? settings.localePreference,
+  );
 
   if (error) {
     return (
@@ -16538,15 +17237,18 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
         >
           {panelVisibility.assets ? <AssetsPanel
             project={project}
+            propertiesConfig={workspace?.canonIndex.propertiesConfig}
             collapsed={panelCollapsed.assets}
             onCollapsedChange={(collapsed) => setPanelCollapsedState("assets", collapsed)}
             onContextMenu={openPanelContextMenu}
             onImport={() => void importAssets()}
             selected={selection}
-            onSelect={selectWithEventDraftGuard}
+            onSelect={setSelection}
+            onOpenInspector={selectWithEventDraftGuard}
             onCreateEntity={createExplorerEntity}
             onDeleteEntity={deleteLocalExplorerEntity}
             onCreateType={createExplorerType}
+            onInitializeProperties={initializePropertiesFromTemplate}
           /> : null}
           {panelVisibility.logic ? <LogicPanel
             project={project}
@@ -16556,10 +17258,13 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
             onContextMenu={openPanelContextMenu}
             onUpdate={(nextProject) => updateProject(nextProject)}
             selected={selection}
-            onSelect={selectWithEventDraftGuard}
+            onSelect={setSelection}
+            onOpenInspector={selectWithEventDraftGuard}
             onCreateProperty={createExplorerProperty}
+            onInitializeProperties={initializePropertiesFromTemplate}
             onUpdateLocalExplorerProperty={updateLocalExplorerProperty}
             onUpdateLogicPropertyOverride={updateLogicPropertyOverride}
+            onDeleteLocalExplorerProperty={deleteLocalExplorerProperty}
           /> : null}
           {panelVisibility.outline ? <FilesPanel
             project={project}
@@ -16592,6 +17297,7 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
             onOutlineTabChange={setStoryOutlineTab}
             onNavigatePathNode={navigatePathTreeNode}
             onContextMenu={openPanelContextMenu}
+            propertiesConfig={workspace?.canonIndex.propertiesConfig}
           /> : null}
           {eventScriptWorkspace ? (
             <EventScriptWorkspace
@@ -16695,6 +17401,7 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
             onUpdateDialogue={updateDialogue}
             onUpdateDialogueBeat={updateDialogueBeat}
             onUpdateEventDialogueBeat={updateEventDialogueBeat}
+            onUpdateSpeechBeatCounter={updateSpeechBeatCounter}
             onImportSceneImage={importSceneImageForBeat}
             onImportEventCoverImage={importEventCoverImage}
             onAuxiliaryPanelChange={changeAuxiliaryPanel}
@@ -16826,6 +17533,12 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
           onDismiss={dismissPathBranchingOnboarding}
           onRestart={restartPathBranchingOnboarding}
           onOpenStories={openStoriesForOnboarding}
+        />
+      ) : null}
+      {showInteractionTutorial ? (
+        <InteractionTutorial
+          locale={interactionTutorialLocale}
+          onDismiss={dismissInteractionTutorial}
         />
       ) : null}
       {settingsModal}
