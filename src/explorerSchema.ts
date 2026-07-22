@@ -312,12 +312,26 @@ export function typeCapability(
     (item) => item.propertyId === `type:${normalizedTypeId}` && item.source === source,
   );
   if (!configured && !legacy) return undefined;
-  return {
-    ...legacy,
+  const merged = {
     ...configured,
+    ...legacy,
+    // Older migrations could leave undefined capability keys on the property
+    // override. Do not let those erase a still-valid type override.
+    ...(legacy?.grantable === undefined && configured?.grantable !== undefined
+      ? { grantable: configured.grantable }
+      : {}),
+    ...(legacy?.location === undefined && configured?.location !== undefined
+      ? { location: configured.location }
+      : {}),
+    ...(legacy?.runtimeRoles === undefined && configured?.runtimeRoles !== undefined
+      ? { runtimeRoles: configured.runtimeRoles }
+      : {}),
+  };
+  return {
+    ...merged,
     typeId: normalizedTypeId,
     source,
-    runtimeRoles: configured?.runtimeRoles ?? legacy?.runtimeRoles ??
+    runtimeRoles: legacy?.runtimeRoles ?? configured?.runtimeRoles ??
       (configured?.grantable || legacy?.grantable ? ["owned" as const] : undefined),
   };
 }
@@ -534,8 +548,9 @@ export function migrateLogicTypeOverridesToPropertyOverrides(
   return typeOverrides.map((override) => ({
     propertyId: `type:${override.typeId}`,
     source: override.source,
-    grantable: override.grantable,
-    location: override.location,
+    ...(override.grantable !== undefined ? { grantable: override.grantable } : {}),
+    ...(override.location !== undefined ? { location: override.location } : {}),
+    ...(override.runtimeRoles !== undefined ? { runtimeRoles: override.runtimeRoles } : {}),
   }));
 }
 

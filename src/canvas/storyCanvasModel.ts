@@ -120,6 +120,11 @@ type LayoutCursor = {
 };
 
 const NODE_WIDTH = 230;
+const ROUTE_GATE_VISUAL_WIDTH = 34;
+const ROUTE_GATE_VISUAL_HEIGHT = 34;
+const ROUTE_GATE_LOGIC_WIDTH = 168;
+const ROUTE_GATE_LOGIC_HEIGHT = 92;
+const ROUTE_GATE_SOURCE_GAP = 58;
 const BRANCH_WIDTH = 390;
 const BRANCH_PADDING_TOP = 82;
 const BRANCH_PADDING_X = 22;
@@ -170,6 +175,48 @@ function branchColor(branch: Branch | undefined, branchId: string | undefined | 
 function positionFor(project: BranchingProject, id: string, x: number, y: number, scope?: CanvasScope) {
   const scoped = scope ? project.canvas?.scopes?.[canvasScopeKey(scope)]?.nodes?.[id]?.position : undefined;
   return scoped ?? project.canvas?.nodes?.[id]?.position ?? { x, y };
+}
+
+type RouteGateAnchor = {
+  id: string;
+  centerX: number;
+  centerY: number;
+};
+
+function reflowLogicLayerAroundRouteGates(nodes: StoryCanvasNode[], anchors: RouteGateAnchor[]) {
+  if (!anchors.length) return;
+  const horizontalExpansion = (ROUTE_GATE_LOGIC_WIDTH - ROUTE_GATE_VISUAL_WIDTH) / 2;
+  const gateIds = new Set(anchors.map((anchor) => anchor.id));
+  const horizontalShifts = new Map<string, number>();
+
+  nodes.forEach((node) => {
+    if (
+      gateIds.has(node.id) ||
+      node.data.kind === "workspace" ||
+      node.data.kind === "boundary" ||
+      node.data.kind === "endAdder"
+    ) {
+      return;
+    }
+
+    const nodeCenterX = node.position.x + (node.width ?? NODE_WIDTH) / 2;
+    const horizontalShift = anchors.reduce((total, anchor) => {
+      if (nodeCenterX < anchor.centerX) return total - horizontalExpansion;
+      if (nodeCenterX > anchor.centerX) return total + horizontalExpansion;
+      return total;
+    }, 0);
+    if (horizontalShift !== 0) horizontalShifts.set(node.id, horizontalShift);
+  });
+
+  // Apply the displacement after every node has been measured from the same
+  // visual layout. Nodes on the same side of a gate therefore move by the
+  // same amount and retain their internal spacing in both layers.
+  nodes.forEach((node) => {
+    const horizontalShift = horizontalShifts.get(node.id);
+    if (horizontalShift !== undefined) {
+      node.position = { ...node.position, x: node.position.x + horizontalShift };
+    }
+  });
 }
 
 function pushNode(
@@ -432,6 +479,7 @@ function insertRouteGates(
   options: StoryCanvasModelOptions,
 ) {
   const transitionGroups = new Map<string, StoryCanvasEdge[]>();
+  const routeGateAnchors: RouteGateAnchor[] = [];
   edges
     .filter((item) => item.data?.kind === "transition")
     .forEach((item) => {
@@ -460,6 +508,27 @@ function insertRouteGates(
 
     const gateId = `route-gate:${routeSourceId}`;
     const ownerEventId = ownerEventIdForSource(routeSourceId);
+    const visualPosition = positionFor(
+      project,
+      gateId,
+      source.position.x + NODE_WIDTH + ROUTE_GATE_SOURCE_GAP,
+      source.position.y + 4,
+      scope,
+    );
+    const visualCenter = {
+      x: visualPosition.x + ROUTE_GATE_VISUAL_WIDTH / 2,
+      y: visualPosition.y + ROUTE_GATE_VISUAL_HEIGHT / 2,
+    };
+    routeGateAnchors.push({ id: gateId, centerX: visualCenter.x, centerY: visualCenter.y });
+    const logicMode = options.canvasLayerMode === "logic";
+    const gateWidth = logicMode ? ROUTE_GATE_LOGIC_WIDTH : ROUTE_GATE_VISUAL_WIDTH;
+    const gateHeight = logicMode ? ROUTE_GATE_LOGIC_HEIGHT : ROUTE_GATE_VISUAL_HEIGHT;
+    const gatePosition = logicMode
+      ? {
+          x: visualCenter.x - gateWidth / 2,
+          y: visualCenter.y - gateHeight / 2,
+        }
+      : visualPosition;
     const orderedRoutes = [...routes].sort((left, right) => {
       if (left.data?.mode === "fallback" && right.data?.mode !== "fallback") return 1;
       if (right.data?.mode === "fallback" && left.data?.mode !== "fallback") return -1;
@@ -479,8 +548,8 @@ function insertRouteGates(
       "routeGate",
       "Conditions",
       orderedRoutes.length ? `${orderedRoutes.length} routes` : "No routes yet",
-      source.position.x + NODE_WIDTH + 58,
-      source.position.y + 4,
+      gatePosition.x,
+      gatePosition.y,
       [
         `${orderedRoutes.length} routes`,
         ...(conditionalCount ? [`${conditionalCount} conditional`] : []),
@@ -512,8 +581,9 @@ function insertRouteGates(
         scope,
         // Visual mode keeps the junction as a compact, draggable knot. Logic
         // mode turns the same junction into a concise informational gate.
-        width: options.canvasLayerMode === "logic" ? 168 : 34,
-        height: options.canvasLayerMode === "logic" ? 92 : 34,
+        width: gateWidth,
+        height: gateHeight,
+        autoPosition: true,
       },
     );
 
@@ -539,6 +609,9 @@ function insertRouteGates(
     // individual transition from its context menu.
     if (routes.length >= 2) insertGate(routeSourceId, routes);
   });
+  if (options.canvasLayerMode === "logic") {
+    reflowLogicLayerAroundRouteGates(nodes, routeGateAnchors);
+  }
 }
 
 function boundaryPortId(eventId: string, direction: "input" | "output", ownerId: string) {

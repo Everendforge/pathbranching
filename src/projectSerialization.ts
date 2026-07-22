@@ -35,20 +35,11 @@ function normalizeLogicCapabilities(project: BranchingProject): {
   });
   const properties = (project.logicPropertyOverrides ?? []).map((override) => {
     if (!override.propertyId.startsWith("type:")) return override;
-    const typeId = override.propertyId.slice("type:".length);
-    if (override.grantable || override.location || override.runtimeRoles?.length) {
-      const key = `${override.source}:${typeId}`;
-      const current = types.get(key);
-      types.set(key, {
-        typeId,
-        source: override.source,
-        grantable: current?.grantable ?? override.grantable,
-        location: current?.location ?? override.location,
-        runtimeRoles: current?.runtimeRoles ?? override.runtimeRoles ?? (override.grantable ? ["owned"] : undefined),
-      });
-    }
-    const { grantable: _grantable, location: _location, runtimeRoles: _runtimeRoles, ...property } = override;
-    return property;
+
+    // Entity types are represented by properties in the current explorer
+    // model. Keep their capabilities beside the other property capabilities
+    // so a round-trip cannot detach grantable/location from the property.
+    return override;
   });
   return { logicPropertyOverrides: properties, logicTypeOverrides: Array.from(types.values()) };
 }

@@ -9594,22 +9594,14 @@ button:disabled {
 
 .logic-composer-row.effect { border-left-color: var(--pb-action); }
 .logic-composer-row.simple { grid-template-columns: minmax(110px, 1.3fr) minmax(90px, 1fr) minmax(110px, 1.2fr) 28px; }
+.logic-composer-row.simple.variable { grid-template-columns: minmax(100px, 1.1fr) minmax(100px, 1.1fr) minmax(110px, 1.2fr) minmax(90px, 1fr) 28px; }
 .logic-composer-row select,
 .logic-composer-row input { min-width: 0; width: 100%; }
 .logic-composer-empty-value { display: grid; min-height: 28px; place-items: center; color: var(--wn-muted); }
 .logic-row-capability-warning { display: inline-flex; align-items: center; gap: 3px; color: var(--wn-danger); font-size: 0.57rem; }
 .logic-composer-actions { justify-content: flex-start; }
 .logic-composer-actions button { display: inline-flex; align-items: center; gap: 4px; }
-.logic-composer-advanced { width: 100%; font-family: var(--wn-font-mono, monospace); font-size: 0.68rem; }
-.logic-expression-group { display: grid; gap: 6px; padding: 7px; border: 1px solid var(--wn-border); border-left: 3px solid var(--pb-decision); border-radius: 7px; background: color-mix(in srgb, var(--pb-decision) 4%, var(--wn-card)); }
-.logic-expression-group.depth-1 { margin-left: 8px; }
-.logic-expression-group.depth-2 { margin-left: 16px; }
-.logic-expression-group.depth-3 { margin-left: 24px; }
-.logic-expression-group-header,
-.logic-expression-actions { display: flex; align-items: center; gap: 5px; }
-.logic-expression-group-header { justify-content: space-between; }
-.logic-expression-children { display: grid; gap: 6px; }
-.logic-expression-actions button { display: inline-flex; align-items: center; gap: 4px; }
+.logic-composer-empty-state { margin: 0; color: var(--wn-muted); font-size: 0.64rem; line-height: 1.45; }
 .logic-composer-drop-message { margin: 0; padding: 6px 8px; border-radius: 6px; background: color-mix(in srgb, var(--pb-decision) 10%, var(--wn-card)); color: var(--wn-muted); font-size: 0.65rem; }
 .logic-composer-drop-choice { display: grid; gap: 5px; padding: 8px; border: 1px solid color-mix(in srgb, var(--pb-decision) 38%, var(--wn-border)); border-radius: 7px; background: color-mix(in srgb, var(--pb-decision) 6%, var(--wn-card)); }
 .logic-composer-drop-choice > strong { font-size: 0.68rem; }
@@ -9756,8 +9748,11 @@ button:disabled {
 }
 
 .story-node.route-junction.split {
+  box-sizing: border-box;
   width: 34px;
   height: 34px;
+  min-width: 34px;
+  min-height: 34px;
   padding: 0;
   border-color: transparent;
   background: transparent;
@@ -9771,6 +9766,7 @@ button:disabled {
   border-radius: 50%;
   background: color-mix(in srgb, var(--wn-muted) 82%, var(--wn-border));
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--wn-muted) 42%, var(--wn-border));
+  pointer-events: none;
 }
 
 .route-junction.split .react-flow__handle-left { left: -4px; }
@@ -9845,6 +9841,34 @@ button:disabled {
 
 .logic-layer-notice > div { display: flex; align-items: center; gap: 6px; color: var(--wn-muted); font-size: 0.67rem; }
 .logic-layer-notice button { flex: 0 0 auto; color: var(--pb-decision); }
+
+.in-development-placeholder {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  border-color: color-mix(in srgb, var(--pb-decision) 32%, var(--wn-border));
+  background: color-mix(in srgb, var(--pb-decision) 5%, var(--wn-panel));
+}
+.in-development-mark {
+  display: grid;
+  flex: 0 0 34px;
+  height: 34px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--pb-decision) 42%, var(--wn-border));
+  border-radius: 9px;
+  color: var(--pb-decision);
+  background: color-mix(in srgb, var(--pb-decision) 12%, var(--wn-card));
+}
+.in-development-placeholder > div:last-child { display: grid; gap: 4px; }
+.in-development-label {
+  color: var(--pb-decision);
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.in-development-placeholder h2 { margin: 0; }
+.in-development-placeholder p { margin: 0; color: var(--wn-muted); font-size: 0.7rem; line-height: 1.5; }
 
 .canvas-layer-visual .logic-composer { display: none; }
 

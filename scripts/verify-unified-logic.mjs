@@ -33,6 +33,10 @@ const project = normalizeProject(source);
 const owned = { type: "state", subject: { kind: "entity", entityId: "item:relic", source: "local" }, stateId: "owned", operator: "has" };
 const granted = applyLogicEffect({ type: "state", subject: owned.subject, stateId: "owned", operation: "grant" }, {});
 assert.equal(evaluateConditionInput(owned, project, granted), true);
+const visited = { type: "visited", subject: { kind: "progress", targetType: "event", targetId: "event:a" }, operator: "has" };
+const visitedState = { ...granted, visited: ["event:a"] };
+assert.equal(evaluateConditionInput(visited, project, visitedState), true, "Visited Has must match the event name/id");
+assert.equal(evaluateConditionInput({ ...visited, operator: "missing" }, project, visitedState), false, "Visited Has not must invert the event check");
 const damaged = applyLogicEffect({ type: "property", subject: owned.subject, propertyId: "durability", operation: "subtract", value: 1 }, {
   ...granted,
   entityStates: { ...granted.entityStates, "item:relic": { ...granted.entityStates?.["item:relic"], properties: { durability: 4 } } },
@@ -58,6 +62,31 @@ const effectFields = logicFieldOptions(project, owned.subject, "effect").map((fi
 assert.deepEqual(conditionFields, ["owned", "durability"]);
 assert.deepEqual(effectFields, ["owned", "durability"]);
 
+const persistedCapabilityProject = normalizeProject({
+  ...source,
+  localExplorerTypes: [],
+  localExplorerProperties: [{ id: "type:item", label: "Item", valueType: "entity-type", appliesToTypes: [] }],
+  logicTypeOverrides: [{ typeId: "item", source: "local", grantable: false, location: false }],
+  logicPropertyOverrides: [{
+    propertyId: "type:item",
+    source: "local",
+    conditionReadable: true,
+    actionWritable: true,
+    grantable: true,
+    location: true,
+  }],
+});
+const persistedCapability = persistedCapabilityProject.logicPropertyOverrides.find(
+  (override) => override.propertyId === "type:item" && override.source === "local",
+);
+assert.equal(persistedCapability?.conditionReadable, true);
+assert.equal(persistedCapability?.actionWritable, true);
+assert.equal(persistedCapability?.grantable, true, "grantable must stay with the entity-type property override");
+assert.equal(persistedCapability?.location, true, "location must stay with the entity-type property override");
+assert.equal(normalizeProject(persistedCapabilityProject).logicPropertyOverrides.find(
+  (override) => override.propertyId === "type:item" && override.source === "local",
+)?.grantable, true, "grantable must survive a second serialization normalization");
+
 const conditionalSplit = updateTransition(split, split.events[0].transitions[0].id, { conditions: owned }).project;
 conditionalSplit.events[0].transitions[1].mode = "fallback";
 const visualModel = buildStoryCanvasModel(conditionalSplit, { canvasLayerMode: "visual" });
@@ -66,11 +95,27 @@ const visualGate = visualModel.nodes.find((node) => node.id === "route-gate:even
 const logicGate = logicModel.nodes.find((node) => node.id === "route-gate:event:a");
 assert.equal(visualGate?.data.details?.junctionPresentation, "split");
 assert.equal(logicGate?.data.details?.junctionPresentation, "gate");
-assert.deepEqual(visualGate?.position, logicGate?.position, "layer toggles must preserve junction position");
-assert.ok((visualGate?.width ?? 999) <= 40, "Visual gates must use a compact draggable-knot footprint");
-assert.ok((visualGate?.height ?? 999) <= 40, "Visual gates must use a compact draggable-knot footprint");
+const visualGateCenter = {
+  x: (visualGate?.position.x ?? 0) + (visualGate?.width ?? 0) / 2,
+  y: (visualGate?.position.y ?? 0) + (visualGate?.height ?? 0) / 2,
+};
+const logicGateCenter = {
+  x: (logicGate?.position.x ?? 0) + (logicGate?.width ?? 0) / 2,
+  y: (logicGate?.position.y ?? 0) + (logicGate?.height ?? 0) / 2,
+};
+assert.deepEqual(visualGateCenter, logicGateCenter, "layer toggles must preserve the route-gate center");
+assert.equal(visualGate?.width, 34, "Visual gates must use a square selectable knot footprint");
+assert.equal(visualGate?.height, 34, "Visual gates must use a square selectable knot footprint");
 assert.ok((logicGate?.width ?? 0) >= 160, "Logic gates must have room for an informational summary");
 assert.ok((logicGate?.height ?? 0) > (visualGate?.height ?? 0), "Logic gates must expand beyond the visual knot");
+const visualSource = visualModel.nodes.find((node) => node.id === "event:a");
+const logicSource = logicModel.nodes.find((node) => node.id === "event:a");
+assert.equal(logicSource?.position.x, (visualSource?.position.x ?? 0) - 67, "Logic mode must make room on the left side of the expanded gate");
+assert.equal(
+  (visualGate?.position.x ?? 0) - ((visualSource?.position.x ?? 0) + (visualSource?.width ?? 230)),
+  (logicGate?.position.x ?? 0) - ((logicSource?.position.x ?? 0) + (logicSource?.width ?? 230)),
+  "the source-to-gate separation must remain stable between layers",
+);
 assert.equal(visualModel.nodes.find((node) => node.id === "event:a")?.data.logicSummary, undefined);
 assert.ok(logicModel.nodes.find((node) => node.id === "event:a")?.data.logicSummary);
 const visualRoute = visualModel.edges.find((edge) => edge.data?.kind === "transition" && edge.data?.conditions);

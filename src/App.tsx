@@ -1318,6 +1318,51 @@ function visibleCanvasFlowBounds(reactFlowInstance: ReactFlowInstance<any, any>)
   };
 }
 
+const CANVAS_LAYER_TRANSITION_MS = 360;
+
+function easeCanvasLayerTransition(progress: number) {
+  const inverse = 1 - progress;
+  return 1 - inverse * inverse * inverse;
+}
+
+function interpolateCanvasNodes(
+  fromNodes: StoryCanvasNode[],
+  targetNodes: StoryCanvasNode[],
+  progress: number,
+) {
+  const fromById = new Map(fromNodes.map((node) => [node.id, node]));
+  const interpolate = (from: number | undefined, to: number | undefined) => {
+    if (typeof from !== "number" || typeof to !== "number") return to;
+    return from + (to - from) * progress;
+  };
+
+  return targetNodes.map((target) => {
+    const from = fromById.get(target.id);
+    if (!from) return target;
+
+    const width = interpolate(from.width, target.width);
+    const height = interpolate(from.height, target.height);
+    const style = from.style || target.style
+      ? {
+          ...target.style,
+          ...(typeof width === "number" ? { width } : {}),
+          ...(typeof height === "number" ? { height } : {}),
+        }
+      : undefined;
+
+    return {
+      ...target,
+      position: {
+        x: interpolate(from.position.x, target.position.x) ?? target.position.x,
+        y: interpolate(from.position.y, target.position.y) ?? target.position.y,
+      },
+      width,
+      height,
+      style,
+    };
+  });
+}
+
 function ensureCanvasNodeVisible(
   reactFlowInstance: ReactFlowInstance<any, any>,
   node: StoryCanvasNode,
@@ -2098,6 +2143,19 @@ function InspectorContentTabs({
         </button>
       ))}
     </nav>
+  );
+}
+
+function InDevelopmentPlaceholder({ title }: { title: string }) {
+  return (
+    <section className="inspector-section in-development-placeholder" aria-label={`${title} in development`}>
+      <div className="in-development-mark" aria-hidden="true"><Sparkles size={18} /></div>
+      <div>
+        <span className="in-development-label">In Development</span>
+        <h2>{title}</h2>
+        <p>This logic surface will be configured separately from Logic Gates.</p>
+      </div>
+    </section>
   );
 }
 
@@ -6846,7 +6904,7 @@ function Inspector({
 
         {selectedDecisionContext?.decision ? (
           <>
-            <InspectorContentTabs value={objectInspectorTab} onChange={setObjectInspectorTab} tabs={[{ id: "overview", label: "Overview" }, { id: "choices", label: "Choices" }, ...(canvasLayerMode === "logic" ? [{ id: "conditions", label: "Conditions" }] : [])]} />
+            <InspectorContentTabs value={objectInspectorTab} onChange={setObjectInspectorTab} tabs={[{ id: "overview", label: "Overview" }, { id: "choices", label: "Choices" }, ...(canvasLayerMode === "logic" ? [{ id: "logic", label: "Logic" }] : [])]} />
             <section className="inspector-section">
               <h2>Decision</h2>
               {objectInspectorTab === "overview" ? <>
@@ -7005,28 +7063,13 @@ function Inspector({
               </div>
               </> : null}
             </section>
-            {objectInspectorTab === "conditions" ? <>
-            <BasicConditionEditor
-              project={project}
-              value={selectedDecisionContext.decision!.availability}
-              canonRefs={canonRefIds}
-              dataObjects={dataObjects}
-              grantableOptions={grantableOptionsList}
-              onChange={(availability) =>
-                onUpdateDecision(
-                  selectedDecisionContext.eventId,
-                  selectedDecisionContext.decision!.id,
-                  { availability },
-                )
-              }
-            />
-            </> : null}
+            {objectInspectorTab === "logic" ? <InDevelopmentPlaceholder title="Decision logic" /> : null}
           </>
         ) : null}
 
         {selectedDialogueBeatContext ? (
           <>
-            <InspectorContentTabs value={objectInspectorTab} onChange={setObjectInspectorTab} tabs={[{ id: "overview", label: "Content" }, ...(canvasLayerMode === "logic" ? [{ id: "conditions", label: "Conditions" }, { id: "consequences", label: "Consequences" }] : [])]} />
+            <InspectorContentTabs value={objectInspectorTab} onChange={setObjectInspectorTab} tabs={[{ id: "overview", label: "Content" }, ...(canvasLayerMode === "logic" ? [{ id: "logic", label: "Logic" }] : [])]} />
             {objectInspectorTab === "overview" ? (
             <section className="inspector-section">
               <h2>{selectedDialogueBeatContext.beat.kind === "speech" ? "Speech Beat" : "Direction Beat"}</h2>
@@ -7167,29 +7210,8 @@ function Inspector({
                 </div>
               </details>
 
-              <button
-                type="button"
-                className="danger"
-                onClick={() => selectedDialogueBeatContext.dialogueId
-                  ? onDeleteDialogueBeat(
-                    selectedDialogueBeatContext.eventId,
-                    selectedDialogueBeatContext.dialogueId,
-                    selectedDialogueBeatContext.beat.id,
-                  )
-                  : onDeleteEventDialogueBeat(
-                    selectedDialogueBeatContext.eventId,
-                    selectedDialogueBeatContext.beat.id,
-                  )}
-              >
-                Delete beat
-              </button>
-            </section>
-            ) : null}
-            {objectInspectorTab === "conditions" ? <>
-            <section className="inspector-section">
-              <h2>Location override</h2>
               <label className="field-label">
-                Location (falls back to event location when unset)
+                Location override
                 <select
                   value={selectedDialogueBeatContext.beat.locationRef ?? ""}
                   onChange={(input) => {
@@ -7209,31 +7231,26 @@ function Inspector({
                   ))}
                 </select>
               </label>
+
+              <button
+                type="button"
+                className="danger"
+                onClick={() => selectedDialogueBeatContext.dialogueId
+                  ? onDeleteDialogueBeat(
+                    selectedDialogueBeatContext.eventId,
+                    selectedDialogueBeatContext.dialogueId,
+                    selectedDialogueBeatContext.beat.id,
+                  )
+                  : onDeleteEventDialogueBeat(
+                    selectedDialogueBeatContext.eventId,
+                    selectedDialogueBeatContext.beat.id,
+                  )}
+              >
+                Delete beat
+              </button>
             </section>
-            <BasicConditionEditor
-              project={project}
-              label="Display condition"
-              value={selectedDialogueBeatContext.beat.displayCondition}
-              contextEntityIds={selectedBeatPresentEntityRefs}
-              canonRefs={canonRefIds}
-              dataObjects={dataObjects}
-              grantableOptions={grantableOptionsList}
-              onChange={(displayCondition) => selectedDialogueBeatContext.dialogueId
-                ? onUpdateDialogueBeat(selectedDialogueBeatContext.eventId, selectedDialogueBeatContext.dialogueId, selectedDialogueBeatContext.beat.id, { displayCondition })
-                : onUpdateEventDialogueBeat(selectedDialogueBeatContext.eventId, selectedDialogueBeatContext.beat.id, { displayCondition })}
-            />
-            </> : null}
-            {objectInspectorTab === "consequences" ? (
-            <ConsequenceEditor
-              project={project}
-              value={selectedDialogueBeatContext.beat.consequences}
-              contextEntityIds={selectedBeatPresentEntityRefs}
-              grantableOptions={grantableOptionsList}
-              onChange={(consequences) => selectedDialogueBeatContext.dialogueId
-                ? onUpdateDialogueBeat(selectedDialogueBeatContext.eventId, selectedDialogueBeatContext.dialogueId, selectedDialogueBeatContext.beat.id, { consequences })
-                : onUpdateEventDialogueBeat(selectedDialogueBeatContext.eventId, selectedDialogueBeatContext.beat.id, { consequences })}
-            />
             ) : null}
+            {objectInspectorTab === "logic" ? <InDevelopmentPlaceholder title="Speech beat logic" /> : null}
           </>
         ) : null}
 
@@ -7289,7 +7306,7 @@ function Inspector({
 
         {selectedDialogueContext?.dialogue ? (
           <>
-            <InspectorContentTabs value={objectInspectorTab} onChange={setObjectInspectorTab} tabs={[{ id: "overview", label: "Overview" }, ...(canvasLayerMode === "logic" ? [{ id: "conditions", label: "Conditions" }, { id: "consequences", label: "Consequences" }] : [])]} />
+            <InspectorContentTabs value={objectInspectorTab} onChange={setObjectInspectorTab} tabs={[{ id: "overview", label: "Overview" }, ...(canvasLayerMode === "logic" ? [{ id: "logic", label: "Logic" }] : [])]} />
             {objectInspectorTab === "overview" ? (
             <section className="inspector-section">
               <h2>Dialogue</h2>
@@ -7393,32 +7410,7 @@ function Inspector({
               </button>
             </section>
             ) : null}
-            {objectInspectorTab === "conditions" ? (
-            <BasicConditionEditor
-              project={project}
-              value={selectedDialogueContext.dialogue.availability}
-              contextEntityIds={selectedDialoguePresentEntityRefs}
-              canonRefs={canonRefIds}
-              dataObjects={dataObjects}
-              grantableOptions={grantableOptionsList}
-              onChange={(availability) =>
-                onUpdateDialogue(
-                  selectedDialogueContext.eventId,
-                  selectedDialogueContext.dialogue!.id,
-                  { availability },
-                )
-              }
-            />
-            ) : null}
-            {objectInspectorTab === "consequences" ? (
-            <ConsequenceEditor project={project} contextEntityIds={selectedDialoguePresentEntityRefs} value={selectedDialogueContext.dialogue.consequences} grantableOptions={grantableOptionsList} onChange={(consequences) =>
-                onUpdateDialogue(
-                  selectedDialogueContext.eventId,
-                  selectedDialogueContext.dialogue!.id,
-                  { consequences },
-                )
-              } />
-            ) : null}
+            {objectInspectorTab === "logic" ? <InDevelopmentPlaceholder title="Dialogue logic" /> : null}
           </>
         ) : null}
 
@@ -7450,7 +7442,7 @@ function Inspector({
 
         {selectedOutcomeContext?.outcome ? (
           <>
-            <InspectorContentTabs value={objectInspectorTab} onChange={setObjectInspectorTab} tabs={[{ id: "overview", label: "Overview" }, ...(canvasLayerMode === "logic" ? [{ id: "conditions", label: "Conditions" }, { id: "consequences", label: "Consequences" }] : [])]} />
+            <InspectorContentTabs value={objectInspectorTab} onChange={setObjectInspectorTab} tabs={[{ id: "overview", label: "Overview" }, ...(canvasLayerMode === "logic" ? [{ id: "logic", label: "Logic" }] : [])]} />
             {objectInspectorTab === "overview" ? (
             <section className="inspector-section">
               <h2>Outcome</h2>
@@ -7577,41 +7569,7 @@ function Inspector({
               </button>
             </section>
             ) : null}
-            {objectInspectorTab === "conditions" ? <>
-            <BasicConditionEditor
-              project={project}
-              label="Choice conditions"
-              value={selectedOutcomeContext.outcome!.availability}
-              canonRefs={canonRefIds}
-              dataObjects={dataObjects}
-              grantableOptions={grantableOptionsList}
-              onChange={(availability) =>
-                onUpdateOutcome(
-                  selectedOutcomeContext.eventId,
-                  selectedOutcomeContext.decisionId,
-                  selectedOutcomeContext.outcome!.id,
-                  { availability, conditions: availability },
-                )
-              }
-            />
-            </> : null}
-            {objectInspectorTab === "consequences" ? <>
-            <ConsequenceEditor
-              project={project}
-              value={selectedOutcomeContext.outcome!.consequences}
-              grantableOptions={grantableOptionsList}
-              onChange={(consequences) =>
-                onUpdateOutcome(
-                  selectedOutcomeContext.eventId,
-                  selectedOutcomeContext.decisionId,
-                  selectedOutcomeContext.outcome!.id,
-                  {
-                    consequences,
-                  },
-                )
-              }
-            />
-            </> : null}
+            {objectInspectorTab === "logic" ? <InDevelopmentPlaceholder title="Outcome logic" /> : null}
           </>
         ) : null}
 
@@ -11399,6 +11357,7 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
     dirty: false,
   });
   const [nodes, setNodes] = useState<StoryCanvasNode[]>([]);
+  const nodesRef = useRef<StoryCanvasNode[]>([]);
   const [edges, setEdges] = useState<StoryCanvasEdge[]>([]);
   const [files, setFiles] = useState<PathBranchingFileItem[]>([]);
   const [selection, setSelection] = useState<Selection>();
@@ -11445,6 +11404,7 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
   const [canvasLayerMode, setCanvasLayerMode] = useState<CanvasLayerMode>(() =>
     loadSettings().authoringDisplay.logicMode ? "logic" : "visual",
   );
+  const canvasLayerTransitionFrameRef = useRef<number | undefined>(undefined);
   const [focusNodeId, setFocusNodeId] = useState<string>();
   const [undoStack, setUndoStack] = useState<BranchingProject[]>([]);
   const [redoStack, setRedoStack] = useState<BranchingProject[]>([]);
@@ -11915,18 +11875,35 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
       if (!currentProject) return;
       const normalizedTypeId = typeId.startsWith("type:") ? typeId.slice("type:".length) : typeId;
 
-      const current = (currentProject.logicTypeOverrides ?? []).find(
+      const currentType = (currentProject.logicTypeOverrides ?? []).find(
         (item) => (item.typeId === normalizedTypeId || item.typeId === `type:${normalizedTypeId}`) && item.source === source,
-      ) ?? { typeId: normalizedTypeId, source };
+      );
+      const propertyId = `type:${normalizedTypeId}`;
+      const currentProperty = (currentProject.logicPropertyOverrides ?? []).find(
+        (item) => item.propertyId === propertyId && item.source === source,
+      );
+      const { typeId: _typeId, source: _source, ...typeCapabilities } = currentType ?? {};
 
       const updatedProject = {
         ...currentProject,
-        logicTypeOverrides: [
-          ...(currentProject.logicTypeOverrides ?? []).filter(
-            (item) => (item.typeId !== normalizedTypeId && item.typeId !== `type:${normalizedTypeId}`) || item.source !== source,
+        // Entity types are properties in the current Logic model. Move any
+        // legacy type capability data into that property override and keep all
+        // capabilities (grantable/location/readable/writable) together.
+        logicPropertyOverrides: [
+          ...(currentProject.logicPropertyOverrides ?? []).filter(
+            (item) => item.propertyId !== propertyId || item.source !== source,
           ),
-          { ...current, typeId: normalizedTypeId, ...changes },
+          {
+            ...typeCapabilities,
+            ...currentProperty,
+            propertyId,
+            source,
+            ...changes,
+          },
         ],
+        logicTypeOverrides: (currentProject.logicTypeOverrides ?? []).filter(
+            (item) => (item.typeId !== normalizedTypeId && item.typeId !== `type:${normalizedTypeId}`) || item.source !== source,
+        ),
       };
 
       void commitStructuralAction(
@@ -12814,6 +12791,10 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
   }, [settings, suiteChrome?.suiteSettings?.style, view]);
 
   useEffect(() => {
+    nodesRef.current = nodes;
+  }, [nodes]);
+
+  useEffect(() => {
     const currentProject = projectRef.current;
     if (!currentProject) return;
     const scope = activeCanvasScope(currentProject);
@@ -12825,9 +12806,40 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
       canvasLayerMode,
     });
     setActiveScopeState(scope);
-    setNodes(model.nodes);
     setEdges(model.edges);
     setFiles(model.files);
+
+    const fromNodes = nodesRef.current;
+    const shouldAnimate = fromNodes.length > 0 && model.nodes.length > 0;
+    if (!shouldAnimate) {
+      nodesRef.current = model.nodes;
+      setNodes(model.nodes);
+      return;
+    }
+
+    const startedAt = performance.now();
+    const animate = (timestamp: number) => {
+      const rawProgress = Math.min((timestamp - startedAt) / CANVAS_LAYER_TRANSITION_MS, 1);
+      const progress = easeCanvasLayerTransition(rawProgress);
+      const nextNodes = interpolateCanvasNodes(fromNodes, model.nodes, progress);
+      nodesRef.current = nextNodes;
+      setNodes(nextNodes);
+      if (rawProgress < 1) {
+        canvasLayerTransitionFrameRef.current = window.requestAnimationFrame(animate);
+      } else {
+        canvasLayerTransitionFrameRef.current = undefined;
+        nodesRef.current = model.nodes;
+        setNodes(model.nodes);
+      }
+    };
+
+    canvasLayerTransitionFrameRef.current = window.requestAnimationFrame(animate);
+    return () => {
+      if (canvasLayerTransitionFrameRef.current !== undefined) {
+        window.cancelAnimationFrame(canvasLayerTransitionFrameRef.current);
+        canvasLayerTransitionFrameRef.current = undefined;
+      }
+    };
   }, [canvasLayerMode, settings.authoringDisplay, settings.nodeColors]);
 
   const changeTheme = useCallback((theme: ThemeId) => {
@@ -12932,6 +12944,10 @@ export function App({ suiteChrome }: { suiteChrome?: SuiteChrome } = {}) {
   );
 
   const changeCanvasLayerMode = useCallback((mode: CanvasLayerMode) => {
+    if (mode === canvasLayerModeRef.current) return;
+    if (canvasLayerTransitionFrameRef.current !== undefined) {
+      window.cancelAnimationFrame(canvasLayerTransitionFrameRef.current);
+    }
     canvasLayerModeRef.current = mode;
     setCanvasLayerMode(mode);
     setSettings((current) => {

@@ -313,12 +313,21 @@ export function LogicPanel({
   };
   const updateTypeCapability = (changes: Partial<LogicTypeOverride>) => {
     if (propertyEditor && editingTypeId) {
+      const normalizedChanges = changes.grantable === undefined
+        ? changes
+        : {
+            ...changes,
+            runtimeRoles: [
+              ...(editingTypeCapability?.runtimeRoles ?? []).filter((role) => role !== "owned"),
+              ...(changes.grantable ? ["owned" as const] : []),
+            ],
+          };
       // For entity-type properties (prefixed with "type:"), use property overrides
       if (editingTypeId.startsWith("type:")) {
-        onUpdateLogicPropertyOverride(editingTypeId, propertyEditor.source, changes);
+        onUpdateLogicPropertyOverride(editingTypeId, propertyEditor.source, normalizedChanges);
       } else {
         // For legacy local types, use type overrides
-        onUpdateLogicTypeOverride(editingTypeId, propertyEditor.source, changes);
+        onUpdateLogicTypeOverride(editingTypeId, propertyEditor.source, normalizedChanges);
       }
     }
   };
