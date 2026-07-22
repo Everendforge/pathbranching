@@ -67,8 +67,10 @@ const logicGate = logicModel.nodes.find((node) => node.id === "route-gate:event:
 assert.equal(visualGate?.data.details?.junctionPresentation, "split");
 assert.equal(logicGate?.data.details?.junctionPresentation, "gate");
 assert.deepEqual(visualGate?.position, logicGate?.position, "layer toggles must preserve junction position");
-assert.equal(visualGate?.width, logicGate?.width, "layer toggles must preserve junction width");
-assert.equal(visualGate?.height, logicGate?.height, "layer toggles must preserve junction height");
+assert.ok((visualGate?.width ?? 999) <= 40, "Visual gates must use a compact draggable-knot footprint");
+assert.ok((visualGate?.height ?? 999) <= 40, "Visual gates must use a compact draggable-knot footprint");
+assert.ok((logicGate?.width ?? 0) >= 160, "Logic gates must have room for an informational summary");
+assert.ok((logicGate?.height ?? 0) > (visualGate?.height ?? 0), "Logic gates must expand beyond the visual knot");
 assert.equal(visualModel.nodes.find((node) => node.id === "event:a")?.data.logicSummary, undefined);
 assert.ok(logicModel.nodes.find((node) => node.id === "event:a")?.data.logicSummary);
 const visualRoute = visualModel.edges.find((edge) => edge.data?.kind === "transition" && edge.data?.conditions);
@@ -78,6 +80,13 @@ assert.equal(visualRoute?.animated, false);
 assert.equal(logicRoute?.data?.canvasLayerMode, "logic");
 assert.equal(logicRoute?.animated, true);
 assert.equal(logicRoute?.data?.routePreview?.conditionItems?.[0]?.subjectLabel, "Relic");
+const gateRouteEdges = logicModel.edges.filter((edge) => edge.source === "route-gate:event:a");
+assert.equal(gateRouteEdges.length, 2, "a Logic Gate must expose every outgoing route");
+assert.ok(gateRouteEdges.every((edge) => edge.sourceHandle === `route:${edge.id}`), "each route must leave through its own gate handle");
+const visualGateRouteEdges = visualModel.edges.filter((edge) => edge.source === "route-gate:event:a");
+assert.ok(visualGateRouteEdges.every((edge) => edge.sourceHandle === `route:${edge.id}`), "each Visual knot output must resolve to its own route handle");
+const gateOptions = logicGate?.data.details?.routeOptions;
+assert.equal(Array.isArray(gateOptions) ? gateOptions.length : 0, 2, "a Logic Gate must summarize every outgoing route");
 
 const disabledProject = normalizeProject({
   ...source,

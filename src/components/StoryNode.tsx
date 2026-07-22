@@ -520,18 +520,50 @@ function StoryNode({ id, data, selected }: NodeProps<StoryCanvasNode>) {
 
   if (nodeData.kind === "routeGate") {
     const split = nodeData.details?.junctionPresentation === "split";
+    const routeOptions = Array.isArray(nodeData.details?.routeOptions)
+      ? nodeData.details.routeOptions.filter((option): option is {
+        id: string;
+        handleId: string;
+        index: number;
+        mode: "conditional" | "fallback";
+        label: string;
+        condition: string;
+      } => Boolean(option) && typeof option === "object" && typeof (option as { id?: unknown }).id === "string" && typeof (option as { handleId?: unknown }).handleId === "string")
+      : [];
     return <div
       className={`story-node route-junction ${split ? "split" : "gate"}${selected ? " selected" : ""}`}
       aria-label={split ? `Branch point · ${nodeData.subtitle ?? "multiple routes"}` : `Logic Gate · ${nodeData.subtitle ?? "multiple routes"}`}
       style={colorStyle}
     >
       <Handle type="target" position={Position.Left} />
-      {split ? <span className="route-junction-dot" aria-hidden="true" /> : <>
+      {split ? <>
+        <span className="route-junction-dot" aria-hidden="true" />
+        {routeOptions.map((option) => (
+          <Handle
+            key={option.id}
+            id={option.handleId}
+            className="route-junction-output"
+            type="source"
+            position={Position.Right}
+          />
+        ))}
+      </> : <>
         <div className="route-gate-kicker"><GitBranch size={11} /> LOGIC GATE</div>
-        <div className="node-title">{nodeData.subtitle}</div>
-        <div className="route-gate-order">First valid route wins</div>
+        <div className="route-gate-summary">
+          <strong>{routeOptions.length} {routeOptions.length === 1 ? "route" : "routes"}</strong>
+          <span>{routeOptions.some((option) => option.mode === "fallback") ? "First valid route, then ELSE" : "First valid route wins"}</span>
+        </div>
+        {routeOptions.map((option) => (
+          <Handle
+            key={option.id}
+            id={option.handleId}
+            className="route-gate-output"
+            type="source"
+            position={Position.Right}
+          />
+        ))}
       </>}
-      <Handle type="source" position={Position.Right} />
+      {split && routeOptions.length === 0 ? <Handle type="source" position={Position.Right} /> : null}
     </div>;
   }
 

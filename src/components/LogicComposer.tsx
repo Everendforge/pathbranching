@@ -9,8 +9,10 @@ import type {
   LogicEffect,
   LogicEffectOperation,
   LogicPredicate,
+  LogicSubject,
 } from "../domain.js";
 import { asConditionExpressions, isConditionSet, migrateConditionInput, migrateConsequence } from "../logic.js";
+import { grantableEntities } from "../explorerSchema.js";
 import {
   LOGIC_COMPARISON_OPERATORS as comparisonOperators,
   logicEffectFor as effectFor,
@@ -39,7 +41,7 @@ function valueEditor(value: unknown, valueType: string | undefined, onChange: (v
   return <input type={valueType === "number" ? "number" : valueType === "date" ? "date" : "text"} value={String(value ?? "")} onChange={(event) => onChange(valueType === "number" ? Number(event.target.value) : event.target.value)} />;
 }
 
-function PredicateRow({ project, options, predicate, onChange, onRemove }: {
+function GenericPredicateRow({ project, options, predicate, onChange, onRemove }: {
   project: BranchingProject;
   options: SubjectOption[];
   predicate: LogicPredicate;
@@ -79,7 +81,7 @@ function PredicateRow({ project, options, predicate, onChange, onRemove }: {
   </div>;
 }
 
-function EffectRow({ project, options, effect, onChange, onRemove }: {
+function GenericEffectRow({ project, options, effect, onChange, onRemove }: {
   project: BranchingProject;
   options: SubjectOption[];
   effect: LogicEffect;
@@ -121,7 +123,189 @@ function EffectRow({ project, options, effect, onChange, onRemove }: {
   </div>;
 }
 
+function grantablePredicate(entityId: string): LogicPredicate {
+  return {
+    type: "state",
+    subject: { kind: "entity", entityId },
+    stateId: "owned",
+    operator: "has",
+  };
+}
+
+function variablePredicate(variableId: string): LogicPredicate {
+  return {
+    type: "value",
+    subject: { kind: "variable", variableId },
+    operator: "==",
+    value: true,
+  };
+}
+
+function grantableEffect(entityId: string): LogicEffect {
+  return {
+    type: "state",
+    subject: { kind: "entity", entityId },
+    stateId: "owned",
+    operation: "grant",
+  };
+}
+
+function variableEffect(variableId: string): LogicEffect {
+  return {
+    type: "value",
+    subject: { kind: "variable", variableId },
+    operation: "set",
+    value: true,
+  };
+}
+
+function isGrantablePredicate(predicate: LogicPredicate, ids: Set<string>): predicate is Extract<LogicPredicate, { type: "state" }> & { subject: Extract<LogicSubject, { kind: "entity" }> } {
+  return predicate.type === "state" && predicate.stateId === "owned" && predicate.subject.kind === "entity" && ids.has(predicate.subject.entityId);
+}
+
+function isVariablePredicate(predicate: LogicPredicate): predicate is Extract<LogicPredicate, { type: "value" }> & { subject: Extract<LogicSubject, { kind: "variable" }> } {
+  return predicate.type === "value" && predicate.subject.kind === "variable";
+}
+
+function isGrantableEffect(effect: LogicEffect, ids: Set<string>): effect is Extract<LogicEffect, { type: "state" }> & { subject: Extract<LogicSubject, { kind: "entity" }> } {
+  return effect.type === "state" && effect.stateId === "owned" && effect.subject.kind === "entity" && ids.has(effect.subject.entityId);
+}
+
+function isVariableEffect(effect: LogicEffect): effect is Extract<LogicEffect, { type: "value" }> & { subject: Extract<LogicSubject, { kind: "variable" }> } {
+  return effect.type === "value" && effect.subject.kind === "variable";
+}
+
+function PredicateRow({ project, options, predicate, onChange, onRemove }: {
+  project: BranchingProject;
+  options: SubjectOption[];
+  predicate: LogicPredicate;
+  onChange: (predicate: LogicPredicate) => void;
+  onRemove: () => void;
+}) {
+  const grantables = grantableEntities(project);
+  const grantableIds = new Set(grantables.map((entity) => entity.id));
+  const variables = project.logicVariables ?? [];
+  if (isGrantablePredicate(predicate, grantableIds)) {
+    return <div className="logic-composer-row simple">
+      <select aria-label="Condition type" value="grantable" onChange={(event) => {
+        if (event.target.value === "grantable") return;
+        const variableId = event.target.value.replace("variable:", "");
+        if (variableId) onChange(variablePredicate(variableId));
+      }}>
+        <option value="grantable">Grantable</option>
+        {variables.map((item) => <option key={item.id} value={`variable:${item.id}`}>Variable · {item.name}</option>)}
+      </select>
+      <select aria-label="Grantable condition action" value={predicate.operator} onChange={(event) => onChange({ ...predicate, operator: event.target.value as "has" | "missing" })}>
+        <option value="has">Have</option>
+        <option value="missing">Not have</option>
+      </select>
+      <select aria-label="Grantable entity" value={predicate.subject.entityId} onChange={(event) => onChange(grantablePredicate(event.target.value))}>
+        {grantables.map((entity) => <option key={`${entity.source}:${entity.id}`} value={entity.id}>{entity.label}</option>)}
+      </select>
+      <button type="button" className="icon-only danger" aria-label="Remove condition" onClick={onRemove}><Trash2 size={13} /></button>
+    </div>;
+  }
+
+  if (isVariablePredicate(predicate)) {
+    const variable = variables.find((item) => item.id === predicate.subject.variableId);
+    const variableOperators = variable?.type === "number"
+      ? ["==", "!=", ">", ">=", "<", "<="]
+      : ["==", "!="];
+    return <div className="logic-composer-row simple">
+      <select aria-label="Condition type" value={`variable:${predicate.subject.variableId}`} onChange={(event) => {
+        if (event.target.value === "grantable") {
+          const entityId = grantables[0]?.id;
+          if (entityId) onChange(grantablePredicate(entityId));
+          return;
+        }
+        const variableId = event.target.value.replace("variable:", "");
+        if (variableId) onChange(variablePredicate(variableId));
+      }}>
+        {grantables.length ? <option value="grantable">Grantable</option> : null}
+        {variables.map((item) => <option key={item.id} value={`variable:${item.id}`}>Variable · {item.name}</option>)}
+      </select>
+      <select aria-label="Variable condition action" value={predicate.operator} onChange={(event) => onChange({ ...predicate, operator: event.target.value as LogicPredicate["operator"] } as LogicPredicate)}>
+        {variableOperators.map((operator) => <option key={operator} value={operator}>{operator === "==" ? "Equal" : operator === "!=" ? "Not equal" : operator}</option>)}
+      </select>
+      {valueEditor(predicate.value, variable?.type, (value) => onChange({ ...predicate, value }))}
+      <button type="button" className="icon-only danger" aria-label="Remove condition" onClick={onRemove}><Trash2 size={13} /></button>
+    </div>;
+  }
+
+  {
+    return <GenericPredicateRow project={project} options={options} predicate={predicate} onChange={onChange} onRemove={onRemove} />;
+  }
+}
+
+function EffectRow({ project, options, effect, onChange, onRemove }: {
+  project: BranchingProject;
+  options: SubjectOption[];
+  effect: LogicEffect;
+  onChange: (effect: LogicEffect) => void;
+  onRemove: () => void;
+}) {
+  const grantables = grantableEntities(project);
+  const grantableIds = new Set(grantables.map((entity) => entity.id));
+  const variables = project.logicVariables ?? [];
+  if (isGrantableEffect(effect, grantableIds)) {
+    return <div className="logic-composer-row effect simple">
+      <select aria-label="Consequence type" value="grantable" onChange={(event) => {
+        if (event.target.value === "grantable") return;
+        const variableId = event.target.value.replace("variable:", "");
+        if (variableId) onChange(variableEffect(variableId));
+      }}>
+        <option value="grantable">Grantable</option>
+        {variables.map((item) => <option key={item.id} value={`variable:${item.id}`}>Variable · {item.name}</option>)}
+      </select>
+      <select aria-label="Grantable consequence action" value={effect.operation} onChange={(event) => onChange({ ...effect, operation: event.target.value as "grant" | "ungrant" })}>
+        <option value="grant">Add</option>
+        <option value="ungrant">Remove</option>
+      </select>
+      <select aria-label="Grantable entity" value={effect.subject.entityId} onChange={(event) => onChange(grantableEffect(event.target.value))}>
+        {grantables.map((entity) => <option key={`${entity.source}:${entity.id}`} value={entity.id}>{entity.label}</option>)}
+      </select>
+      <button type="button" className="icon-only danger" aria-label="Remove effect" onClick={onRemove}><Trash2 size={13} /></button>
+    </div>;
+  }
+
+  if (isVariableEffect(effect)) {
+    const variable = variables.find((item) => item.id === effect.subject.variableId);
+    const operations = variable?.type === "number"
+      ? ["set", "add", "subtract"]
+      : variable?.type === "list"
+        ? ["set", "append", "remove", "clear"]
+        : ["set", "clear"];
+    return <div className="logic-composer-row effect simple">
+      <select aria-label="Consequence type" value={`variable:${effect.subject.variableId}`} onChange={(event) => {
+        if (event.target.value === "grantable") {
+          const entityId = grantables[0]?.id;
+          if (entityId) onChange(grantableEffect(entityId));
+          return;
+        }
+        const variableId = event.target.value.replace("variable:", "");
+        if (variableId) onChange(variableEffect(variableId));
+      }}>
+        {grantables.length ? <option value="grantable">Grantable</option> : null}
+        {variables.map((item) => <option key={item.id} value={`variable:${item.id}`}>Variable · {item.name}</option>)}
+      </select>
+      <select aria-label="Variable consequence action" value={effect.operation} onChange={(event) => onChange({ ...effect, operation: event.target.value as LogicEffectOperation } as LogicEffect)}>
+        {operations.map((operation) => <option key={operation} value={operation}>{operation === "set" ? "Modify" : operation === "add" || operation === "append" ? "Add" : operation === "subtract" || operation === "remove" ? "Remove" : "Clear"}</option>)}
+      </select>
+      {effect.operation !== "clear" ? valueEditor(effect.value, variable?.type, (value) => onChange({ ...effect, value })) : <span className="logic-composer-empty-value">—</span>}
+      <button type="button" className="icon-only danger" aria-label="Remove effect" onClick={onRemove}><Trash2 size={13} /></button>
+    </div>;
+  }
+
+  {
+    return <GenericEffectRow project={project} options={options} effect={effect} onChange={onChange} onRemove={onRemove} />;
+  }
+}
+
 function firstPredicate(project: BranchingProject, options: SubjectOption[]): LogicPredicate | undefined {
+  const firstGrantable = grantableEntities(project)[0];
+  if (firstGrantable) return grantablePredicate(firstGrantable.id);
+  const firstVariable = project.logicVariables?.[0];
+  if (firstVariable) return variablePredicate(firstVariable.id);
   for (const option of options) {
     const field = fieldOptions(project, option.subject, "condition")[0];
     if (field) return predicateFor(option.subject, field);
@@ -130,6 +314,10 @@ function firstPredicate(project: BranchingProject, options: SubjectOption[]): Lo
 }
 
 function firstEffect(project: BranchingProject, options: SubjectOption[]): LogicEffect | undefined {
+  const firstGrantable = grantableEntities(project)[0];
+  if (firstGrantable) return grantableEffect(firstGrantable.id);
+  const firstVariable = project.logicVariables?.[0];
+  if (firstVariable) return variableEffect(firstVariable.id);
   for (const option of options) {
     const field = fieldOptions(project, option.subject, "effect")[0];
     if (field) return effectFor(option.subject, field);

@@ -460,7 +460,12 @@ function insertRouteGates(
 
     const gateId = `route-gate:${routeSourceId}`;
     const ownerEventId = ownerEventIdForSource(routeSourceId);
-    const conditionalCount = routes.filter((route) => route.data?.conditions).length;
+    const orderedRoutes = [...routes].sort((left, right) => {
+      if (left.data?.mode === "fallback" && right.data?.mode !== "fallback") return 1;
+      if (right.data?.mode === "fallback" && left.data?.mode !== "fallback") return -1;
+      return Number(left.data?.order ?? 0) - Number(right.data?.order ?? 0);
+    });
+    const conditionalCount = orderedRoutes.filter((route) => route.data?.conditions).length;
     const conditionBadges = Array.from(
       new Set(routes.flatMap((route) => conditionLabels(route.data?.conditions))),
     ).slice(0, 2);
@@ -473,11 +478,11 @@ function insertRouteGates(
       gateId,
       "routeGate",
       "Conditions",
-      routes.length ? `${routes.length} routes` : "No routes yet",
+      orderedRoutes.length ? `${orderedRoutes.length} routes` : "No routes yet",
       source.position.x + NODE_WIDTH + 58,
       source.position.y + 4,
       [
-        `${routes.length} routes`,
+        `${orderedRoutes.length} routes`,
         ...(conditionalCount ? [`${conditionalCount} conditional`] : []),
         ...conditionBadges,
         ...consequenceBadges,
@@ -485,22 +490,38 @@ function insertRouteGates(
       {
         routeSourceId,
         eventId: ownerEventId,
-        transitionIds: routes.map((route) => route.id),
+        transitionIds: orderedRoutes.map((route) => route.id),
+        routeOptions: orderedRoutes.map((route, index) => {
+          const preview = route.data?.routePreview as {
+            conditionItems?: LogicPresentation[];
+            conditions?: string[];
+          } | undefined;
+          return {
+            id: route.id,
+            handleId: `route:${route.id}`,
+            index,
+            mode: route.data?.mode === "fallback" ? "fallback" : "conditional",
+            label: typeof route.data?.customLabel === "string" ? route.data.customLabel : "",
+            condition: preview?.conditionItems?.[0]?.text ?? preview?.conditions?.[0] ?? "Always",
+          };
+        }),
         junctionPresentation: options.canvasLayerMode === "logic" ? "gate" : "split",
       },
-      { nodeColors: options.nodeColors, scope, width: 168, height: 76 },
+      {
+        nodeColors: options.nodeColors,
+        scope,
+        // Visual mode keeps the junction as a compact, draggable knot. Logic
+        // mode turns the same junction into a concise informational gate.
+        width: options.canvasLayerMode === "logic" ? 168 : 34,
+        height: options.canvasLayerMode === "logic" ? 92 : 34,
+      },
     );
 
     if (!routes.length) return;
     const sourceHandle = routes[0]?.sourceHandle;
-    const orderedRoutes = [...routes].sort((left, right) => {
-      if (left.data?.mode === "fallback" && right.data?.mode !== "fallback") return 1;
-      if (right.data?.mode === "fallback" && left.data?.mode !== "fallback") return -1;
-      return Number(left.data?.order ?? 0) - Number(right.data?.order ?? 0);
-    });
     orderedRoutes.forEach((route, routeIndex) => {
       route.source = gateId;
-      route.sourceHandle = undefined;
+      route.sourceHandle = `route:${route.id}`;
       if (route.data) {
         route.data.routeIndex = routeIndex;
         route.data.routeCount = orderedRoutes.length;

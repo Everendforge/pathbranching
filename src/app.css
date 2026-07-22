@@ -9376,6 +9376,98 @@ button:disabled {
   gap: 10px;
 }
 
+.route-gate-inspector {
+  position: relative;
+  display: grid;
+  gap: 10px;
+  padding-top: 12px;
+}
+
+.route-gate-inspector-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin: -5px -5px -2px;
+}
+
+.route-gate-inspector-actions button {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--wn-muted);
+  font-size: 1rem;
+}
+
+.route-gate-inspector-actions button:hover,
+.route-gate-inspector-actions button:focus-visible {
+  background: var(--wn-accent-soft);
+  color: var(--wn-text);
+}
+
+.event-minimized-title.route-gate-titleless {
+  display: none;
+}
+
+.route-gate-route-tabs {
+  display: flex;
+  gap: 3px;
+  overflow-x: auto;
+  padding: 3px;
+  border: 1px solid color-mix(in srgb, var(--pb-decision) 35%, var(--wn-border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--pb-decision) 6%, var(--wn-panel));
+}
+
+.route-gate-route-tabs button {
+  flex: 1 0 auto;
+  min-width: 58px;
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--wn-muted);
+  font-size: 0.65rem;
+  font-weight: 850;
+  letter-spacing: 0.04em;
+}
+
+.route-gate-route-tabs button.active {
+  background: color-mix(in srgb, var(--pb-decision) 17%, var(--wn-panel));
+  color: var(--pb-decision);
+}
+
+.route-gate-route-editor {
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--pb-decision) 38%, var(--wn-border));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--pb-decision) 4%, var(--wn-card));
+}
+
+.route-gate-route-editor.fallback {
+  border-style: dashed;
+}
+
+.route-gate-route-settings {
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--wn-border);
+}
+
+.route-gate-fallback-copy {
+  margin: 0;
+  padding: 8px;
+  border-radius: 6px;
+  background: var(--wn-panel);
+  color: var(--wn-muted);
+  font-size: 0.72rem;
+}
+
 .route-condition-card {
   display: grid;
   gap: 10px;
@@ -9501,8 +9593,10 @@ button:disabled {
 }
 
 .logic-composer-row.effect { border-left-color: var(--pb-action); }
+.logic-composer-row.simple { grid-template-columns: minmax(110px, 1.3fr) minmax(90px, 1fr) minmax(110px, 1.2fr) 28px; }
 .logic-composer-row select,
 .logic-composer-row input { min-width: 0; width: 100%; }
+.logic-composer-empty-value { display: grid; min-height: 28px; place-items: center; color: var(--wn-muted); }
 .logic-row-capability-warning { display: inline-flex; align-items: center; gap: 3px; color: var(--wn-danger); font-size: 0.57rem; }
 .logic-composer-actions { justify-content: flex-start; }
 .logic-composer-actions button { display: inline-flex; align-items: center; gap: 4px; }
@@ -9617,25 +9711,40 @@ button:disabled {
   transform: translateY(-50%);
 }
 
-.canvas-layer-logic .story-node:not(.route-junction) > :not(.node-logic-bands):not(.node-title):not(.node-header):not(.react-flow__handle):not(.react-flow__node-toolbar) {
-  opacity: 0.48;
-  filter: saturate(0.68);
-  transition: opacity 140ms ease, filter 140ms ease;
+.canvas-layer-logic .story-node:not(.route-junction) {
+  display: grid;
+  align-content: stretch;
+  gap: 7px;
+  padding: 9px;
+  background: color-mix(in srgb, var(--wn-card) 94%, var(--pb-decision));
 }
 
-.canvas-layer-logic .story-node:not(.route-junction) .node-header > :not(.node-title),
-.canvas-layer-logic .story-node:not(.route-junction) .event-node-header > :not(.node-title) {
-  opacity: 0.56;
+/* Logic is a distinct canvas language: narrative controls and artwork are not
+   merely dimmed, they leave the node entirely so conditions and effects own it. */
+.canvas-layer-logic .story-node:not(.route-junction) > :not(.node-logic-bands):not(.react-flow__handle):not(.react-flow__node-toolbar) {
+  display: none;
 }
 
-.canvas-layer-logic .story-node:not(.route-junction) input,
-.canvas-layer-logic .story-node:not(.route-junction) textarea,
-.canvas-layer-logic .story-node:not(.route-junction) select,
-.canvas-layer-logic .story-node:not(.route-junction) [contenteditable="true"] {
-  pointer-events: none;
+.canvas-layer-logic .story-node:not(.route-junction) .node-logic-bands {
+  position: static;
+  inset: auto;
+  width: 100%;
+  min-height: 100%;
+  gap: 7px;
+  pointer-events: auto;
 }
 
-.canvas-layer-logic .story-node:not(.route-junction) .node-logic-band { opacity: 1; filter: none; }
+.canvas-layer-logic .story-node:not(.route-junction) .node-logic-band {
+  min-height: 42px;
+  padding: 7px 8px;
+  white-space: normal;
+  box-shadow: none;
+}
+
+.canvas-layer-logic .story-node:not(.route-junction) .logic-band-summary {
+  flex-wrap: wrap;
+  overflow: visible;
+}
 
 .story-node.route-junction {
   position: relative;
@@ -9647,6 +9756,9 @@ button:disabled {
 }
 
 .story-node.route-junction.split {
+  width: 34px;
+  height: 34px;
+  padding: 0;
   border-color: transparent;
   background: transparent;
   box-shadow: none;
@@ -9661,12 +9773,15 @@ button:disabled {
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--wn-muted) 42%, var(--wn-border));
 }
 
-.route-junction.split .react-flow__handle-left { left: calc(50% - 10px); }
-.route-junction.split .react-flow__handle-right { right: calc(50% - 10px); }
-.route-junction.split .react-flow__handle { width: 5px; height: 5px; border: 0; background: transparent; }
+.route-junction.split .react-flow__handle-left { left: -4px; }
+.route-junction.split .route-junction-output { right: -4px; top: 50%; }
+.route-junction.split .react-flow__handle { width: 8px; height: 8px; border: 0; background: transparent; }
 
 .story-node.route-junction.gate {
-  gap: 3px;
+  display: grid;
+  align-content: start;
+  gap: 5px;
+  padding: 9px;
   border-color: color-mix(in srgb, var(--pb-decision) 52%, var(--wn-border));
   background: color-mix(in srgb, var(--pb-decision) 8%, var(--wn-panel));
   box-shadow: 0 12px 28px color-mix(in srgb, var(--pb-decision) 10%, transparent);
@@ -9683,8 +9798,10 @@ button:disabled {
   letter-spacing: 0.08em;
 }
 
-.route-junction.gate .node-title { text-align: center; font-size: 0.72rem; }
-.route-gate-order { color: var(--wn-muted); font-size: 0.52rem; text-align: center; }
+.route-gate-summary { display: grid; gap: 2px; text-align: center; }
+.route-gate-summary strong { color: var(--wn-text); font-size: 0.7rem; }
+.route-gate-summary span { color: var(--wn-muted); font-size: 0.53rem; }
+.route-junction.gate .route-gate-output { right: -5px; top: 50%; }
 
 .react-flow__edge-path.canvas-flow-edge { stroke-width: 1.5; }
 .react-flow__edge-path.canvas-route-edge { stroke: var(--pb-decision); stroke-width: 2; }

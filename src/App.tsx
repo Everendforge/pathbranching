@@ -5476,8 +5476,8 @@ function EventAuthoringDock({
                   <div className="event-editor-header">
                     <button
                       type="button"
-                      className="event-minimized-title"
-                      title={tab.title}
+                      className={`event-minimized-title${tab.id.startsWith("routeGate:") ? " route-gate-titleless" : ""}`}
+                      title={tab.id.startsWith("routeGate:") ? undefined : tab.title}
                       onClick={() => toggleInspectorTab(tab.id)}
                     >
                       <strong><TabIcon className="event-header-icon" size={14} /><span className="event-header-copy"><span className="event-header-name">{tab.title}</span></span></strong>
@@ -5575,7 +5575,7 @@ function EventAuthoringDock({
               >
                 {expanded ? <div className="event-inspector-card-resize-border" onPointerDown={(event) => resizeInspectorCard(event, tab.id)} title="Drag top border to resize" /> : null}
                 <div className="event-editor-header">
-                  <button type="button" className="event-minimized-title" title={tab.title} onClick={() => toggleInspectorTab(tab.id)}>
+                  <button type="button" className={`event-minimized-title${tab.id.startsWith("routeGate:") ? " route-gate-titleless" : ""}`} title={tab.id.startsWith("routeGate:") ? undefined : tab.title} onClick={() => toggleInspectorTab(tab.id)}>
                     <strong><TabIcon className="event-header-icon" size={14} /><span className="event-header-copy"><span className="event-header-name">{tab.title}</span></span></strong>
                   </button>
                   <div className="event-editor-actions">
@@ -5997,6 +5997,10 @@ function Inspector({
   const [transitionInspectorTab, setTransitionInspectorTab] = useState<
     "route" | "conditions" | "consequences"
   >("route");
+  const [routeGateRouteId, setRouteGateRouteId] = useState<string>();
+  const [routeGateInspectorTab, setRouteGateInspectorTab] = useState<
+    "conditions" | "consequences"
+  >("conditions");
   const [objectInspectorTab, setObjectInspectorTab] = useState("overview");
   const [inspectorLocale, setInspectorLocale] = useState(project.localizationCatalog?.primaryLocale ?? "und");
   const [metadataSectionCollapsed, setMetadataSectionCollapsed] = useState(true);
@@ -6171,14 +6175,21 @@ function Inspector({
         ),
       )
     : undefined;
+  const selectedRouteGateSourceId =
+    selectedNode?.data.kind === "routeGate" && typeof selectedNode.data.details?.routeSourceId === "string"
+      ? selectedNode.data.details.routeSourceId
+      : selection?.type === "node" && selection.id.startsWith("route-gate:")
+        ? selection.id.slice("route-gate:".length)
+        : undefined;
   const selectedRouteGateContext =
-    selectedNode?.data.kind === "routeGate" &&
-    typeof selectedNode.data.details?.routeSourceId === "string"
+    selectedRouteGateSourceId
       ? (() => {
-          const sourceId = selectedNode.data.details.routeSourceId as string;
-          const eventId = typeof selectedNode.data.details?.eventId === "string"
+          const sourceId = selectedRouteGateSourceId;
+          const eventId = typeof selectedNode?.data.details?.eventId === "string"
             ? selectedNode.data.details.eventId
-            : undefined;
+            : project.events.find((eventNode) =>
+                eventNode.transitions?.some((transition) => transition.from === sourceId),
+              )?.id;
           const routes = project.events
             .flatMap((eventNode) => eventNode.transitions ?? [])
             .filter((transition) => transition.from === sourceId)
@@ -6190,6 +6201,12 @@ function Inspector({
           return { sourceId, eventId, routes };
         })()
       : undefined;
+  const selectedRouteGateRoute = selectedRouteGateContext?.routes.find(
+    (route) => route.id === routeGateRouteId,
+  ) ?? selectedRouteGateContext?.routes[0];
+  const selectedRouteGateRouteIds = selectedRouteGateContext?.routes
+    .map((route) => route.id)
+    .join("|") ?? "";
   const selectedTransitionTarget = selectedTransition
     ? findEvent(project, selectedTransition.to)
     : undefined;
@@ -6210,6 +6227,15 @@ function Inspector({
   useEffect(() => {
     setTransitionInspectorTab("route");
   }, [selectedTransition?.id]);
+  useEffect(() => {
+    if (!selectedRouteGateContext?.routes.length) {
+      setRouteGateRouteId(undefined);
+      return;
+    }
+    if (!selectedRouteGateContext.routes.some((route) => route.id === routeGateRouteId)) {
+      setRouteGateRouteId(selectedRouteGateContext.routes[0].id);
+    }
+  }, [routeGateRouteId, selectedRouteGateContext?.sourceId, selectedRouteGateRouteIds]);
   useEffect(() => {
     setObjectInspectorTab("overview");
   }, [selection?.type, selection?.id]);
@@ -6374,7 +6400,7 @@ function Inspector({
 
   return (
     <aside className={`canvas-inspector ${embedded ? "embedded" : ""}`}>
-      {!embedded ? (
+      {!embedded && !selectedRouteGateContext ? (
         <div className="inspector-header inspector-object-header">
           <div className="inspector-object-identity">
             <span className="inspector-object-icon" aria-hidden="true">
@@ -7618,10 +7644,9 @@ function Inspector({
 
         {selectedRouteGateContext && canvasLayerMode === "logic" ? (
           <section className="inspector-section route-gate-inspector">
-            <h2>Conditions</h2>
-            <p className="inspector-connection-hint">
-              Each route below is checked in order — the first whose condition passes is taken, and its consequences fire. Draw a new edge from the Gate to add another route.
-            </p>
+            {!embedded ? <div className="route-gate-inspector-actions">
+              <button type="button" title="Close inspector" aria-label="Close inspector" onClick={onClose}>×</button>
+            </div> : null}
             {!selectedRouteGateContext.routes.length ? (
               <div className="route-condition-card fallback">
                 <p className="inspector-connection-hint">
@@ -7657,115 +7682,97 @@ function Inspector({
                 ) : null}
               </div>
             ) : null}
-            <div className="route-condition-list">
-              {selectedRouteGateContext.routes.map((route, index) => {
+            {selectedRouteGateContext.routes.length ? <>
+              <nav className="route-gate-route-tabs" aria-label="Logic Gate routes">
+                {selectedRouteGateContext.routes.map((route, index) => {
+                  const isFallback = route.mode === "fallback";
+                  return <button
+                    key={route.id}
+                    type="button"
+                    className={selectedRouteGateRoute?.id === route.id ? "active" : ""}
+                    onClick={() => setRouteGateRouteId(route.id)}
+                  >
+                    {isFallback ? "ELSE" : `IF ${index + 1}`}
+                  </button>;
+                })}
+              </nav>
+              {selectedRouteGateRoute ? (() => {
+                const route = selectedRouteGateRoute;
+                const index = selectedRouteGateContext.routes.findIndex((item) => item.id === route.id);
                 const isFallback = route.mode === "fallback";
-                const conditionSummary = conditionLabels(route.conditions).join(", ");
-                const consequenceSummary = (route.consequences ?? []).map(consequenceLabel).join(", ");
-                return (
-                  <div className={`route-condition-card${isFallback ? " fallback" : ""}`} key={route.id}>
-                    <div className="route-condition-header">
-                      <span className="route-condition-badge">{isFallback ? "else" : index + 1}</span>
-                      <div className="route-condition-header-fields">
-                        <label className="field-label">
-                          Mode
-                          <select
-                            value={route.mode ?? "conditional"}
-                            onChange={(event) =>
-                              onUpdateTransition(route.id, {
-                                mode: event.target.value as "conditional" | "fallback",
-                              })
-                            }
-                          >
-                            <option value="conditional">If / else-if</option>
-                            <option value="fallback">Else fallback</option>
-                          </select>
-                        </label>
-                        <label className="field-label">
-                          Destination
-                          <select
-                            value={route.to}
-                            onChange={(event) =>
-                              onUpdateTransition(route.id, { to: event.target.value })
-                            }
-                          >
-                            {nodes
-                              .filter(
-                                (node) =>
-                                  node.id !== selectedRouteGateContext.sourceId &&
-                                  node.data.kind !== "routeGate",
-                              )
-                              .map((node) => (
-                                <option key={node.id} value={node.id}>
-                                  {node.data.title}
-                                </option>
-                              ))}
-                          </select>
-                        </label>
-                        {!isFallback ? (
-                          <label className="field-label">
-                            Order
-                            <input
-                              type="number"
-                              min={1}
-                              value={(route.order ?? index) + 1}
-                              onChange={(event) =>
-                                onUpdateTransition(route.id, {
-                                  order: Math.max(0, Number(event.target.value) - 1),
-                                })
-                              }
-                            />
-                          </label>
-                        ) : null}
-                      </div>
-                      <button
-                        type="button"
-                        className="icon-only danger"
-                        title="Delete route"
-                        aria-label="Delete route"
-                        onClick={() => onDeleteTransition(route.id)}
-                      >
-                        <Trash2 size={14} />
-                      </button>
+                return <div className={`route-gate-route-editor${isFallback ? " fallback" : ""}`}>
+                  <div className="route-condition-header route-gate-route-settings">
+                    <div className="route-condition-header-fields">
+                      <label className="field-label">
+                        Mode
+                        <select
+                          value={route.mode ?? "conditional"}
+                          onChange={(event) => onUpdateTransition(route.id, {
+                            mode: event.target.value as "conditional" | "fallback",
+                          })}
+                        >
+                          <option value="conditional">If / else-if</option>
+                          <option value="fallback">Else fallback</option>
+                        </select>
+                      </label>
+                      <label className="field-label">
+                        Destination
+                        <select value={route.to} onChange={(event) => onUpdateTransition(route.id, { to: event.target.value })}>
+                          {nodes
+                            .filter((node) => node.id !== selectedRouteGateContext.sourceId && node.data.kind !== "routeGate")
+                            .map((node) => <option key={node.id} value={node.id}>{node.data.title}</option>)}
+                        </select>
+                      </label>
+                      {!isFallback ? <label className="field-label">
+                        Order
+                        <input
+                          type="number"
+                          min={1}
+                          value={(route.order ?? index) + 1}
+                          onChange={(event) => onUpdateTransition(route.id, {
+                            order: Math.max(0, Number(event.target.value) - 1),
+                          })}
+                        />
+                      </label> : null}
                     </div>
-                    {!isFallback && (conditionSummary || consequenceSummary) ? (
-                      <p className="route-condition-summary">
-                        {conditionSummary ? `If ${conditionSummary}` : "Always"}
-                        {consequenceSummary ? ` → ${consequenceSummary}` : ""}
-                      </p>
-                    ) : null}
-                    {!isFallback ? (
-                      <BasicConditionEditor
-                        project={project}
-                        label="Condition"
-                        value={route.conditions}
-                        canonRefs={canonRefIds}
-                        dataObjects={dataObjects}
-                        grantableOptions={grantableOptionsList}
-                        compact
-                        onChange={(conditions) =>
-                          onUpdateTransition(route.id, { conditions })
-                        }
-                      />
-                    ) : (
-                      <p className="inspector-connection-hint">
-                        This route runs when none of the previous conditions match.
-                      </p>
-                    )}
-                    <ConsequenceEditor
+                    <button
+                      type="button"
+                      className="icon-only danger"
+                      title="Delete route"
+                      aria-label="Delete route"
+                      onClick={() => onDeleteTransition(route.id)}
+                    ><Trash2 size={14} /></button>
+                  </div>
+                  <InspectorContentTabs
+                    value={routeGateInspectorTab}
+                    onChange={(tab) => setRouteGateInspectorTab(tab as "conditions" | "consequences")}
+                    tabs={[
+                      { id: "conditions", label: "Conditions" },
+                      { id: "consequences", label: "Consequences" },
+                    ]}
+                  />
+                  {routeGateInspectorTab === "conditions" ? (
+                    !isFallback ? <BasicConditionEditor
                       project={project}
-                      title="Consequences"
-                      value={route.consequences}
+                      label="WHEN"
+                      value={route.conditions}
+                      canonRefs={canonRefIds}
+                      dataObjects={dataObjects}
                       grantableOptions={grantableOptionsList}
                       compact
-                      onChange={(consequences) =>
-                        onUpdateTransition(route.id, { consequences })
-                      }
-                    />
-                  </div>
-                );
-              })}
-            </div>
+                      onChange={(conditions) => onUpdateTransition(route.id, { conditions })}
+                    /> : <p className="route-gate-fallback-copy">Runs when no preceding IF route matches.</p>
+                  ) : <ConsequenceEditor
+                    project={project}
+                    title="THEN"
+                    value={route.consequences}
+                    grantableOptions={grantableOptionsList}
+                    compact
+                    onChange={(consequences) => onUpdateTransition(route.id, { consequences })}
+                  />}
+                </div>;
+              })() : null}
+            </> : null}
           </section>
         ) : null}
 
