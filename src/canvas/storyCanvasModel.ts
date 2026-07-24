@@ -1285,7 +1285,7 @@ function buildEventScopeModel(
       420 + index * 168,
       logicBadges(beat.displayCondition, beat.consequences?.length ?? 0),
       { eventId: eventNode.id, dialogueId, beat, block, isEventBeat: !dialogueId },
-      { nodeColors: options.nodeColors, scope },
+      { nodeColors: options.nodeColors, scope, width: 360, height: 190 },
     );
   });
 
@@ -1497,7 +1497,7 @@ function buildDialogueScopeModel(
       90 + Math.floor(index / 2) * 175,
       logicBadges(beat.displayCondition, beat.consequences?.length ?? 0),
       { eventId: eventNode.id, dialogueId: dialogue.id, beat, block },
-      { nodeColors: options.nodeColors, scope },
+      { nodeColors: options.nodeColors, scope, width: 360, height: 190 },
     );
   });
 

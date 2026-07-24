@@ -6498,12 +6498,6 @@ function Inspector({
       ) : null}
 
       <div className="inspector-scroll">
-        {canvasLayerMode === "visual" && (selectedNode || selectedEdge) ? (
-          <section className="inspector-section logic-layer-notice">
-            <div><GitBranch size={15} /><span>Conditions and effects are hidden in the Visual layer.</span></div>
-            <button type="button" onClick={() => onCanvasLayerModeChange("logic")}>Open in Logic</button>
-          </section>
-        ) : null}
         {sequence ? (
           <section className="inspector-section">
             <h2>Sequence</h2>
